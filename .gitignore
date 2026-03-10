@@ -1,6 +1,7 @@
 #Data and Model folders
 0 Data and Models/
 credentials.json
+master_credentials.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
