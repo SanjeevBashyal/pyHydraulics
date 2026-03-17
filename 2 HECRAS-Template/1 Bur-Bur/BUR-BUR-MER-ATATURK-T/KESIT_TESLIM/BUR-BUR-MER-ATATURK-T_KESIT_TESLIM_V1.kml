@@ -1,0 +1,324 @@
+﻿<kml xmlns="http://earth.google.com/kml/2.0">
+<Document>
+<Style id="default0">
+<IconStyle>
+<scale>1</scale>
+</IconStyle>
+</Style>
+<Folder>
+<name>Netcad Verileri</name>
+
+<ScreenOverlay>
+<name>www.netcad.com.tr</name>
+<visibility>1</visibility>
+<Icon>
+<href>http://download.netcadportal.com/images/netcad_logo.jpg</href>
+</Icon>
+<overlayXY x="0" y="1" xunits="fraction" yunits="fraction"/>
+<screenXY x="0" y="1" xunits="fraction" yunits="fraction"/>
+<size x="0" y="0" xunits="pixels" yunits="pixels"/>
+</ScreenOverlay>
+
+<Folder><name>KESIT_HAT</name>
+<Placemark>
+<name>İsimsiz - 0</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2483450589999,37.7081420444638,0 30.2485624735869,37.7081487570532,0 30.2487255487966,37.7081537909185,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 1</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2483810655778,37.7076561178255,0 30.2485800607509,37.7076692970926,0 30.2487495795624,37.7076805250795,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 10</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2484391577759,37.7085967264263,0 30.2485447314583,37.7085845032329,0 30.2487130639614,37.7085650129025,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 2</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2481800699641,37.707121883911,0 30.2483979990224,37.7071218839551,0 30.2485681040231,37.7071218839551,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 3</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2482174647061,37.7065485627407,0 30.2483870668566,37.7065381867318,0 30.2485726039565,37.7065268369275,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 4</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2481796404538,37.7060150844122,0 30.2483636003909,37.7060361972686,0 30.2485319553879,37.7060555192683,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 5</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2483320622356,37.7054507439839,0 30.248522736983,37.705514546445,0 30.2486795026928,37.7055670024247,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 6</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2493066430494,37.7046647460825,0 30.2495630345932,37.7048539030259,0 30.2497236387313,37.7049723892894,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 7</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.248846938741,37.7049918610223,0 30.2489699726899,37.705122453379,0 30.2490719036922,37.7052306473802,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 8</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2491235469673,37.7048241661399,0 30.2492485100838,37.704956805664,0 30.2494173270989,37.705135994466,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 9</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7F0080FF</color></LineStyle><PolyStyle><color>7F0080FF</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.2484400963978,37.7085916527173,0 30.2485438396302,37.7085796414504,0 30.2487121721048,37.7085601511233,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+</Folder>
+<Folder><name>SEV_SEVUSTU</name>
+<Placemark>
+<name>İsimsiz - 11</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7FFF0000</color></LineStyle><PolyStyle><color>7FFF0000</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.249597158225,37.7047769296582,0 30.249581482523,37.704838664677,0 30.2495746379594,37.7048624634699,0 30.2495740810101,37.704905337999,0 30.2495545926111,37.7049256527937,0 30.2495250591095,37.704946190212,0 30.2494202537115,37.7049937174122,0 30.2493744303367,37.7050051135474,0 30.2493457571558,37.7050018274162,0 30.2492910498858,37.7049681925957,0 30.2492543968424,37.7049630541122,0 30.2491869111333,37.7049939790906,0 30.2490706660982,37.7050619972364,0 30.2489727927797,37.7051254467505,0 30.2489094761206,37.7051676091388,0 30.2488156867731,37.7052230542328,0 30.2487401838106,37.7052655397667,0 30.2486762372964,37.7053051784958,0 30.2486279267219,37.7053399192763,0 30.2486026691769,37.7053637243292,0 30.2485825723762,37.7053893403353,0 30.2485660372644,37.7054206444375,0 30.24852406776,37.7055149917426,0 30.2484527449599,37.7056885173333,0 30.2484286466016,37.7057472624685,0 30.2484005666901,37.7058215691225,0 30.2483940606844,37.7058413565604,0 30.2483871648696,37.7059483852577,0 30.2483862842395,37.7060388006946,0 30.2483904249416,37.7062049761883,0 30.2484030196027,37.7063858787632,0 30.2484025011899,37.7065372425833,0 30.2484006740619,37.7066870477593,0 30.2484020695222,37.7068985594785,0 30.2483966731006,37.7069628081227,0 30.2483866767296,37.7070331563517,0 30.2483823906561,37.7070622194095,0 30.248388053508,37.7071218839619,0 30.2484016234118,37.7071661756118,0 30.2484123657046,37.707195642154,0 30.2484300212959,37.7072235625927,0 30.24847324037,37.7072612707111,0 30.2485351697059,37.7073155547985,0 30.2485522065464,37.7073448641363,0 30.2485632037131,37.7073703502215,0 30.248571511821,37.7074064805517,0 30.2485878788119,37.7076168443202,0 30.2485897686268,37.7076699400952,0 30.2485914708967,37.7077557509042,0 30.2485786136187,37.707890034317,0 30.2485642551977,37.7080417052279,0 30.2485554027847,37.7081248486101,0 30.2485546476525,37.7081485154375,0 30.2485617410302,37.7082314918786,0 30.2485814010697,37.7083280307293,0 30.2486219632914,37.7084786180057,0 30.2486482855947,37.708567548234,0 30.2486497864693,37.708572339498,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+<Placemark>
+<name>İsimsiz - 12</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<open>0</open>
+<Style><LineStyle><color>7FFF0000</color></LineStyle><PolyStyle><color>7FFF0000</color></PolyStyle></Style>
+<LineString>
+<extrude>1</extrude>
+<tessellate>1</tessellate>
+<coordinates>
+30.248608699674,37.7085770967209,0 30.2486083303389,37.7085721744418,0 30.2485808784311,37.7084643185708,0 30.248548501433,37.7083465372139,0 30.2485238838988,37.708228335525,0 30.248515121332,37.7081472951053,0 30.2485225582113,37.7080657446136,0 30.2485423571412,37.7078437731733,0 30.2485539651425,37.7077300568499,0 30.2485522129951,37.7076674527818,0 30.2485447565362,37.7075601831057,0 30.2485338760855,37.7074256004438,0 30.2485280104806,37.707383027934,0 30.2485137309359,37.7073485381832,0 30.2485007430024,37.707330832855,0 30.2484270983663,37.7072714937601,0 30.2483956848593,37.7072412785062,0 30.2483764906461,37.7072116265559,0 30.2483522851325,37.7071407494965,0 30.2483507529142,37.7071218839798,0 30.2483436865992,37.7070541140663,0 30.2483570406189,37.7069622115861,0 30.2483622596342,37.7068859271418,0 30.2483632554047,37.7067788428466,0 30.2483592415229,37.7066559259731,0 30.2483638243984,37.7065396086856,0 30.2483627419732,37.7063727621352,0 30.24835144085,37.7061652405687,0 30.2483496718468,37.7060345987171,0 30.2483501547833,37.7058846902196,0 30.248358009558,37.7058252934979,0 30.2483828287775,37.7057498080916,0 30.2484890208738,37.7055032645896,0 30.2485470055326,37.7053749905029,0 30.2485622179493,37.7053514080068,0 30.248581079718,37.7053322606689,0 30.2486015375054,37.7053163962156,0 30.2486638798341,37.7052732530139,0 30.2487860394191,37.7052020432897,0 30.2488329943475,37.7051741375464,0 30.2489490183695,37.7051002118029,0 30.2490287869833,37.7050462306773,0 30.2491294397802,37.7049879095133,0 30.2492254380758,37.7049323164026,0 30.2492681599431,37.7049059415998,0 30.2493607392028,37.7048250771293,0 30.2494359116754,37.7047601162606,0 30.2494747301858,37.7047007341256,0 
+</coordinates>
+</LineString>
+</Placemark>
+
+</Folder>
+<Folder><name>KESIT_AD</name>
+<Placemark>
+<name>1</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2493066430494,37.7046647460824,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>10</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2484400963978,37.7085916527172,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>11</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2484391577759,37.7085967264262,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>2</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2491235469673,37.7048241661398,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>3</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.248846938741,37.7049918610222,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>4</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2483320622356,37.7054507439838,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>5</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2481796404538,37.7060150844121,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>6</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2482174647061,37.7065485627406,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>7</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2481800699641,37.7071218839108,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>8</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2483810655778,37.7076561178254,0 </coordinates>
+</Point>
+</Placemark>
+
+<Placemark>
+<name>9</name>
+<styleUrl>#default0</styleUrl>
+<visibility>1</visibility>
+<Point>
+<coordinates>30.2483450589999,37.7081420444637,0 </coordinates>
+</Point>
+</Placemark>
+
+</Folder>
+</Folder>
+</Document>
+</kml>
