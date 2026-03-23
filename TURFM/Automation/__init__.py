@@ -1,9 +1,12 @@
 """
-pyHydraulics - A Python package for hydraulic engineering calculations and HEC-RAS automation.
+Automation helpers for HEC-RAS and terrain preprocessing.
 """
 
-from .hecras import HECRAS
 from .DTM import DTMChannelModifier
+from .hecras import HECRAS
 
 __version__ = "0.1.0"
-__all__ = ["HECRAS", "DTMChannelModifier"]
+__all__ = [
+    "DTMChannelModifier",
+    "HECRAS",
+]
