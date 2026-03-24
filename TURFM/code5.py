@@ -1,13 +1,12 @@
 import os
 import rasterio
 import numpy as np
-
+from rasterio.merge import merge
 from Automation.DTM import DTMChannelModifier
 
 PROJECT_FOLDER = r"C:\Users\Ripple\Downloads\Turkey Flood\9 HECRAS-Test"
 PROJECT_SHORT_NAME = "ATATURK-T"
 PROJECT_LONG_NAME = "BUR-BUR-MER-" + PROJECT_SHORT_NAME
-
 DEM_PATH = os.path.join(PROJECT_FOLDER, 'SET4_27_DTM_070226_R1.tif')
 
 # Setup Paths
@@ -27,25 +26,31 @@ BLEND_TYPE = 'linear'
 # ================================
 
 def generate_blended_terrain_dtm():
-    print(f"Running terrain mapping with '{BLEND_TYPE}' fading boundary logic...")
+    print(f"Running ultra-fast terrain mapping with '{BLEND_TYPE}' fading boundary logic...")
 
-    # Process all mathematically mapped cells natively
-    results, modifier = DTMChannelModifier.process_dtm_cells(
+    # Bypass massive Python dict list generation (return_dicts=False) to execute strictly in C-native NumPy arrays
+    _, modifier = DTMChannelModifier.process_dtm_cells(
         dtm_path=DEM_PATH,
         cross_section_csv=CROSS_SECTION_FILE_PATH,
         bank_shp_path=BANK_LINE_FILE_PATH,
         target_res=0.1,
         buffer_m=20.0,
         break_after_first=False,
-        blend_type=BLEND_TYPE
+        blend_type=BLEND_TYPE,
+        return_dicts=False
     )
 
-    if not results:
-        print("No cells found inside the target geometries.")
+    if modifier is None:
+        print("Failed to map matrices.")
         return
 
-    out_tif_path = os.path.join(OUTPUT_PATH, f"terrain_blended_dtm_{BLEND_TYPE}.tif")
-    print(f"\nWriting new continuous blended surface to natively integrated GeoTIFF: {out_tif_path} ...")
+    # Extract master CRS exactly to prevent strict string mismatch errors during merge
+    with rasterio.open(DEM_PATH, 'r') as src:
+        master_crs = src.crs
+
+    # 1. Save the strictly modified window chunk
+    out_tif_path = os.path.join(OUTPUT_PATH, f"terrain_blended_window_{BLEND_TYPE}.tif")
+    print(f"\nWriting natively interpolated window surface to GeoTIFF: {out_tif_path} ...")
     
     with rasterio.open(
         out_tif_path,
@@ -55,14 +60,13 @@ def generate_blended_terrain_dtm():
         width=modifier.dtm_data.shape[1],
         count=1,
         dtype=modifier.dtm_data.dtype,
-        crs=modifier.dtm_crs,
+        crs=master_crs,
         transform=modifier.dtm_transform,
         nodata=-9999
     ) as dest:
         dest.write(modifier.dtm_data, 1)
 
     print("Success! Process complete.")
-
 
 if __name__ == "__main__":
     generate_blended_terrain_dtm()

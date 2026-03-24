@@ -291,46 +291,80 @@ class DTMChannelModifier:
             if use_cache:
                 self._cl_widths_cache = widths
                 self._cl_coords_cache = cl_coords
+        
+        import shapely
+        has_shapely2 = hasattr(shapely, 'line_locate_point')
+
+        x_in = np.asarray(x)
+        y_in = np.asarray(y)
+        x_flat = x_in.ravel()
+        y_flat = y_in.ravel()
+        
+        pts_xy = np.column_stack((x_flat, y_flat))
+        N = len(pts_xy)
+        
+        # cl_coords and widths are already defined from the cache logic above
+        K = len(cl_coords)
+        
+        if has_shapely2 and K > 1 and hasattr(self, 'centerline_gdf'):
+            # Massive C-native acceleration avoiding pure python N*K loops
+            pts_shp = shapely.points(x_flat, y_flat)
+            cl_line = self.centerline_gdf.geometry.iloc[0]
+            
+            # Find 1D distance exactly natively mapped within millisecond threshold
+            d_cl = shapely.line_locate_point(cl_line, pts_shp)
+            
+            # Find exact intersection coordinates natively
+            intersections = shapely.line_interpolate_point(cl_line, d_cl)
+            
+            cx = shapely.get_x(intersections)
+            cy = shapely.get_y(intersections)
+            
+            # Interpolate widths dynamically linking length proportions
+            cl_dist = np.zeros(K)
+            for i in range(1, K):
+                cl_dist[i] = cl_dist[i-1] + np.hypot(cl_coords[i,0]-cl_coords[i-1,0], cl_coords[i,1]-cl_coords[i-1,1])
                 
-        pts_xy = np.column_stack((x_in.ravel(), y_in.ravel()))
-        N = pts_xy.shape[0]
-        K = cl_coords.shape[0]
-        min_dist = np.full(N, np.inf)
-        best_j = np.zeros(N, dtype=int)
-        best_t = np.zeros(N)
-        
-        for j in range(K - 1):
-            A, B = cl_coords[j], cl_coords[j + 1]
-            AB = B - A
-            L2 = np.dot(AB, AB)
-            if L2 == 0:
-                continue
+            width_interp = np.interp(d_cl, cl_dist, widths)
+            
+        else:
+            # Slower python mathematical fallback logic
+            min_dist = np.full(N, np.inf)
+            best_j = np.zeros(N, dtype=int)
+            best_t = np.zeros(N)
+            
+            for j in range(K - 1):
+                A, B = cl_coords[j], cl_coords[j + 1]
+                AB = B - A
+                L2 = np.dot(AB, AB)
+                if L2 == 0:
+                    continue
+                    
+                AP = pts_xy - A
+                t = np.clip(np.dot(AP, AB) / L2, 0.0, 1.0)
                 
-            AP = pts_xy - A
-            t = np.clip(np.dot(AP, AB) / L2, 0.0, 1.0)
+                Proj_x = A[0] + t * AB[0]
+                Proj_y = A[1] + t * AB[1]
+                
+                dist = np.hypot(pts_xy[:, 0] - Proj_x, pts_xy[:, 1] - Proj_y)
+                
+                mask = dist < min_dist
+                min_dist[mask] = dist[mask]
+                best_j[mask] = j
+                best_t[mask] = t[mask]
+                
+            j = best_j
+            t = best_t
             
-            Proj_x = A[0] + t * AB[0]
-            Proj_y = A[1] + t * AB[1]
+            A = cl_coords[j]
+            B = cl_coords[j+1]
             
-            dist = np.hypot(pts_xy[:, 0] - Proj_x, pts_xy[:, 1] - Proj_y)
+            cx = A[:, 0] + t * (B[:, 0] - A[:, 0])
+            cy = A[:, 1] + t * (B[:, 1] - A[:, 1])
             
-            mask = dist < min_dist
-            min_dist[mask] = dist[mask]
-            best_j[mask] = j
-            best_t[mask] = t[mask]
-            
-        j = best_j
-        t = best_t
-        
-        A = cl_coords[j]
-        B = cl_coords[j+1]
-        
-        cx = A[:, 0] + t * (B[:, 0] - A[:, 0])
-        cy = A[:, 1] + t * (B[:, 1] - A[:, 1])
-        
-        wA = widths[j]
-        wB = widths[j+1]
-        width_interp = wA + t * (wB - wA)
+            wA = widths[j]
+            wB = widths[j+1]
+            width_interp = wA + t * (wB - wA)
         
         if np.isscalar(x) and np.isscalar(y):
             return cx[0], cy[0], width_interp[0]
@@ -338,7 +372,7 @@ class DTMChannelModifier:
         return cx.reshape(x_in.shape), cy.reshape(y_in.shape), width_interp.reshape(x_in.shape)
 
     @staticmethod
-    def process_dtm_cells(dtm_path, cross_section_csv, bank_shp_path, target_res=0.1, buffer_m=20.0, break_after_first=False, blend_type='linear'):
+    def process_dtm_cells(dtm_path, cross_section_csv, bank_shp_path, target_res=0.1, buffer_m=20.0, break_after_first=False, blend_type='linear', return_dicts=True):
         """
         Iterates through every cell in the DTM, checks if it lies inside the
         bank polygon mask, and if so determines the nearest centerline point
@@ -477,30 +511,36 @@ class DTMChannelModifier:
         pts_c = np.column_stack((cxs, cys))
         N = len(xs)
         
-        cl_cum_dist = np.zeros(K)
-        for i in range(1, K):
-            cl_cum_dist[i] = cl_cum_dist[i-1] + np.hypot(cl_coords[i,0]-cl_coords[i-1,0], cl_coords[i,1]-cl_coords[i-1,1])
-            
-        min_dist = np.full(N, np.inf)
-        best_j = np.zeros(N, dtype=int)
-        best_t = np.zeros(N)
+        has_shapely2 = hasattr(shapely, 'line_locate_point')
         
-        for j in range(K - 1):
-            A, B = cl_coords[j], cl_coords[j + 1]
-            AB = B - A
-            L2 = np.dot(AB, AB)
-            if L2 == 0: continue
-            AP = pts_c - A
-            t = np.clip(np.dot(AP, AB) / L2, 0.0, 1.0)
-            Proj_x = A[0] + t * AB[0]
-            Proj_y = A[1] + t * AB[1]
-            dist = np.hypot(pts_c[:, 0] - Proj_x, pts_c[:, 1] - Proj_y)
-            mask = dist < min_dist
-            min_dist[mask] = dist[mask]
-            best_j[mask] = j
-            best_t[mask] = t[mask]
+        if has_shapely2:
+            pts_shp = shapely.points(cxs, cys)
+            d_cells = shapely.line_locate_point(centerline, pts_shp)
+        else:
+            cl_cum_dist = np.zeros(K)
+            for i in range(1, K):
+                cl_cum_dist[i] = cl_cum_dist[i-1] + np.hypot(cl_coords[i,0]-cl_coords[i-1,0], cl_coords[i,1]-cl_coords[i-1,1])
+                
+            min_dist = np.full(N, np.inf)
+            best_j = np.zeros(N, dtype=int)
+            best_t = np.zeros(N)
             
-        d_cells = cl_cum_dist[best_j] + best_t * np.hypot(cl_coords[best_j+1, 0] - cl_coords[best_j, 0], cl_coords[best_j+1, 1] - cl_coords[best_j, 1])
+            for j in range(K - 1):
+                A, B = cl_coords[j], cl_coords[j + 1]
+                AB = B - A
+                L2 = np.dot(AB, AB)
+                if L2 == 0: continue
+                AP = pts_c - A
+                t = np.clip(np.dot(AP, AB) / L2, 0.0, 1.0)
+                Proj_x = A[0] + t * AB[0]
+                Proj_y = A[1] + t * AB[1]
+                dist = np.hypot(pts_c[:, 0] - Proj_x, pts_c[:, 1] - Proj_y)
+                mask = dist < min_dist
+                min_dist[mask] = dist[mask]
+                best_j[mask] = j
+                best_t[mask] = t[mask]
+                
+            d_cells = cl_cum_dist[best_j] + best_t * np.hypot(cl_coords[best_j+1, 0] - cl_coords[best_j, 0], cl_coords[best_j+1, 1] - cl_coords[best_j, 1])
 
         idx_dn = np.searchsorted(d_xs_array, d_cells)
         idx_dn = np.clip(idx_dn, 1, len(d_xs_array) - 1)
@@ -581,6 +621,16 @@ class DTMChannelModifier:
                 "final_blended_z": round(final_zs[0], 3)
             }], modifier
             
+        print(f"Vectorized processing completed successfully for {N} mapped cross-section grid cells.")
+        
+        # Natively map it into the modifier framework for ultra-fast TIF export saving seconds of dict-reading
+        mod_dtm = modifier.dtm_data.copy()
+        mod_dtm[valid_rows, valid_cols] = final_zs
+        modifier.dtm_data = mod_dtm
+        
+        if not return_dicts:
+            return None, modifier
+            
         results = []
         for i in range(N):
             results.append({
@@ -596,13 +646,6 @@ class DTMChannelModifier:
                 "final_blended_z": round(final_zs[i], 3)
             })
 
-        print(f"Vectorized processing completed successfully for {N} mapped cross-section grid cells.")
-        
-        # Natively map it into the modifier framework for ultra-fast TIF export saving seconds of dict-reading
-        mod_dtm = modifier.dtm_data.copy()
-        mod_dtm[valid_rows, valid_cols] = final_zs
-        modifier.dtm_data = mod_dtm
-        
         return results, modifier
 
     # =========================================================
