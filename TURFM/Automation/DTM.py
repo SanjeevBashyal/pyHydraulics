@@ -214,78 +214,6 @@ class DTMChannelModifier:
 
         return best_j, best_t
 
-    def _interpolate_and_merge(self):
-        print("Applying high-performance mathematical interpolation & blending...")
-        height, width = self.dtm_data.shape
-        cols, rows = np.meshgrid(np.arange(width), np.arange(height))
-
-        # Grid coordinates
-        xs, ys = self.dtm_transform * (cols + 0.5, rows + 0.5)
-        pts_xy = np.column_stack((xs.ravel(), ys.ravel()))
-
-        # 1. Bank polygon distance transform logic
-        bank_mask = rasterize(
-            [self.channel_polygon],
-            out_shape=(height, width),
-            transform=self.dtm_transform,
-            fill=0,
-            default_value=1,
-            dtype="uint8",
-        )
-
-        # distance_transform_edt computes pixel distance to closest True value
-        outside_mask = bank_mask == 0
-        dist_pixels = distance_transform_edt(outside_mask)
-        dist_m = (dist_pixels * self.target_res).ravel()
-
-        # 2. Assign Global W1 and W2 weights based on blend distance
-        # W1 = 1 inside banks. Fades to 0 at self.buffer_m distance.
-        W1 = np.clip(1.0 - (dist_m / self.buffer_m), 0.0, 1.0)
-        W2 = 1.0 - W1
-
-        # Optimize processing by only solving math for pixels where W1 > 0
-        valid_mask = W1 > 0
-        valid_pts = pts_xy[valid_mask]
-        valid_W1 = W1[valid_mask]
-        valid_W2 = W2[valid_mask]
-
-        # Find exactly which longitudinal reach every valid pixel belongs to
-        best_j, best_t = self._get_bracketing_cs(valid_pts, self.cl_coords)
-
-        cs_elevs = np.zeros(len(valid_pts))
-
-        # 3. Apply Cross Section Mathematical Formula
-        for j in range(len(self.cs_coords_list) - 1):
-            mask_j = best_j == j
-            if not np.any(mask_j):
-                continue
-
-            pts_in_reach = valid_pts[mask_j]
-            t_in_reach = best_t[mask_j]
-
-            # Project to CS 1 (upstream)
-            D1, E1 = self._project_points_to_cs(pts_in_reach, self.cs_coords_list[j])
-
-            # Project to CS 2 (downstream)
-            D2, E2 = self._project_points_to_cs(
-                pts_in_reach, self.cs_coords_list[j + 1]
-            )
-
-            # Interpolate strictly along the river line using the centerline projection t
-            reach_elev = (1.0 - t_in_reach) * E1 + t_in_reach * E2
-            cs_elevs[mask_j] = reach_elev
-
-        # 4. Final Blending Formula
-        old_elevs = self.dtm_data.ravel()[valid_mask]
-
-        # User formula: (W1 * CS_Elev + W2 * Old_Elev) / (W1 + W2) (Since W1+W2=1, denominator drops out)
-        new_elevs = valid_W1 * cs_elevs + valid_W2 * old_elevs
-
-        # Merge back into DTM grid
-        modified_dtm_flat = self.dtm_data.ravel().copy()
-        modified_dtm_flat[valid_mask] = new_elevs
-        self.modified_dtm = modified_dtm_flat.reshape((height, width))
-
     def _export_dtm(self):
         print(f"Exporting modified DTM to {self.output_path}...")
         with rasterio.open(self.output_path, "w", **self.dtm_meta) as dest:
@@ -316,8 +244,6 @@ class DTMChannelModifier:
         self._read_survey_and_get_bounds()
         self._resample_dtm_window()
         self._process_survey_geometry()
-        self._interpolate_and_merge()
-        self._export_dtm()
         self._export_shapefiles()
         print("\nAll processing complete successfully!")
 
@@ -412,7 +338,7 @@ class DTMChannelModifier:
         return cx.reshape(x_in.shape), cy.reshape(y_in.shape), width_interp.reshape(x_in.shape)
 
     @staticmethod
-    def process_dtm_cells(dtm_path, cross_section_csv, bank_shp_path, target_res=0.1, buffer_m=20.0, break_after_first=False):
+    def process_dtm_cells(dtm_path, cross_section_csv, bank_shp_path, target_res=0.1, buffer_m=20.0, break_after_first=False, blend_type='linear'):
         """
         Iterates through every cell in the DTM, checks if it lies inside the
         bank polygon mask, and if so determines the nearest centerline point
@@ -509,10 +435,36 @@ class DTMChannelModifier:
             dtype="uint8",
         )
 
-        print(f"Iterating through {height} x {width} = {height * width} cells using vectorized arrays...")
-        valid_rows, valid_cols = np.where(bank_mask == 1)
+        xs_poly = DTMChannelModifier.create_cross_section_mask(cross_section_csv, bank_shp_path, interval=1.0)
+        xs_mask = rasterize(
+            [xs_poly],
+            out_shape=(height, width),
+            transform=modifier.dtm_transform,
+            fill=0,
+            default_value=1,
+            dtype="uint8",
+        )
+
+        print(f"Iterating through {height} x {width} = {height * width} cells using vectorized arrays with {blend_type} blending...")
+        valid_rows, valid_cols = np.where(xs_mask == 1)
         if len(valid_rows) == 0:
             return [], modifier
+
+        from scipy.ndimage import distance_transform_edt
+        d_bank_grid = distance_transform_edt(bank_mask == 0) * modifier.target_res
+        d_bound_grid = distance_transform_edt(xs_mask == 1) * modifier.target_res
+        
+        d_bank_arr = d_bank_grid[valid_rows, valid_cols]
+        d_bound_arr = d_bound_grid[valid_rows, valid_cols]
+
+        tot_d = d_bank_arr + d_bound_arr
+        tot_d_safe = np.maximum(tot_d, 1e-6)
+        
+        w1_terrain = d_bank_arr / tot_d_safe
+        if blend_type == 'exponential':
+            w1_terrain = (np.exp(w1_terrain) - 1.0) / (np.e - 1.0)
+            
+        w2_cs = 1.0 - w1_terrain
 
         xs, ys = modifier.dtm_transform * (valid_cols + 0.5, valid_rows + 0.5)
         dtm_zs = modifier.dtm_data[valid_rows, valid_cols].astype(float)
@@ -612,6 +564,8 @@ class DTMChannelModifier:
             
             new_zs[mask] = w1 * z_up + w2 * z_dn
 
+        # Apply final continuous mathematical blending
+        final_zs = w1_terrain * dtm_zs + w2_cs * new_zs
 
         if break_after_first:
             return [{
@@ -623,7 +577,8 @@ class DTMChannelModifier:
                 "min_dist_up": round(dist_up_array[0], 3),
                 "down_station": stations_list[idx_dn[0]]["Station"],
                 "min_dist_down": round(dist_dn_array[0], 3),
-                "new_interpolated_z": round(new_zs[0], 3)
+                "new_interpolated_z": round(new_zs[0], 3),
+                "final_blended_z": round(final_zs[0], 3)
             }], modifier
             
         results = []
@@ -637,15 +592,112 @@ class DTMChannelModifier:
                 "min_dist_up": round(dist_up_array[i], 3),
                 "down_station": stations_list[idx_dn[i]]["Station"],
                 "min_dist_down": round(dist_dn_array[i], 3),
-                "new_interpolated_z": round(new_zs[i], 3)
+                "new_interpolated_z": round(new_zs[i], 3),
+                "final_blended_z": round(final_zs[i], 3)
             })
 
-        print(f"Vectorized processing completed successfully for {N} masked layout grid cells.")
+        print(f"Vectorized processing completed successfully for {N} mapped cross-section grid cells.")
+        
+        # Natively map it into the modifier framework for ultra-fast TIF export saving seconds of dict-reading
+        mod_dtm = modifier.dtm_data.copy()
+        mod_dtm[valid_rows, valid_cols] = final_zs
+        modifier.dtm_data = mod_dtm
+        
         return results, modifier
 
     # =========================================================
     # STATIC METHOD TOOLS
     # =========================================================
+    @staticmethod
+    def create_cross_section_mask(cross_section_csv: str, bank_shp_path: str, interval: float = 1.0):
+        """
+        Creates a custom polygon mask by walking the centerline at 'interval' meters and interpolating 
+        the left and right surveyed cross-section widths. 
+        """
+        print(f"\nGenerating dynamic cross section bounds polygon along centerline at {interval}m intervals...")
+        import pandas as pd
+        import numpy as np
+        import geopandas as gpd
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import nearest_points
+
+        df = pd.read_csv(cross_section_csv)
+        banks_gdf = gpd.read_file(bank_shp_path)
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks_gdf)
+        if centerline_gdf.empty:
+            raise ValueError("Failed to generate centerline from banks.")
+        centerline = centerline_gdf.geometry.iloc[0]
+
+        group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
+        if not group_cols: group_cols = ['Station']
+
+        stations = []
+        for name, group in df.groupby(group_cols):
+            coords_3d = group[['X', 'Y', 'Z']].values
+            if len(coords_3d) < 2: continue
+            line = LineString(coords_3d)
+            
+            pt_C, _ = nearest_points(centerline, line)
+            d_xs = centerline.project(pt_C)
+            
+            d_C_xs = line.project(pt_C)
+            left_width = d_C_xs
+            right_width = line.length - d_C_xs
+            
+            stations.append({'d_xs': d_xs, 'lw': left_width, 'rw': right_width})
+            
+        stations.sort(key=lambda x: x['d_xs'])
+        d_xs_arr = np.array([s['d_xs'] for s in stations])
+        lw_arr = np.array([s['lw'] for s in stations])
+        rw_arr = np.array([s['rw'] for s in stations])
+
+        cl_length = centerline.length
+        distances = np.arange(0, cl_length, interval)
+        if len(distances) == 0 or distances[-1] != cl_length:
+            distances = np.append(distances, cl_length)
+
+        left_pts = []
+        right_pts = []
+        for d in distances:
+            lw = np.interp(d, d_xs_arr, lw_arr)
+            rw = np.interp(d, d_xs_arr, rw_arr)
+            pt = centerline.interpolate(d)
+            
+            d1 = max(0, d - 0.1)
+            d2 = min(cl_length, d + 0.1)
+            if d1 == d2:
+                left_pts.append((pt.x, pt.y))
+                right_pts.append((pt.x, pt.y))
+                continue
+                
+            p1 = centerline.interpolate(d1)
+            p2 = centerline.interpolate(d2)
+            
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            length = np.hypot(dx, dy)
+            if length == 0:
+                nx = ny = 0
+            else:
+                nx = -dy / length
+                ny = dx / length
+                
+            left_pts.append((pt.x + nx * lw, pt.y + ny * lw))
+            right_pts.append((pt.x - nx * rw, pt.y - ny * rw))
+            
+        poly_pts = left_pts + right_pts[::-1] + [left_pts[0]]
+        poly = Polygon(poly_pts)
+        if not poly.is_valid:
+            # Buffer by 0 resolves boundary self-intersections (bow-ties) cleanly
+            poly = poly.buffer(0)
+            
+        # In sharp inside-bends, the dissolved bowtie creates a MultiPolygon.
+        # We extract the primary continuous polygon (largest area) for pure boundary tracing.
+        if poly.geom_type == 'MultiPolygon':
+            poly = max(poly.geoms, key=lambda a: a.area)
+            
+        return poly
+
     @staticmethod
     def interpolate_cross_sections(cross_section_csv: str, bank_shp_path: str, step_m: float = 0.1, out_csv: str = None):
         """

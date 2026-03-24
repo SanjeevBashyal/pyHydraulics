@@ -115,6 +115,13 @@ def test_single_cell():
     ax.fill(poly_x, poly_y, alpha=0.15, color='cyan', label='Bank Polygon Mask')
     ax.plot(poly_x, poly_y, color='cyan', linewidth=1)
 
+    # Plot dynamic linearly interpolated cross section bounds mask
+    print("Evaluating cross section boundary interpolations along 1m intervals...")
+    xs_mask_poly = DTMChannelModifier.create_cross_section_mask(CROSS_SECTION_FILE_PATH, BANK_LINE_FILE_PATH, interval=1.0)
+    xs_poly_x, xs_poly_y = xs_mask_poly.exterior.xy
+    ax.fill(xs_poly_x, xs_poly_y, alpha=0.1, color='magenta', label='Cross Section Interpolated Mask')
+    ax.plot(xs_poly_x, xs_poly_y, color='magenta', linewidth=1.5, linestyle='--')
+
     # Plot bank lines
     for geom in banks.geometry:
         if geom.geom_type == 'LineString':
