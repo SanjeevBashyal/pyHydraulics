@@ -13,24 +13,17 @@ from shapely.ops import nearest_points
 
 
 class DTMChannelModifier:
-    def __init__(
-        self,
-        dtm_path: str,
-        csv_path: str,
-        output_path: str,
-        target_res: float = 0.1,
-        buffer_m: float = 20.0,
-    ):
+    def __init__(self):
         """
         Initializes the DTM Modifier.
         """
-        self.dtm_path = dtm_path
-        self.csv_path = csv_path
-        self.output_path = output_path
-        self.target_res = target_res
-        self.buffer_m = buffer_m  # Acts as the blend/feathering distance
+        self.dtm_path = None
+        self.csv_path = None
+        self.output_path = None
+        self.target_res = 0.1
+        self.buffer_m = 20.0
 
-        self.out_dir = os.path.dirname(os.path.abspath(output_path))
+        self.out_dir = None
 
         self.dtm_data = None
         self.dtm_transform = None
@@ -148,8 +141,16 @@ class DTMChannelModifier:
             {"Name": "River Centerline", "geometry": LineString(centerline_coords)}
         ]
 
-        right_banks.reverse()
-        self.channel_polygon = Polygon(left_banks + right_banks)
+        left_line = LineString(left_banks)
+        right_line = LineString(right_banks)
+        self.banks_gdf = gpd.GeoDataFrame(
+            {"Name": ["Left Bank", "Right Bank"]},
+            geometry=[left_line, right_line],
+            crs=self.dtm_crs,
+        )
+
+        poly_gdf = self.create_polygon_mask_from_banks(self.banks_gdf)
+        self.channel_polygon = poly_gdf.geometry.iloc[0]
 
     @staticmethod
     def _project_points_to_cs(pts_xy, cs_coords):
@@ -189,6 +190,7 @@ class DTMChannelModifier:
         K = cl_coords.shape[0]
         min_dist = np.full(N, np.inf)
         best_j = np.zeros(N, dtype=int)
+        best_t = np.zeros(N)
 
         for j in range(K - 1):
             A, B = cl_coords[j, :2], cl_coords[j + 1, :2]
@@ -208,8 +210,9 @@ class DTMChannelModifier:
             mask = dist < min_dist
             min_dist[mask] = dist[mask]
             best_j[mask] = j
+            best_t[mask] = t[mask]
 
-        return best_j
+        return best_j, best_t
 
     def _interpolate_and_merge(self):
         print("Applying high-performance mathematical interpolation & blending...")
@@ -247,7 +250,7 @@ class DTMChannelModifier:
         valid_W2 = W2[valid_mask]
 
         # Find exactly which longitudinal reach every valid pixel belongs to
-        best_j = self._get_bracketing_cs(valid_pts, self.cl_coords)
+        best_j, best_t = self._get_bracketing_cs(valid_pts, self.cl_coords)
 
         cs_elevs = np.zeros(len(valid_pts))
 
@@ -258,6 +261,7 @@ class DTMChannelModifier:
                 continue
 
             pts_in_reach = valid_pts[mask_j]
+            t_in_reach = best_t[mask_j]
 
             # Project to CS 1 (upstream)
             D1, E1 = self._project_points_to_cs(pts_in_reach, self.cs_coords_list[j])
@@ -267,14 +271,8 @@ class DTMChannelModifier:
                 pts_in_reach, self.cs_coords_list[j + 1]
             )
 
-            # Calculate local CS weights
-            w11 = 1.0 / (
-                D1 + 1e-6
-            )  # 1e-6 prevents division by zero if pixel is exactly on the line
-            w12 = 1.0 / (D2 + 1e-6)
-
-            # User formula: (w11 * CS1_ELEV + w12 * CS2_ELEV) / (w11 + w12)
-            reach_elev = (w11 * E1 + w12 * E2) / (w11 + w12)
+            # Interpolate strictly along the river line using the centerline projection t
+            reach_elev = (1.0 - t_in_reach) * E1 + t_in_reach * E2
             cs_elevs[mask_j] = reach_elev
 
         # 4. Final Blending Formula
@@ -310,6 +308,11 @@ class DTMChannelModifier:
 
     def process(self):
         """Executes the standard DTM modification workflow."""
+        if self.output_path is not None:
+            self.out_dir = os.path.dirname(os.path.abspath(self.output_path))
+        else:
+            self.out_dir = os.getcwd()
+
         self._read_survey_and_get_bounds()
         self._resample_dtm_window()
         self._process_survey_geometry()
@@ -318,17 +321,590 @@ class DTMChannelModifier:
         self._export_shapefiles()
         print("\nAll processing complete successfully!")
 
+    def get_cell_centerline_metrics(self, x, y, banks=None, centerline=None):
+        """
+        For given terrain cells (x, y) which can be scalars or numpy arrays,
+        determine their nearest centerline point (cx, cy) and the corresponding interpolated
+        total bank width at that exact centerline location.
+        """
+        x_in = np.asarray(x)
+        y_in = np.asarray(y)
+        
+        use_cache = (banks is None and centerline is None)
+        
+        if banks is None:
+            if getattr(self, 'banks_gdf', None) is None:
+                raise ValueError("Banks not provided and self.banks_gdf not found. Run _process_survey_geometry first.")
+            banks = self.banks_gdf
+            
+        if centerline is None:
+            if getattr(self, 'centerline_gdf', None) is None:
+                self.centerline_gdf = self.generate_centerline_from_banks(banks)
+            centerline = self.centerline_gdf.geometry.iloc[0]
+        elif isinstance(centerline, gpd.GeoDataFrame):
+            centerline = centerline.geometry.iloc[0]
+            
+        lines = []
+        for geom in banks.geometry:
+            if geom.geom_type == 'LineString': lines.append(geom)
+            elif geom.geom_type == 'MultiLineString': lines.extend(geom.geoms)
+        if len(lines) < 2:
+            raise ValueError("Banks must contain at least two valid LineStrings.")
+        left_bank, right_bank = lines[0], lines[1]
+        
+        cl_coords = np.array(centerline.coords)[:, :2]
+        
+        if use_cache and getattr(self, '_cl_widths_cache', None) is not None and getattr(self, '_cl_coords_cache', None) is not None and len(self._cl_coords_cache) == len(cl_coords):
+            widths = self._cl_widths_cache
+        else:
+            widths = np.zeros(len(cl_coords))
+            # Point is imported at the top of the file
+            for i, pt in enumerate(cl_coords):
+                p = Point(pt)
+                widths[i] = left_bank.distance(p) + right_bank.distance(p)
+            if use_cache:
+                self._cl_widths_cache = widths
+                self._cl_coords_cache = cl_coords
+                
+        pts_xy = np.column_stack((x_in.ravel(), y_in.ravel()))
+        N = pts_xy.shape[0]
+        K = cl_coords.shape[0]
+        min_dist = np.full(N, np.inf)
+        best_j = np.zeros(N, dtype=int)
+        best_t = np.zeros(N)
+        
+        for j in range(K - 1):
+            A, B = cl_coords[j], cl_coords[j + 1]
+            AB = B - A
+            L2 = np.dot(AB, AB)
+            if L2 == 0:
+                continue
+                
+            AP = pts_xy - A
+            t = np.clip(np.dot(AP, AB) / L2, 0.0, 1.0)
+            
+            Proj_x = A[0] + t * AB[0]
+            Proj_y = A[1] + t * AB[1]
+            
+            dist = np.hypot(pts_xy[:, 0] - Proj_x, pts_xy[:, 1] - Proj_y)
+            
+            mask = dist < min_dist
+            min_dist[mask] = dist[mask]
+            best_j[mask] = j
+            best_t[mask] = t[mask]
+            
+        j = best_j
+        t = best_t
+        
+        A = cl_coords[j]
+        B = cl_coords[j+1]
+        
+        cx = A[:, 0] + t * (B[:, 0] - A[:, 0])
+        cy = A[:, 1] + t * (B[:, 1] - A[:, 1])
+        
+        wA = widths[j]
+        wB = widths[j+1]
+        width_interp = wA + t * (wB - wA)
+        
+        if np.isscalar(x) and np.isscalar(y):
+            return cx[0], cy[0], width_interp[0]
+            
+        return cx.reshape(x_in.shape), cy.reshape(y_in.shape), width_interp.reshape(x_in.shape)
+
+    @staticmethod
+    def process_dtm_cells(dtm_path, cross_section_csv, bank_shp_path, target_res=0.1, buffer_m=20.0, break_after_first=False):
+        """
+        Iterates through every cell in the DTM, checks if it lies inside the
+        bank polygon mask, and if so determines the nearest centerline point
+        and the corresponding bank width at that location.
+
+        Args:
+            dtm_path: Path to the DTM raster file.
+            cross_section_csv: Path to the cross-section CSV.
+            bank_shp_path: Path to the bank lines shapefile.
+            target_res: Target resolution for resampling (m).
+            buffer_m: Buffer around the survey extent (m).
+            break_after_first: If True, stops after finding the first cell
+                               inside the polygon (for testing).
+
+        Returns:
+            A list of dicts with keys: row, col, x, y, dtm_z, cx, cy, bank_width
+        """
+        print("\\nProcessing DTM cells for centerline metrics...")
+
+        # Setup the modifier to get all the geometry
+        modifier = DTMChannelModifier()
+        modifier.dtm_path = dtm_path
+        modifier.csv_path = cross_section_csv
+        modifier.target_res = target_res
+        modifier.buffer_m = buffer_m
+
+        modifier._read_survey_and_get_bounds()
+        modifier._resample_dtm_window()
+
+        # Load banks and generate polygon mask explicitly from sequence of shapefile lines
+        import geopandas as gpd
+        modifier.banks_gdf = gpd.read_file(bank_shp_path)
+        poly_gdf = DTMChannelModifier.create_polygon_mask_from_banks(modifier.banks_gdf)
+        modifier.channel_polygon = poly_gdf.geometry.iloc[0]
+
+        # Generate centerline from banks
+        modifier.centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(modifier.banks_gdf)
+
+        # Pre-process cross sections for rapid bracketing & interpolation
+        import pandas as pd
+        import numpy as np
+        from shapely.geometry import LineString, Point
+        from shapely.ops import nearest_points
+        import shapely
+
+        df = pd.read_csv(cross_section_csv)
+        centerline = modifier.centerline_gdf.geometry.iloc[0]
+        
+        group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
+        if not group_cols: group_cols = ['Station']
+
+        def make_z_interp(line):
+            coords = np.array(line.coords)
+            if coords.shape[1] < 3: return lambda d: np.zeros_like(d)
+            dists = [0.0]
+            for i in range(1, len(coords)):
+                d = np.linalg.norm(coords[i, :2] - coords[i-1, :2])
+                dists.append(dists[-1] + d)
+            dists_np = np.array(dists)
+            z_np = coords[:, 2]
+            return lambda d: np.interp(np.clip(d, 0, dists_np[-1]), dists_np, z_np)
+
+        stations_list = []
+        for name, group in df.groupby(group_cols):
+            coords_3d = group[['X', 'Y', 'Z']].values
+            if len(coords_3d) < 2: continue
+            line = LineString(coords_3d)
+            stat_name = str(name if not isinstance(name, tuple) else name[-1])
+            pt_C, _ = nearest_points(centerline, line)
+            d_xs = centerline.project(pt_C)
+            _, _, bw_xs = modifier.get_cell_centerline_metrics(pt_C.x, pt_C.y)
+            d_C_xs = line.project(pt_C)
+            
+            stations_list.append({
+                "Station": stat_name, 
+                "d_xs": d_xs, 
+                "line": line,
+                "bw_xs": bw_xs,
+                "d_C_xs": d_C_xs,
+                "z_func": make_z_interp(line)
+            })
+            
+        stations_list.sort(key=lambda s: s["d_xs"])
+        d_xs_array = np.array([s["d_xs"] for s in stations_list])
+
+        # Create the polygon mask raster
+        height, width = modifier.dtm_data.shape
+        bank_mask = rasterize(
+            [modifier.channel_polygon],
+            out_shape=(height, width),
+            transform=modifier.dtm_transform,
+            fill=0,
+            default_value=1,
+            dtype="uint8",
+        )
+
+        print(f"Iterating through {height} x {width} = {height * width} cells using vectorized arrays...")
+        valid_rows, valid_cols = np.where(bank_mask == 1)
+        if len(valid_rows) == 0:
+            return [], modifier
+
+        xs, ys = modifier.dtm_transform * (valid_cols + 0.5, valid_rows + 0.5)
+        dtm_zs = modifier.dtm_data[valid_rows, valid_cols].astype(float)
+        
+        cxs, cys, bws = modifier.get_cell_centerline_metrics(xs, ys)
+        dists_cl = np.hypot(xs - cxs, ys - cys)
+        
+        cl_coords = np.array(centerline.coords)[:, :2]
+        K = len(cl_coords)
+        pts_c = np.column_stack((cxs, cys))
+        N = len(xs)
+        
+        cl_cum_dist = np.zeros(K)
+        for i in range(1, K):
+            cl_cum_dist[i] = cl_cum_dist[i-1] + np.hypot(cl_coords[i,0]-cl_coords[i-1,0], cl_coords[i,1]-cl_coords[i-1,1])
+            
+        min_dist = np.full(N, np.inf)
+        best_j = np.zeros(N, dtype=int)
+        best_t = np.zeros(N)
+        
+        for j in range(K - 1):
+            A, B = cl_coords[j], cl_coords[j + 1]
+            AB = B - A
+            L2 = np.dot(AB, AB)
+            if L2 == 0: continue
+            AP = pts_c - A
+            t = np.clip(np.dot(AP, AB) / L2, 0.0, 1.0)
+            Proj_x = A[0] + t * AB[0]
+            Proj_y = A[1] + t * AB[1]
+            dist = np.hypot(pts_c[:, 0] - Proj_x, pts_c[:, 1] - Proj_y)
+            mask = dist < min_dist
+            min_dist[mask] = dist[mask]
+            best_j[mask] = j
+            best_t[mask] = t[mask]
+            
+        d_cells = cl_cum_dist[best_j] + best_t * np.hypot(cl_coords[best_j+1, 0] - cl_coords[best_j, 0], cl_coords[best_j+1, 1] - cl_coords[best_j, 1])
+
+        idx_dn = np.searchsorted(d_xs_array, d_cells)
+        idx_dn = np.clip(idx_dn, 1, len(d_xs_array) - 1)
+        idx_up = idx_dn - 1
+
+        new_zs = np.zeros(N)
+        dist_up_array = np.zeros(N)
+        dist_dn_array = np.zeros(N)
+        
+        has_shapely2 = hasattr(shapely, 'line_locate_point')
+
+        for i in range(len(stations_list) - 1):
+            mask = (idx_up == i)
+            if not np.any(mask): continue
+            
+            st_up = stations_list[i]
+            st_dn = stations_list[i+1]
+            
+            x_m = xs[mask]
+            y_m = ys[mask]
+            bw_m = np.maximum(bws[mask], 1e-6)
+            dist_cl_m = dists_cl[mask]
+            
+            if has_shapely2:
+                pts_shp = shapely.points(x_m, y_m)
+                dist_up_m = shapely.distance(pts_shp, st_up['line'])
+                dist_dn_m = shapely.distance(pts_shp, st_dn['line'])
+                d_cell_up_m = shapely.line_locate_point(st_up['line'], pts_shp)
+                d_cell_dn_m = shapely.line_locate_point(st_dn['line'], pts_shp)
+            else:
+                dist_up_m = np.zeros(len(x_m))
+                dist_dn_m = np.zeros(len(x_m))
+                d_cell_up_m = np.zeros(len(x_m))
+                d_cell_dn_m = np.zeros(len(x_m))
+                for k in range(len(x_m)):
+                    p = Point(x_m[k], y_m[k])
+                    dist_up_m[k] = p.distance(st_up['line'])
+                    dist_dn_m[k] = p.distance(st_dn['line'])
+                    d_cell_up_m[k] = st_up['line'].project(p)
+                    d_cell_dn_m[k] = st_dn['line'].project(p)
+            
+            dist_up_array[mask] = dist_up_m
+            dist_dn_array[mask] = dist_dn_m
+
+            # Up Z
+            mapped_up = dist_cl_m * (st_up['bw_xs'] / bw_m)
+            dir_up = np.where(d_cell_up_m >= st_up['d_C_xs'], 1, -1)
+            offset_up = st_up['d_C_xs'] + dir_up * mapped_up
+            z_up = st_up['z_func'](offset_up)
+
+            # Dn Z
+            mapped_dn = dist_cl_m * (st_dn['bw_xs'] / bw_m)
+            dir_dn = np.where(d_cell_dn_m >= st_dn['d_C_xs'], 1, -1)
+            offset_dn = st_dn['d_C_xs'] + dir_dn * mapped_dn
+            z_dn = st_dn['z_func'](offset_dn)
+            
+            tot = dist_up_m + dist_dn_m
+            tot_safe = np.maximum(tot, 1e-6)
+            w1 = np.where(tot == 0, 1.0, dist_dn_m / tot_safe)
+            w2 = np.where(tot == 0, 0.0, dist_up_m / tot_safe)
+            
+            new_zs[mask] = w1 * z_up + w2 * z_dn
+
+
+        if break_after_first:
+            return [{
+                "row": int(valid_rows[0]), "col": int(valid_cols[0]),
+                "x": round(xs[0], 3), "y": round(ys[0], 3), "dtm_z": round(dtm_zs[0], 3),
+                "cx": round(cxs[0], 3), "cy": round(cys[0], 3),
+                "dist_to_centerline": round(dists_cl[0], 3), "bank_width": round(bws[0], 3),
+                "up_station": stations_list[idx_up[0]]["Station"],
+                "min_dist_up": round(dist_up_array[0], 3),
+                "down_station": stations_list[idx_dn[0]]["Station"],
+                "min_dist_down": round(dist_dn_array[0], 3),
+                "new_interpolated_z": round(new_zs[0], 3)
+            }], modifier
+            
+        results = []
+        for i in range(N):
+            results.append({
+                "row": int(valid_rows[i]), "col": int(valid_cols[i]),
+                "x": round(xs[i], 3), "y": round(ys[i], 3), "dtm_z": round(dtm_zs[i], 3),
+                "cx": round(cxs[i], 3), "cy": round(cys[i], 3),
+                "dist_to_centerline": round(dists_cl[i], 3), "bank_width": round(bws[i], 3),
+                "up_station": stations_list[idx_up[i]]["Station"],
+                "min_dist_up": round(dist_up_array[i], 3),
+                "down_station": stations_list[idx_dn[i]]["Station"],
+                "min_dist_down": round(dist_dn_array[i], 3),
+                "new_interpolated_z": round(new_zs[i], 3)
+            })
+
+        print(f"Vectorized processing completed successfully for {N} masked layout grid cells.")
+        return results, modifier
+
     # =========================================================
     # STATIC METHOD TOOLS
     # =========================================================
     @staticmethod
+    def interpolate_cross_sections(cross_section_csv: str, bank_shp_path: str, step_m: float = 0.1, out_csv: str = None):
+        """
+        Reads cross-section points from a CSV, generates the bank centerline from the provided shapefile,
+        intersects them, and interpolates X, Y, Z at exactly `step_m` intervals outwards from the center.
+        """
+        print(f"\nInterpolating cross sections every {step_m}m from centerline...")
+        
+        df = pd.read_csv(cross_section_csv)
+        
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(bank_shp_path)
+        if centerline_gdf.empty:
+            raise ValueError("Failed to generate centerline from banks.")
+        centerline = centerline_gdf.geometry.iloc[0]
+        
+        results = []
+        
+        group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
+        if not group_cols:
+            group_cols = ['Station'] if 'Station' in df.columns else []
+
+        grouped = df.groupby(group_cols) if group_cols else [(None, df)]
+            
+        for name, group in grouped:
+            coords_3d = group[['X', 'Y', 'Z']].values
+            
+            if len(coords_3d) < 2:
+                continue
+            
+            xs_line = LineString(coords_3d)
+            intersection = xs_line.intersection(centerline)
+            
+            if intersection.is_empty:
+                print(f"No intersection found for cross section {name}")
+                continue
+                
+            if intersection.geom_type in ['MultiPoint', 'GeometryCollection']:
+                pts = [geom for geom in getattr(intersection, 'geoms', [intersection]) if geom.geom_type == 'Point']
+                if not pts:
+                    print(f"No valid point intersection found for cross section {name}")
+                    continue
+                intersection = pts[0]
+            elif intersection.geom_type != 'Point':
+                print(f"Invalid intersection type {intersection.geom_type} for cross section {name}")
+                continue
+                
+            center_dist = xs_line.project(intersection)
+            
+            dists_left = np.arange(center_dist, 0, -step_m)[1:]
+            dists_right = np.arange(center_dist, xs_line.length + 1e-5, step_m)
+            all_dists = np.concatenate((dists_left[::-1], dists_right))
+            
+            seg_lengths = [np.hypot(coords_3d[i+1][0] - coords_3d[i][0], coords_3d[i+1][1] - coords_3d[i][1]) for i in range(len(coords_3d)-1)]
+            cum_dist = np.insert(np.cumsum(seg_lengths), 0, 0)
+            
+            for d in all_dists:
+                if d <= 0:
+                    pt = coords_3d[0]
+                elif d >= cum_dist[-1]:
+                    pt = coords_3d[-1]
+                else:
+                    idx = np.searchsorted(cum_dist, d) - 1
+                    idx = max(0, min(idx, len(seg_lengths) - 1))
+                    
+                    if seg_lengths[idx] == 0:
+                        seg_frac = 0
+                    else:
+                        seg_frac = (d - cum_dist[idx]) / seg_lengths[idx]
+                    
+                    p1 = coords_3d[idx]
+                    p2 = coords_3d[idx+1]
+                    pt = (
+                        p1[0] + (p2[0] - p1[0]) * seg_frac,
+                        p1[1] + (p2[1] - p1[1]) * seg_frac,
+                        p1[2] + (p2[2] - p1[2]) * seg_frac
+                    )
+                
+                row_dict = {}
+                if group_cols:
+                    name_tuple = name if isinstance(name, tuple) else (name,)
+                    for idx_c, c in enumerate(group_cols):
+                        row_dict[c] = name_tuple[idx_c]
+                
+                row_dict["Distance_from_Center"] = round(d - center_dist, 3)
+                row_dict["X"] = round(pt[0], 3)
+                row_dict["Y"] = round(pt[1], 3)
+                row_dict["Z"] = round(pt[2], 3)
+                results.append(row_dict)
+                
+        out_df = pd.DataFrame(results)
+        
+        if out_csv:
+            out_df.to_csv(out_csv, index=False)
+            print(f"Interpolated cross sections successfully saved to: {out_csv}")
+            
+        return out_df
+
+    @staticmethod
+    def calculate_bank_widths(cross_section_csv: str, bank_shp_path: str, out_csv: str = None):
+        """
+        For each cross section, calculates the bank-to-bank width: the length of the
+        cross-section line segment that lies between the left and right bank lines.
+        """
+        print("\nCalculating cross-section widths between banks...")
+
+        df = pd.read_csv(cross_section_csv)
+        banks = gpd.read_file(bank_shp_path)
+
+        lines = []
+        for geom in banks.geometry:
+            if geom.geom_type == 'LineString': lines.append(geom)
+            elif geom.geom_type == 'MultiLineString': lines.extend(geom.geoms)
+        if len(lines) < 2:
+            raise ValueError("Bank shapefile must contain at least two LineStrings.")
+        left_bank, right_bank = lines[0], lines[1]
+
+        group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
+        if not group_cols:
+            group_cols = ['Station'] if 'Station' in df.columns else []
+
+        grouped = df.sort_values(group_cols).groupby(group_cols) if group_cols else [(None, df)]
+        results = []
+
+        for name, group in grouped:
+            coords_3d = group[['X', 'Y', 'Z']].values
+            if len(coords_3d) < 2:
+                continue
+
+            xs_line = LineString(coords_3d)
+
+            # Find the nearest point on each bank to the cross-section
+            pt_L, _ = nearest_points(left_bank, xs_line)
+            pt_R, _ = nearest_points(right_bank, xs_line)
+
+            # Project those bank points onto the cross-section to get 1-D distances
+            d_L = xs_line.project(pt_L)
+            d_R = xs_line.project(pt_R)
+
+            bank_width = abs(d_R - d_L)
+
+            row_dict = {}
+            if group_cols:
+                name_tuple = name if isinstance(name, tuple) else (name,)
+                for idx_c, c in enumerate(group_cols):
+                    row_dict[c] = name_tuple[idx_c]
+            else:
+                row_dict["Station"] = "All"
+
+            row_dict["Bank_Width"] = round(bank_width, 3)
+            row_dict["Left_Bank_X"] = round(pt_L.x, 3)
+            row_dict["Left_Bank_Y"] = round(pt_L.y, 3)
+            row_dict["Right_Bank_X"] = round(pt_R.x, 3)
+            row_dict["Right_Bank_Y"] = round(pt_R.y, 3)
+            results.append(row_dict)
+
+        out_df = pd.DataFrame(results)
+        if out_csv:
+            out_df.to_csv(out_csv, index=False)
+            print(f"Bank widths saved to: {out_csv}")
+        return out_df
+
+    @staticmethod
+    def calculate_reach_lengths(cross_section_csv: str, bank_shp_path: str, out_csv: str = None):
+        """
+        Calculates the downstream reach lengths for Left Bank, Center, and Right Bank 
+        between successive cross sections based on path length along their shapefiles.
+        """
+        print("\nCalculating bank reach lengths between cross sections...")
+        
+        df = pd.read_csv(cross_section_csv)
+        banks = gpd.read_file(bank_shp_path)
+        
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks)
+        if centerline_gdf.empty:
+            raise ValueError("Failed to generate centerline from banks.")
+        centerline = centerline_gdf.geometry.iloc[0]
+        
+        lines = []
+        for geom in banks.geometry:
+            if geom.geom_type == 'LineString': lines.append(geom)
+            elif geom.geom_type == 'MultiLineString': lines.extend(geom.geoms)
+            
+        if len(lines) < 2:
+            raise ValueError("Bank shapefile must contain at least two valid LineStrings.")
+            
+        left_bank, right_bank = lines[0], lines[1]
+        
+        group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
+        if not group_cols:
+            group_cols = ['Station'] if 'Station' in df.columns else []
+
+        grouped = df.sort_values(group_cols).groupby(group_cols) if group_cols else [(None, df)]
+        
+        results = []
+        
+        for name, group in grouped:
+            coords_3d = group[['X', 'Y', 'Z']].values
+            if len(coords_3d) < 2:
+                continue
+                
+            xs_line = LineString(coords_3d)
+            
+            pt_L, _ = nearest_points(left_bank, xs_line)
+            pt_C, _ = nearest_points(centerline, xs_line)
+            pt_R, _ = nearest_points(right_bank, xs_line)
+            
+            dist_L = left_bank.project(pt_L)
+            dist_C = centerline.project(pt_C)
+            dist_R = right_bank.project(pt_R)
+            
+            row_dict = {}
+            if group_cols:
+                name_tuple = name if isinstance(name, tuple) else (name,)
+                for idx_c, c in enumerate(group_cols):
+                    row_dict[c] = name_tuple[idx_c]
+            else:
+                row_dict["Station"] = "All"
+                
+            row_dict["L_CurveDist"] = dist_L
+            row_dict["C_CurveDist"] = dist_C
+            row_dict["R_CurveDist"] = dist_R
+            results.append(row_dict)
+            
+        if not results:
+            return pd.DataFrame()
+            
+        res_df = pd.DataFrame(results)
+        
+        res_df["Left_Bank_Length"] = abs(res_df["L_CurveDist"].diff(-1))
+        res_df["Center_Length"] = abs(res_df["C_CurveDist"].diff(-1))
+        res_df["Right_Bank_Length"] = abs(res_df["R_CurveDist"].diff(-1))
+        
+        res_df.fillna(0, inplace=True)
+        
+        res_df.drop(columns=["L_CurveDist", "C_CurveDist", "R_CurveDist"], inplace=True)
+        
+        for col in ["Left_Bank_Length", "Center_Length", "Right_Bank_Length"]:
+            res_df[col] = res_df[col].round(2)
+            
+        if out_csv:
+            res_df.to_csv(out_csv, index=False)
+            print(f"Reach lengths successfully saved to: {out_csv}")
+            
+        return res_df
+
+    @staticmethod
     def generate_centerline_from_banks(
-        bank_shp_path: str, output_shp_path: str, step_m: float = 1.0
+        banks_input, output_shp_path: str = None, step_m: float = 1.0
     ):
-        print(
-            f"\nGenerating mathematically equidistant centerline from: {bank_shp_path}..."
-        )
-        banks_gdf = gpd.read_file(bank_shp_path)
+        if isinstance(banks_input, str):
+            print(
+                f"\nGenerating mathematically equidistant centerline from: {banks_input}..."
+            )
+            banks_gdf = gpd.read_file(banks_input)
+        else:
+            print(
+                "\nGenerating mathematically equidistant centerline from provided GeoDataFrame..."
+            )
+            banks_gdf = banks_input
 
         lines = [geom for geom in banks_gdf.geometry if geom.geom_type == "LineString"]
         for geom in banks_gdf.geometry:
@@ -400,8 +976,10 @@ class DTMChannelModifier:
             ],
             crs=banks_gdf.crs,
         )
-        center_gdf.to_file(output_shp_path)
-        print(f"Equidistant centerline successfully saved to: {output_shp_path}")
+        if output_shp_path:
+            center_gdf.to_file(output_shp_path)
+            print(f"Equidistant centerline successfully saved to: {output_shp_path}")
+        return center_gdf
 
     @staticmethod
     def _get_outward_offset_line(target_line, reference_line, dist):
@@ -440,12 +1018,18 @@ class DTMChannelModifier:
 
     @staticmethod
     def offset_bank_lines_outwards(
-        bank_shp_path: str, output_shp_path: str, offset_m: float = 0.2
+        banks_input, output_shp_path: str = None, offset_m: float = 0.2
     ):
-        print(
-            f"\nOffsetting bank lines outwards by {offset_m}m from: {bank_shp_path}..."
-        )
-        banks_gdf = gpd.read_file(bank_shp_path)
+        if isinstance(banks_input, str):
+            print(
+                f"\nOffsetting bank lines outwards by {offset_m}m from: {banks_input}..."
+            )
+            banks_gdf = gpd.read_file(banks_input)
+        else:
+            print(
+                f"\nOffsetting bank lines outwards by {offset_m}m from provided GeoDataFrame..."
+            )
+            banks_gdf = banks_input
 
         lines = []
         for geom in banks_gdf.geometry:
@@ -467,21 +1051,29 @@ class DTMChannelModifier:
             geometry=[new_line1, new_line2],
             crs=banks_gdf.crs,
         )
-        offset_gdf.to_file(output_shp_path)
-        print(f"Outward offset bank lines successfully saved to: {output_shp_path}")
+        if output_shp_path:
+            offset_gdf.to_file(output_shp_path)
+            print(f"Outward offset bank lines successfully saved to: {output_shp_path}")
+        return offset_gdf
 
     @staticmethod
     def create_polygon_mask_from_banks(
-        bank_shp_path: str, output_shp_path: str, offset_m: float = 0.2
+        banks_input, output_shp_path: str = None, offset_m: float = 0.2
     ):
         """
         Creates a closed polygon mask spanning between the two bank lines.
         Automatically offsets the lines outwards by offset_m before creating the polygon.
         """
-        print(
-            f"\nCreating polygon mask from banks (offset by {offset_m}m) from: {bank_shp_path}..."
-        )
-        banks_gdf = gpd.read_file(bank_shp_path)
+        if isinstance(banks_input, str):
+            print(
+                f"\nCreating polygon mask from banks (offset by {offset_m}m) from: {banks_input}..."
+            )
+            banks_gdf = gpd.read_file(banks_input)
+        else:
+            print(
+                f"\nCreating polygon mask from banks (offset by {offset_m}m) from provided GeoDataFrame..."
+            )
+            banks_gdf = banks_input
 
         lines = []
         for geom in banks_gdf.geometry:
@@ -523,5 +1115,7 @@ class DTMChannelModifier:
         poly_gdf = gpd.GeoDataFrame(
             [{"Name": "Bank Mask Polygon", "geometry": mask_poly}], crs=banks_gdf.crs
         )
-        poly_gdf.to_file(output_shp_path)
-        print(f"Mask polygon successfully saved to: {output_shp_path}")
+        if output_shp_path:
+            poly_gdf.to_file(output_shp_path)
+            print(f"Mask polygon successfully saved to: {output_shp_path}")
+        return poly_gdf
