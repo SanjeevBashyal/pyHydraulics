@@ -3,6 +3,8 @@
 credentials.json
 master_credentials.json
 
+*.tif
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
