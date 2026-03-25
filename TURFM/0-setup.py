@@ -1,6 +1,12 @@
 import os
 import numpy as np
 
+PROJECT_FOLDER = r"C:\Users\Ripple\Downloads\Turkey Flood\9 HECRAS-Test"  # Base folder for the project
+
+PROJECT_SHORT_NAME = "ATATURK-T"      # Name of the project
+
+STEP_REACHED = 0
+
 PROJECT_LONG_NAME = "BUR-BUR-MER-" + PROJECT_SHORT_NAME
 
 PROJ_PATH = os.path.join(PROJECT_FOLDER, '0 Proj')
@@ -25,8 +31,3 @@ if not os.path.exists(PROJECT_FOLDER):
     os.makedirs(GIS_PATH)
     os.makedirs(OUTPUT_PATH)
     print(f"Project folder created at: {PROJECT_FOLDER} and now add BUR-BUR Data")
-
-HECRAS_VERSION = "RAS67.HECRASController" # HEC-RAS COM identifier
-
-HEC_PROJECT_NAME = PROJECT_SHORT_NAME
-# HEC_GEOMETRY_NAME = 
