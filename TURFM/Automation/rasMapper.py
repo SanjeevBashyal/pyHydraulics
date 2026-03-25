@@ -749,6 +749,25 @@ def _station_sort_value(value: Any) -> float:
         return float("inf")
 
 
+def _dedupe_consecutive_points(
+    points: Sequence[Tuple[float, float]],
+    tol: float = 1e-9,
+) -> List[Tuple[float, float]]:
+    deduped: List[Tuple[float, float]] = []
+    for point in points:
+        if not deduped:
+            deduped.append(point)
+            continue
+        prev = deduped[-1]
+        if (
+            abs(prev[0] - point[0]) <= tol
+            and abs(prev[1] - point[1]) <= tol
+        ):
+            continue
+        deduped.append(point)
+    return deduped
+
+
 @log_call
 def load_cross_sections(csv_path: Path) -> List[CrossSectionInfo]:
     data = pd.read_csv(csv_path)
@@ -761,7 +780,9 @@ def load_cross_sections(csv_path: Path) -> List[CrossSectionInfo]:
 
     sections: List[CrossSectionInfo] = []
     for station, group in data.groupby("Station", sort=False):
-        points = list(zip(group["X"].astype(float), group["Y"].astype(float)))
+        points = _dedupe_consecutive_points(
+            list(zip(group["X"].astype(float), group["Y"].astype(float)))
+        )
         xs = [pt[0] for pt in points]
         ys = [pt[1] for pt in points]
         sections.append(
@@ -990,6 +1011,14 @@ def _register_map_layer(
     tree.write(rasmap_path, encoding="utf-8", xml_declaration=False)
 
 
+def _relative_rasmap_filename(rasmap_path: Path, layer_file: Path) -> str:
+    try:
+        relative_path = layer_file.relative_to(rasmap_path.parent)
+        return ".\\" + str(relative_path).replace("/", "\\")
+    except ValueError:
+        return str(layer_file)
+
+
 def _remove_map_layer(rasmap_path: Path, layer_name: str) -> bool:
     tree = ET.parse(rasmap_path)
     root = tree.getroot()
@@ -1123,6 +1152,102 @@ def _sync_landcover_map_layers(config: RasMapperConfig) -> None:
             "InterpolatedLayer",
             rasmap_path=config.rasmap_path,
         )
+
+
+def _ensure_geometry_landcover_association(config: RasMapperConfig) -> bool:
+    if not config.rasmap_path.exists():
+        return False
+
+    tree = ET.parse(config.rasmap_path)
+    root = tree.getroot()
+    geometries = root.find("Geometries")
+    if geometries is None:
+        return False
+
+    target_filename = _relative_rasmap_filename(
+        config.rasmap_path,
+        config.geom_hdf_path,
+    )
+    target_layer = None
+    for layer in geometries.findall("Layer"):
+        if layer.get("Type") != "RASGeometry":
+            continue
+        filename = layer.get("Filename", "")
+        name = layer.get("Name", "")
+        if filename == target_filename or name == config.geometry_title:
+            target_layer = layer
+            break
+
+    if target_layer is None:
+        return False
+
+    changed = False
+
+    def _find_child(
+        *, layer_type: Optional[str] = None, layer_name: Optional[str] = None
+    ) -> Optional[ET.Element]:
+        for child in target_layer.findall("Layer"):
+            if layer_type is not None and child.get("Type") != layer_type:
+                continue
+            if layer_name is not None and child.get("Name") != layer_name:
+                continue
+            return child
+        return None
+
+    landcover_regions = _find_child(layer_type="RasLandCoverRegions")
+    if landcover_regions is None:
+        landcover_regions = ET.SubElement(target_layer, "Layer")
+        landcover_regions.set("Type", "RasLandCoverRegions")
+        landcover_regions.set("Checked", "True")
+        changed = True
+    else:
+        if landcover_regions.get("Checked") != "True":
+            landcover_regions.set("Checked", "True")
+            changed = True
+
+    final_n = _find_child(layer_type="FinalNValueLayer")
+    if final_n is None:
+        final_n = ET.SubElement(target_layer, "Layer")
+        final_n.set("Type", "FinalNValueLayer")
+        final_n.set("Checked", "True")
+        ET.SubElement(final_n, "ResampleMethod").text = "near"
+        surface = ET.SubElement(final_n, "Surface")
+        surface.set("On", "True")
+        changed = True
+    else:
+        if final_n.get("Checked") != "True":
+            final_n.set("Checked", "True")
+            changed = True
+        if final_n.find("ResampleMethod") is None:
+            ET.SubElement(final_n, "ResampleMethod").text = "near"
+            changed = True
+        if final_n.find("Surface") is None:
+            surface = ET.SubElement(final_n, "Surface")
+            surface.set("On", "True")
+            changed = True
+
+    mannings_group = _find_child(
+        layer_type="InterpretationOverrideGroupLayer",
+        layer_name="Manning's n",
+    )
+    if mannings_group is None:
+        mannings_group = ET.SubElement(target_layer, "Layer")
+        mannings_group.set("Name", "Manning's n")
+        mannings_group.set("Type", "InterpretationOverrideGroupLayer")
+        mannings_group.set("Checked", "True")
+        mannings_group.set("Expanded", "True")
+        changed = True
+    else:
+        if mannings_group.get("Checked") != "True":
+            mannings_group.set("Checked", "True")
+            changed = True
+        if mannings_group.get("Expanded") != "True":
+            mannings_group.set("Expanded", "True")
+            changed = True
+
+    if changed:
+        tree.write(config.rasmap_path, encoding="utf-8", xml_declaration=False)
+    return changed
 
 
 def _load_landcover_table(shp_path: Path) -> pd.DataFrame:
@@ -2216,6 +2341,44 @@ def _offset_segment_outside_ring(
     return max(candidates, key=lambda item: item[1])[2]
 
 
+def _offset_polyline_outside_ring(
+    polyline: Sequence[Tuple[float, float]],
+    ring: Sequence[Tuple[float, float]],
+    offset_distance: float,
+) -> List[Tuple[float, float]]:
+    if len(polyline) < 2 or offset_distance <= 0:
+        return list(polyline)
+
+    start = polyline[0]
+    end = polyline[-1]
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    seg_len = math.hypot(dx, dy)
+    if seg_len == 0:
+        return list(polyline)
+
+    nx = -dy / seg_len
+    ny = dx / seg_len
+    centroid = _polygon_centroid(ring)
+    interior_side = _point_side_of_line(centroid, polyline)
+    preferred_sign = -1.0 if interior_side == "left" else 1.0
+
+    middle_index = len(polyline) // 2
+    middle_point = polyline[middle_index]
+    candidates = []
+    for sign in (preferred_sign, -preferred_sign):
+        ox = nx * offset_distance * sign
+        oy = ny * offset_distance * sign
+        shifted = [(point[0] + ox, point[1] + oy) for point in polyline]
+        shifted_mid = (middle_point[0] + ox, middle_point[1] + oy)
+        candidates.append((not _point_in_ring(shifted_mid, ring), shifted))
+
+    for outside, shifted in candidates:
+        if outside:
+            return shifted
+    return candidates[0][1]
+
+
 def build_boundary_lines_from_sources(
     sections: Sequence[CrossSectionInfo],
     perimeter_ring: Sequence[Tuple[float, float]],
@@ -2227,18 +2390,8 @@ def build_boundary_lines_from_sources(
         ("upstream BC", sections[0]),
         ("downstream BC", sections[-1]),
     ):
-        _, _, projection, edge_start, edge_end = _nearest_edge_segment(
-            section.mean_point,
-            perimeter_ring,
-        )
-        coords = _segment_centered_on_edge(
-            projection,
-            edge_start,
-            edge_end,
-            preferred_length=10.0,
-        )
-        coords = _offset_segment_outside_ring(
-            coords,
+        coords = _offset_polyline_outside_ring(
+            section.points,
             perimeter_ring,
             offset_distance=boundary_offset_distance,
         )
@@ -2430,7 +2583,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     for boundary in boundary_lines:
         start = boundary["coords"][0]
         end = boundary["coords"][-1]
-        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+        middle = boundary["coords"][len(boundary["coords"]) // 2]
         bc_lines.append(f"BC Line Name={boundary['name']:<32}\n")
         bc_lines.append(
             f"BC Line Storage Area={boundary['storage_area']}\n"
@@ -2444,8 +2597,11 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
         bc_lines.append(
             f"BC Line End Position= {end[0]} , {end[1]} \n"
         )
-        bc_lines.append("BC Line Arc= 2 \n")
-        bc_lines.append(_fixed_width_xy_line([start, end]))
+        bc_lines.append(f"BC Line Arc= {len(boundary['coords'])} \n")
+        bc_lines.extend(
+            _fixed_width_xy_line(chunk)
+            for chunk in _chunk_points(boundary["coords"], 2)
+        )
         bc_lines.append(
             "BC Line Text Position= 1.79769313486232E+308 , "
             "1.79769313486232E+308 \n"
@@ -2492,6 +2648,7 @@ def regenerate_geometry_hdf(
         ras_object=ras_obj,
         timeout=timeout,
         close_after=True,
+        mannings_layer_name="LandCover",
     )
 
     if not config.geom_hdf_path.exists():
@@ -2520,6 +2677,7 @@ def regenerate_geometry_hdf(
         create_landcover_layer_hdf(config, lookup_df)
         existing_landcover_status = install_existing_landcover_layer(config)
         _sync_landcover_map_layers(config)
+        geometry_assoc_updated = _ensure_geometry_landcover_association(config)
         region_df = sync_landcover_geometry(config, lookup_df)
         region_records = region_df.to_dict(orient="records")
         landcover_status = {
@@ -2531,6 +2689,7 @@ def regenerate_geometry_hdf(
             "lookup_records": lookup_df.to_dict(orient="records"),
             "region_records": region_records,
             "existing_ras_layer": existing_landcover_status,
+            "geometry_landcover_association_updated": geometry_assoc_updated,
         }
         config.landcover_status_json.write_text(
             json.dumps(_to_jsonable(landcover_status), indent=2),
@@ -2552,6 +2711,9 @@ def regenerate_geometry_hdf(
         "mesh_qc": mesh_qc,
         "removed_stale_landcover_layers": removed_layers,
         "timeout": timeout,
+        "geometry_association_selected": result.step_results.get(
+            "Associate geometry Manning's n layer"
+        ),
     }
 
 
@@ -2580,6 +2742,7 @@ def install_reference_geometry(
     create_landcover_layer_hdf(config, lookup_df)
     existing_landcover_status = install_existing_landcover_layer(config)
     _sync_landcover_map_layers(config)
+    geometry_assoc_updated = _ensure_geometry_landcover_association(config)
     expected_region_df = sync_landcover_geometry(config, lookup_df)
 
     summary = {
@@ -2602,6 +2765,7 @@ def install_reference_geometry(
         "active_landcover_map_hdf": config.active_landcover_map_hdf,
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "existing_ras_layer": existing_landcover_status,
+        "geometry_landcover_association_updated": geometry_assoc_updated,
         "region_mannings": expected_region_df.to_dict(orient="records"),
     }
     (config.reports_dir / "geometry_install_summary.json").write_text(
@@ -2631,8 +2795,11 @@ def sync_reference_geometry(config: RasMapperConfig) -> Dict[str, Any]:
         create_landcover_layer_hdf(config, lookup_df)
         existing_landcover_status = install_existing_landcover_layer(config)
         _sync_landcover_map_layers(config)
+        geometry_assoc_updated = _ensure_geometry_landcover_association(config)
         expected_region_df = sync_landcover_geometry(config, lookup_df)
         region_records = expected_region_df.to_dict(orient="records")
+    else:
+        geometry_assoc_updated = _ensure_geometry_landcover_association(config)
 
     summary = {
         "geom_path": config.geom_path,
@@ -2651,6 +2818,7 @@ def sync_reference_geometry(config: RasMapperConfig) -> Dict[str, Any]:
         "active_landcover_map_hdf": config.active_landcover_map_hdf,
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "existing_ras_layer": existing_landcover_status,
+        "geometry_landcover_association_updated": geometry_assoc_updated,
         "region_mannings": region_records,
         "geom_hdf_deleted": True,
     }
@@ -2977,6 +3145,7 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         _ensure_projection_element(config.rasmap_path, config.projection_copy)
 
     _sync_landcover_map_layers(config)
+    geometry_assoc_updated = _ensure_geometry_landcover_association(config)
     removed_layers = _cleanup_stale_landcover_layers(config.rasmap_path)
 
     landcover_status = {
@@ -2987,6 +3156,7 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "lookup_records": landcover_lookup.to_dict(orient="records"),
         "existing_ras_layer": existing_landcover_status,
+        "geometry_landcover_association_updated": geometry_assoc_updated,
     }
     config.landcover_status_json.write_text(
         json.dumps(_to_jsonable(landcover_status), indent=2),
@@ -3007,6 +3177,7 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "landcover_lookup_csv": config.landcover_lookup_csv,
         "existing_ras_layer": existing_landcover_status,
+        "geometry_landcover_association_updated": geometry_assoc_updated,
         "cross_sections_shp": config.cross_sections_shp,
         "boundary_shp": config.boundary_shp,
         "dss_catalog_csv": config.dss_catalog_csv,
