@@ -839,6 +839,75 @@ class DTMChannelModifier:
         return out_df
 
     @staticmethod
+    def export_centerline_shapefile(bank_shp_path: str, out_shp_path: str):
+        """Generates the river centerline from bank shapefiles and exports it to a shapefile."""
+        print(f"\nExporting centerline shapefile to: {out_shp_path}")
+        gdf = DTMChannelModifier.generate_centerline_from_banks(bank_shp_path)
+        
+        bank_gdf = gpd.read_file(bank_shp_path)
+        if hasattr(gdf, "crs") and gdf.crs is None:
+            gdf.set_crs(bank_gdf.crs, inplace=True)
+            
+        gdf.to_file(out_shp_path)
+
+    @staticmethod
+    def export_offset_bank_shapefile(bank_shp_path: str, offset_m: float, out_shp_path: str):
+        """
+        Reads bank shapefile, identifies left and right banks, and offsets them outward
+        by offset_m distance, exporting the modified lines as a new Shapefile.
+        """
+        print(f"Exporting offset bank shapefile ({offset_m}m) to: {out_shp_path}")
+        bank_gdf = gpd.read_file(bank_shp_path)
+        
+        lines = []
+        for geom in bank_gdf.geometry:
+            if geom.geom_type == 'LineString': lines.append(geom)
+            elif geom.geom_type == 'MultiLineString': lines.extend(geom.geoms)
+            
+        if len(lines) < 2:
+            raise ValueError("Bank shapefile must contain at least two LineStrings.")
+            
+        left_bank, right_bank = lines[0], lines[1]
+        
+        try:
+            # Shapely >= 2.0
+            l_offset = left_bank.offset_curve(offset_m)
+            r_offset = right_bank.offset_curve(-offset_m)
+        except AttributeError:
+            # Shapely < 2.0
+            l_offset = left_bank.parallel_offset(offset_m, 'left')
+            r_offset = right_bank.parallel_offset(offset_m, 'right')
+            
+        out_gdf = gpd.GeoDataFrame(geometry=[l_offset, r_offset], crs=bank_gdf.crs)
+        out_gdf.to_file(out_shp_path)
+
+    @staticmethod
+    def export_cross_section_shapefile(cross_section_csv: str, bank_shp_path: str, step_m: float, out_shp_path: str):
+        """
+        Runs cross section interpolation and exports the generated cross sections directly to a 3D Shapefile.
+        """
+        print(f"Exporting cross-section shapefile to: {out_shp_path}")
+        df = DTMChannelModifier.interpolate_cross_sections(cross_section_csv, bank_shp_path, step_m)
+        
+        group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
+        if not group_cols:
+            group_cols = ['Station'] if 'Station' in df.columns else []
+
+        grouped = df.groupby(group_cols) if group_cols else [(None, df)]
+        
+        lines = []
+        names = []
+        for name, group in grouped:
+            coords = group[['X', 'Y', 'Z']].values
+            if len(coords) < 2: continue
+            lines.append(LineString(coords))
+            names.append(str(name[-1]) if isinstance(name, tuple) else str(name))
+            
+        bank_gdf = gpd.read_file(bank_shp_path)
+        out_gdf = gpd.GeoDataFrame({'Station': names}, geometry=lines, crs=bank_gdf.crs)
+        out_gdf.to_file(out_shp_path)
+
+    @staticmethod
     def calculate_bank_widths(cross_section_csv: str, bank_shp_path: str, out_csv: str = None):
         """
         For each cross section, calculates the bank-to-bank width: the length of the

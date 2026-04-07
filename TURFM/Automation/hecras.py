@@ -150,15 +150,27 @@ class HECRAS:
 
     def __init__(
         self,
-        hecras_version: str = "RAS66.HECRASController",
+        hecras_version: str = "6.6",
         ras_exe_path: Optional[str | Path] = None,
     ) -> None:
-        self.hecras_version = hecras_version
-        self.ras_exe_path = (
-            Path(ras_exe_path)
-            if ras_exe_path is not None
-            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\Ras.exe")
-        )
+        import re
+        
+        # Streamline HEC-RAS version parsing natively directly from strings like "6.6"
+        if "HECRASController" not in hecras_version:
+            clean_version = hecras_version.replace(".", "")
+            self.hecras_version = f"RAS{clean_version}.HECRASController"
+            version_folder = hecras_version
+        else:
+            self.hecras_version = hecras_version
+            match = re.search(r"RAS(\d)(\d+)", hecras_version)
+            version_folder = f"{match.group(1)}.{match.group(2)}" if match else "6.6"
+
+        if ras_exe_path is not None:
+            self.ras_exe_path = Path(ras_exe_path)
+        else:
+            x86_path = Path(rf"C:\Program Files (x86)\HEC\HEC-RAS\{version_folder}\Ras.exe")
+            x64_path = Path(rf"C:\Program Files\HEC\HEC-RAS\{version_folder}\Ras.exe")
+            self.ras_exe_path = x86_path if x86_path.exists() else x64_path
         self.hec = None
         self.project_path: Optional[Path] = None
         self.project_name: Optional[str] = None
@@ -195,19 +207,21 @@ class HECRAS:
             self.hec = None
 
     def open_project(self, project_path: str | Path, project_name: str) -> bool:
-        """Open an existing HEC-RAS project through COM."""
+        """Open an existing HEC-RAS project through COM, with native fallback path caching."""
+        self.project_path = Path(project_path)
+        self.project_name = project_name
+        prj_path = self.project_path / f"{project_name}.prj"
+        
         if self.hec is None and not self.connect():
+            logger.warning("COM Connection failed. Project path cached for native subprocess GUI launch.")
             return False
 
-        prj_path = Path(project_path) / f"{project_name}.prj"
         try:
             self.hec.Project_Open(str(prj_path))
-            self.project_path = Path(project_path)
-            self.project_name = project_name
-            logger.info("Opened project in HEC-RAS: %s", prj_path)
+            logger.info("Opened project in HEC-RAS COM automation: %s", prj_path)
             return True
         except Exception as exc:
-            logger.error("Failed to open project %s: %s", prj_path, exc)
+            logger.error("Failed to open project %s via COM: %s", prj_path, exc)
             return False
 
     def save_project(self) -> None:
@@ -232,15 +246,29 @@ class HECRAS:
             return False, str(exc)
 
     def show_window(self, delay_seconds: int = 3) -> None:
-        """Show the HEC-RAS window if COM automation is active."""
-        if self.hec is None:
-            return
-
-        try:
-            self.hec.ShowRAS()
-            time.sleep(delay_seconds)
-        except Exception as exc:
-            logger.warning("Could not show HEC-RAS window: %s", exc)
+        """
+        Show the HEC-RAS window using COM automation.
+        If COM is unavailable, falls back to direct subprocess execution launching the GUI natively.
+        """
+        import subprocess
+        
+        if self.hec is not None:
+            try:
+                self.hec.ShowRAS()
+                time.sleep(delay_seconds)
+                return
+            except Exception as exc:
+                logger.warning("Could not show HEC-RAS window via COM: %s", exc)
+                
+        if self.project_path and self.project_name and self.ras_exe_path:
+            prj_path = self.project_path / f"{self.project_name}.prj"
+            try:
+                logger.info("Launching HEC-RAS directly via subprocess (rasMapper style fallback)...")
+                command = f'"{self.ras_exe_path}" "{prj_path}"'
+                subprocess.Popen(command)
+                time.sleep(delay_seconds)
+            except Exception as e:
+                logger.error("Failed to directly launch HEC-RAS executable natively: %s", e)
 
     def build_steady_1d_model(
         self,
