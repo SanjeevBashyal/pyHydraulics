@@ -137,14 +137,14 @@ def generate_combined_workflow():
         
         print("\nBuilding HEC-RAS Native 1D Steady Model Files...")
         hec = HECRAS(hecras_version=HECRAS_VERSION, ras_exe_path=RAS_EXE_PATH)
-        hec.build_steady_1d_model(
-            project_folder=OUTPUT_PATH,
-            project_stem=project_stem,
-            project_title=project_title,
-            cross_section_csv=CROSS_SECTION_FILE_PATH,
-            bank_lines_shp=BANK_LINE_FILE_PATH,
-            flow_cms=13.0
-        )
+        # hec.build_steady_1d_model(
+        #     project_folder=OUTPUT_PATH,
+        #     project_stem=project_stem,
+        #     project_title=project_title,
+        #     cross_section_csv=CROSS_SECTION_FILE_PATH,
+        #     bank_lines_shp=BANK_LINE_FILE_PATH,
+        #     flow_cms=13.0
+        # )
         
         # 3. RAS Mapper Architecture Assignment
         rasmap_path = Path(OUTPUT_PATH) / f"{project_stem}.rasmap"
