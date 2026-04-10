@@ -404,7 +404,7 @@ class DTMChannelModifier:
 
         # Load banks and generate polygon mask explicitly from sequence of shapefile lines
         import geopandas as gpd
-        modifier.banks_gdf = gpd.read_file(bank_shp_path)
+        modifier.banks_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
         poly_gdf = DTMChannelModifier.create_polygon_mask_from_banks(modifier.banks_gdf)
         modifier.channel_polygon = poly_gdf.geometry.iloc[0]
 
@@ -652,6 +652,233 @@ class DTMChannelModifier:
     # STATIC METHOD TOOLS
     # =========================================================
     @staticmethod
+    def clean_and_merge_banklines(banks_input, micro_tolerance=0.5, macro_tolerance=50.0, angle_tol=30.0, bridge_junctions=True):
+        import geopandas as gpd
+        from shapely.geometry import LineString, Point
+        import numpy as np
+        import math
+        
+        if isinstance(banks_input, str):
+            gdf = gpd.read_file(banks_input)
+        else:
+            gdf = banks_input.copy()
+            
+        lines = []
+        for geom in gdf.geometry:
+            if geom.geom_type == 'LineString':
+                lines.append(geom)
+            elif geom.geom_type == 'MultiLineString':
+                lines.extend(list(geom.geoms))
+                
+        if len(lines) <= 2:
+            return gdf
+
+        def get_vec_at_end(coords, start_idx, end_idx):
+            dx = coords[end_idx][0] - coords[start_idx][0]
+            dy = coords[end_idx][1] - coords[start_idx][1]
+            length = math.hypot(dx, dy)
+            if length == 0: return (0, 0)
+            return (dx/length, dy/length)
+
+        def angle_between(v1, v2):
+            dot = v1[0]*v2[0] + v1[1]*v2[1]
+            dot = max(-1.0, min(1.0, dot))
+            return math.degrees(math.acos(dot))
+            
+        def merge_pass(current_lines, tolerance, use_angles=False):
+            while len(current_lines) > 2:
+                min_dist = float('inf')
+                best_pair = None
+                best_mode = None
+                
+                for i in range(len(current_lines)):
+                    for j in range(i+1, len(current_lines)):
+                        c1 = list(current_lines[i].coords)
+                        c2 = list(current_lines[j].coords)
+                        
+                        d_ss = Point(c1[0]).distance(Point(c2[0]))
+                        d_se = Point(c1[0]).distance(Point(c2[-1]))
+                        d_es = Point(c1[-1]).distance(Point(c2[0]))
+                        d_ee = Point(c1[-1]).distance(Point(c2[-1]))
+                        
+                        dists = [(d_ss, 'ss'), (d_se, 'se'), (d_es, 'es'), (d_ee, 'ee')]
+                        dists.sort(key=lambda x: x[0])
+                        
+                        if dists[0][0] < min_dist and dists[0][0] < tolerance:
+                            dist, mode = dists[0]
+                            valid = True
+                            if use_angles and dist > 0:
+                                idx1_s = 0; idx1_e = min(3, len(c1)-1)
+                                idx1_s_rev = len(c1)-1; idx1_e_rev = max(0, len(c1)-4)
+                                idx2_s = 0; idx2_e = min(3, len(c2)-1)
+                                idx2_s_rev = len(c2)-1; idx2_e_rev = max(0, len(c2)-4)
+                                
+                                if mode == 'es':
+                                    vec_in = get_vec_at_end(c1, max(0, len(c1)-10), len(c1)-1)
+                                    vec_out = get_vec_at_end(c2, 0, min(9, len(c2)-1))
+                                    a1 = angle_between(vec_in, vec_out)
+                                    if a1 > angle_tol: valid = False
+                                        
+                                if mode == 'se':
+                                    vec_in = get_vec_at_end(c2, max(0, len(c2)-10), len(c2)-1)
+                                    vec_out = get_vec_at_end(c1, 0, min(9, len(c1)-1))
+                                    a1 = angle_between(vec_in, vec_out)
+                                    if a1 > angle_tol: valid = False
+                                        
+                                if mode == 'ss':
+                                    vec1_out = get_vec_at_end(c1, min(9, len(c1)-1), 0)
+                                    vec2_out = get_vec_at_end(c2, 0, min(9, len(c2)-1))
+                                    if angle_between(vec1_out, vec2_out) > angle_tol: valid = False
+                                        
+                                if mode == 'ee':
+                                    vec1_in = get_vec_at_end(c1, max(0, len(c1)-10), len(c1)-1)
+                                    vec2_in = get_vec_at_end(c2, len(c2)-1, max(0, len(c2)-10))
+                                    if angle_between(vec1_in, vec2_in) > angle_tol: valid = False
+                                    
+                            if valid:
+                                min_dist = dist
+                                best_pair = (i, j)
+                                best_mode = mode
+
+                if best_pair:
+                    i, j = best_pair
+                    c1 = list(current_lines[i].coords)
+                    c2 = list(current_lines[j].coords)
+                    
+                    if best_mode == 'ss': new_coords = c1[::-1] + c2
+                    elif best_mode == 'se': new_coords = c2 + c1
+                    elif best_mode == 'es': new_coords = c1 + c2
+                    elif best_mode == 'ee': new_coords = c1 + c2[::-1]
+                        
+                    merged_line = LineString(new_coords)
+                    l1, l2 = current_lines[i], current_lines[j]
+                    current_lines.remove(l1)
+                    current_lines.remove(l2)
+                    current_lines.append(merged_line)
+                else:
+                    break
+            return current_lines
+            
+        lines = merge_pass(lines, micro_tolerance, use_angles=False)
+        lines = merge_pass(lines, macro_tolerance, use_angles=True)
+
+        if len(lines) > 2 and bridge_junctions:
+            lines.sort(key=lambda l: l.length, reverse=True)
+            main_bank = lines[0]
+            fragments = lines[1:]
+            
+            def dist_to_main(pt):
+                return Point(pt).distance(main_bank)
+            
+            while len(fragments) > 1:
+                min_dist = float('inf')
+                best_pair = None
+                best_mode = None
+                
+                for i in range(len(fragments)):
+                    for j in range(i+1, len(fragments)):
+                        c1 = list(fragments[i].coords)
+                        c2 = list(fragments[j].coords)
+                        dists = [
+                            (Point(c1[0]).distance(Point(c2[0])), 'ss'),
+                            (Point(c1[0]).distance(Point(c2[-1])), 'se'),
+                            (Point(c1[-1]).distance(Point(c2[0])), 'es'),
+                            (Point(c1[-1]).distance(Point(c2[-1])), 'ee')
+                        ]
+                        dists.sort(key=lambda x: x[0])
+                        if dists[0][0] < min_dist:
+                            min_dist = dists[0][0]
+                            best_pair = (i, j)
+                            best_mode = dists[0][1]
+                
+                if best_pair:
+                    i, j = best_pair
+                    c1 = list(fragments[i].coords)
+                    c2 = list(fragments[j].coords)
+                    
+                    sample_pts = c1[::max(1, len(c1)//20)] + c2[::max(1, len(c2)//20)]
+                    med_width = np.median([dist_to_main(pt) for pt in sample_pts])
+                    threshold = med_width * 1.15
+                    
+                    def trim_end(coords, from_end=True):
+                        idx = len(coords)-1 if from_end else 0
+                        step = -1 if from_end else 1
+                        while 0 <= idx < len(coords) and dist_to_main(coords[idx]) > threshold:
+                            idx += step
+                        
+                        if from_end:
+                            return coords[:max(2, idx+1)]
+                        else:
+                            return coords[min(len(coords)-2, idx):]
+
+                    if best_mode == 'es':
+                        coords1 = trim_end(c1, True)
+                        coords2 = trim_end(c2, False)
+                        p1, p2 = coords1[-1], coords2[0]
+                    elif best_mode == 'se':
+                        coords1 = trim_end(c2, True)
+                        coords2 = trim_end(c1, False)
+                        p1, p2 = coords1[-1], coords2[0]
+                    elif best_mode == 'ss':
+                        coords1 = trim_end(c1, False)[::-1]
+                        coords2 = trim_end(c2, False)
+                        p1, p2 = coords1[-1], coords2[0]
+                    elif best_mode == 'ee':
+                        coords1 = trim_end(c1, True)
+                        coords2 = trim_end(c2, True)[::-1]
+                        p1, p2 = coords1[-1], coords2[0]
+                        
+                    def generate_bridge(pt1, pt2, n_points=15):
+                        pd1 = main_bank.project(Point(pt1))
+                        pd2 = main_bank.project(Point(pt2))
+                        w1 = Point(pt1).distance(main_bank)
+                        w2 = Point(pt2).distance(main_bank)
+                        
+                        if abs(pd2 - pd1) < 1e-3: return []
+                        dists = np.linspace(pd1, pd2, n_points + 2)[1:-1]
+                        
+                        def get_normal(d):
+                            P_next = main_bank.interpolate(min(d + 0.5, main_bank.length))
+                            P_prev = main_bank.interpolate(max(d - 0.5, 0.0))
+                            dx, dy = P_next.x - P_prev.x, P_next.y - P_prev.y
+                            L = math.hypot(dx, dy)
+                            if L == 0: return 0, 0
+                            return -dy/L, dx/L
+                        
+                        pb1 = main_bank.interpolate(pd1)
+                        nx1, ny1 = get_normal(pd1)
+                        tp1 = Point(pb1.x + w1 * nx1, pb1.y + w1 * ny1)
+                        tp2 = Point(pb1.x - w1 * nx1, pb1.y - w1 * ny1)
+                        sign = 1 if tp1.distance(Point(pt1)) < tp2.distance(Point(pt1)) else -1
+                        
+                        bridge = []
+                        for i, d in enumerate(dists):
+                            w = w1 + (w2 - w1) * (i + 1) / (n_points + 1)
+                            pb = main_bank.interpolate(d)
+                            nx, ny = get_normal(d)
+                            bridge.append((pb.x + sign * w * nx, pb.y + sign * w * ny))
+                        return bridge
+                        
+                    new_coords = coords1 + generate_bridge(p1, p2) + coords2
+                        
+                    merged_frag = LineString(new_coords)
+                    f1 = fragments[i]
+                    f2 = fragments[j]
+                    fragments.remove(f1)
+                    fragments.remove(f2)
+                    fragments.append(merged_frag)
+                    
+            lines = [main_bank, fragments[0]]
+            
+        elif len(lines) > 2 and not bridge_junctions:
+            # Sort by length for predictable consistent ordering, but keep all fragments
+            lines.sort(key=lambda l: l.length, reverse=True)
+
+        out_gdf = gpd.GeoDataFrame(geometry=lines, crs=gdf.crs)
+        return out_gdf
+
+
+    @staticmethod
     def create_cross_section_mask(cross_section_csv: str, bank_shp_path: str, interval: float = 1.0):
         """
         Creates a custom polygon mask by walking the centerline at 'interval' meters and interpolating 
@@ -665,7 +892,7 @@ class DTMChannelModifier:
         from shapely.ops import nearest_points
 
         df = pd.read_csv(cross_section_csv)
-        banks_gdf = gpd.read_file(bank_shp_path)
+        banks_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
         centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks_gdf)
         if centerline_gdf.empty:
             raise ValueError("Failed to generate centerline from banks.")
@@ -844,7 +1071,7 @@ class DTMChannelModifier:
         print(f"\nExporting centerline shapefile to: {out_shp_path}")
         gdf = DTMChannelModifier.generate_centerline_from_banks(bank_shp_path)
         
-        bank_gdf = gpd.read_file(bank_shp_path)
+        bank_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
         if hasattr(gdf, "crs") and gdf.crs is None:
             gdf.set_crs(bank_gdf.crs, inplace=True)
             
@@ -853,11 +1080,15 @@ class DTMChannelModifier:
     @staticmethod
     def export_offset_bank_shapefile(bank_shp_path: str, offset_m: float, out_shp_path: str):
         """
-        Reads bank shapefile, identifies left and right banks, and offsets them outward
+        Reads bank shapefile, identifies all separate banks, and offsets them outward
         by offset_m distance, exporting the modified lines as a new Shapefile.
         """
-        print(f"Exporting offset bank shapefile ({offset_m}m) to: {out_shp_path}")
-        bank_gdf = gpd.read_file(bank_shp_path)
+        import numpy as np
+        import geopandas as gpd
+        
+        print(f"Exporting outward offset bank shapefile ({offset_m}m) to: {out_shp_path}")
+        # Keep junction gaps and hooks for the final output shapefile
+        bank_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path, bridge_junctions=False)
         
         lines = []
         for geom in bank_gdf.geometry:
@@ -867,18 +1098,28 @@ class DTMChannelModifier:
         if len(lines) < 2:
             raise ValueError("Bank shapefile must contain at least two LineStrings.")
             
-        left_bank, right_bank = lines[0], lines[1]
+        # Get centerline to reliably check which offset direction is "outwards"
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(bank_shp_path)
+        centerline = centerline_gdf.geometry.iloc[0]
         
-        try:
-            # Shapely >= 2.0
-            l_offset = left_bank.offset_curve(offset_m)
-            r_offset = right_bank.offset_curve(-offset_m)
-        except AttributeError:
-            # Shapely < 2.0
-            l_offset = left_bank.parallel_offset(offset_m, 'left')
-            r_offset = right_bank.parallel_offset(offset_m, 'right')
+        final_lines = []
+        for line in lines:
+            try:
+                o1 = line.offset_curve(offset_m)
+                o2 = line.offset_curve(-offset_m)
+            except AttributeError:
+                o1 = line.parallel_offset(offset_m, 'left')
+                o2 = line.parallel_offset(offset_m, 'right')
+                
+            pts1 = [o1.interpolate(frac, normalized=True) for frac in np.linspace(0, 1, 10)]
+            pts2 = [o2.interpolate(frac, normalized=True) for frac in np.linspace(0, 1, 10)]
             
-        out_gdf = gpd.GeoDataFrame(geometry=[l_offset, r_offset], crs=bank_gdf.crs)
+            d1 = np.mean([pt.distance(centerline) for pt in pts1])
+            d2 = np.mean([pt.distance(centerline) for pt in pts2])
+            
+            final_lines.append(o1 if d1 > d2 else o2)
+            
+        out_gdf = gpd.GeoDataFrame(geometry=final_lines, crs=bank_gdf.crs)
         out_gdf.to_file(out_shp_path)
 
     @staticmethod
@@ -903,7 +1144,7 @@ class DTMChannelModifier:
             lines.append(LineString(coords))
             names.append(str(name[-1]) if isinstance(name, tuple) else str(name))
             
-        bank_gdf = gpd.read_file(bank_shp_path)
+        bank_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
         out_gdf = gpd.GeoDataFrame({'Station': names}, geometry=lines, crs=bank_gdf.crs)
         out_gdf.to_file(out_shp_path)
 
@@ -916,7 +1157,7 @@ class DTMChannelModifier:
         print("\nCalculating cross-section widths between banks...")
 
         df = pd.read_csv(cross_section_csv)
-        banks = gpd.read_file(bank_shp_path)
+        banks = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
 
         lines = []
         for geom in banks.geometry:
@@ -980,7 +1221,7 @@ class DTMChannelModifier:
         print("\nCalculating bank reach lengths between cross sections...")
         
         df = pd.read_csv(cross_section_csv)
-        banks = gpd.read_file(bank_shp_path)
+        banks = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
         
         centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks)
         if centerline_gdf.empty:
@@ -1063,7 +1304,7 @@ class DTMChannelModifier:
             print(
                 f"\nGenerating mathematically equidistant centerline from: {banks_input}..."
             )
-            banks_gdf = gpd.read_file(banks_input)
+            banks_gdf = DTMChannelModifier.clean_and_merge_banklines(banks_input)
         else:
             print(
                 "\nGenerating mathematically equidistant centerline from provided GeoDataFrame..."
@@ -1188,7 +1429,7 @@ class DTMChannelModifier:
             print(
                 f"\nOffsetting bank lines outwards by {offset_m}m from: {banks_input}..."
             )
-            banks_gdf = gpd.read_file(banks_input)
+            banks_gdf = DTMChannelModifier.clean_and_merge_banklines(banks_input)
         else:
             print(
                 f"\nOffsetting bank lines outwards by {offset_m}m from provided GeoDataFrame..."
@@ -1235,7 +1476,7 @@ class DTMChannelModifier:
             print(
                 f"\nCreating polygon mask from banks (offset by {offset_m}m) from: {banks_input}..."
             )
-            banks_gdf = gpd.read_file(banks_input)
+            banks_gdf = DTMChannelModifier.clean_and_merge_banklines(banks_input)
         else:
             print(
                 f"\nCreating polygon mask from banks (offset by {offset_m}m) from provided GeoDataFrame..."

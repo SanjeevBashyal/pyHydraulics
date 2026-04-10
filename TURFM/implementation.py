@@ -18,8 +18,8 @@ print("Loading Configuration and ensuring directories exist...")
 app_config = Config()
 
 # Example: Set project context dynamically (Users can modify this path for their own usage)
-user_project_path = r"C:\Users\Ripple\Downloads\Turkey Flood\9 HECRAS-Test"
-app_config.set_project_folder(user_project_path, short_name="ATATURK-T")
+user_project_path = r"C:\Users\Legion\Downloads\Test-HEC"
+app_config.set_project_folder(user_project_path, short_name="SULTAN_DERE3A")
 
 app_config.setup_directories()
 
