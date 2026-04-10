@@ -1206,9 +1206,12 @@ class DTMChannelModifier:
             raise ValueError("The shapefile must contain at least two line geometries.")
 
         line1, line2 = lines[0], lines[1]
+        
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks_gdf)
+        centerline = centerline_gdf.geometry.iloc[0]
 
-        new_line1 = DTMChannelModifier._get_outward_offset_line(line1, line2, offset_m)
-        new_line2 = DTMChannelModifier._get_outward_offset_line(line2, line1, offset_m)
+        new_line1 = DTMChannelModifier._get_outward_offset_line(line1, centerline, offset_m)
+        new_line2 = DTMChannelModifier._get_outward_offset_line(line2, centerline, offset_m)
 
         offset_gdf = gpd.GeoDataFrame(
             {"Name": ["Bank 1 Offset Outward", "Bank 2 Offset Outward"]},
@@ -1251,9 +1254,12 @@ class DTMChannelModifier:
 
         line1, line2 = lines[0], lines[1]
 
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks_gdf)
+        centerline = centerline_gdf.geometry.iloc[0]
+
         # 1. Offset the lines outwards
-        new_line1 = DTMChannelModifier._get_outward_offset_line(line1, line2, offset_m)
-        new_line2 = DTMChannelModifier._get_outward_offset_line(line2, line1, offset_m)
+        new_line1 = DTMChannelModifier._get_outward_offset_line(line1, centerline, offset_m)
+        new_line2 = DTMChannelModifier._get_outward_offset_line(line2, centerline, offset_m)
 
         coords1 = list(new_line1.coords)
         coords2 = list(new_line2.coords)
@@ -1283,3 +1289,23 @@ class DTMChannelModifier:
             poly_gdf.to_file(output_shp_path)
             print(f"Mask polygon successfully saved to: {output_shp_path}")
         return poly_gdf
+
+    @staticmethod
+    def export_study_perimeter(bank_shp_path: str, output_shp_path: str, offset_m: float = 500.0):
+        print(f"\nExporting study perimeter (buffered by {offset_m}m) to: {output_shp_path}...")
+        
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(bank_shp_path)
+        centerline = centerline_gdf.geometry.iloc[0]
+        
+        # Buffer the centerline by offset_m on both sides, creating a polygon.
+        study_polygon = centerline.buffer(offset_m)
+        
+        perimeter_gdf = gpd.GeoDataFrame(
+            [{"Name": f"Study Perimeter {offset_m}m", "geometry": study_polygon}], 
+            crs=centerline_gdf.crs
+        )
+        if output_shp_path:
+            perimeter_gdf.to_file(output_shp_path)
+            
+        return perimeter_gdf
+

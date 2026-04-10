@@ -41,6 +41,11 @@ try:
     bank_lines_file = dtm_processor.get_bank_lines(offset_m=0.2)
     print(f"-> Successfully generated Offset Bank Lines: {bank_lines_file}\n")
     
+    # D. Get Study Perimeter Shapefile (offset 500m)
+    perimeter_file = dtm_processor.get_study_perimeter(offset_m=500.0)
+    print(f"-> Successfully generated Study Perimeter: {perimeter_file}\n")
+    
+    
 except Exception as e:
     print(f"\n[ERROR] Processing failed: {e}")
     sys.exit(1)

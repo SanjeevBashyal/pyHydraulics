@@ -72,3 +72,12 @@ class DTM:
         offset_bank_shp = os.path.join(self.config.OUTPUT_PATH, output_filename)
         DTMChannelModifier.export_offset_bank_shapefile(self.config.BANK_LINE_FILE_PATH, offset_m, offset_bank_shp)
         return offset_bank_shp
+
+    def get_study_perimeter(self, output_filename="Study_Perimeter.shp", offset_m=500.0):
+        """
+        Generates and exports the study perimeter polygon (buffered on both sides by offset_m), returning its path.
+        """
+        print(f"--- STEP 4: Generating Study Perimeter (Offset: {offset_m}m) ---")
+        perimeter_shp = os.path.join(self.config.OUTPUT_PATH, output_filename)
+        DTMChannelModifier.export_study_perimeter(self.config.BANK_LINE_FILE_PATH, perimeter_shp, offset_m)
+        return perimeter_shp
