@@ -6,6 +6,8 @@ TURFM/rasmapper_v01/projects
 credentials.json
 master_credentials.json
 
+pNet/master_credentials.json
+
 *.tif
 
 # Byte-compiled / optimized / DLL files
