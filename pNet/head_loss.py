@@ -3,157 +3,154 @@ from sheets import GoogleSheetsClient
 def execute_head_loss(sheet_id, worksheet_name):
     client = GoogleSheetsClient()
     
-    print("Wiring HEC-RAS Newton-Raphson global properties to the Head Loss model...")
-    # -------------------------------------------------------------
-    # 1. Global Parameters Block 
-    # -------------------------------------------------------------
+    print("Writing Dual-Pass Mixed Regime solver to Head Loss model...")
+    
+    # 1. Global Boundary Parameters Block 
     param_block = [
-        ["Channel Properties", "", "Value", "", "", "Geometric Constraints", "", "Value"],
-        ["", "Manning's n", "0.015", "", "", "Bed Width (b)", "m", "3.00"],
-        ["", "Contraction Coeff (Kc)", "0.1", "", "", "Side Slope (z) [1:z]", "-", "0.0"],
-        ["", "Expansion Coeff (Ke)", "0.3", "", "", "Bend Coeff (Kb)", "-", "0.15"]
+        ["Channel Properties", "", "Value", "", "", "Boundary Conditions", "", "Value"],
+        ["", "Manning's n", "0.015", "", "", "Upstream Depth y_up", "m", "0.50"],
+        ["", "Contraction Coeff (Kc)", "0.1", "", "", "Downstream Depth y_dn", "m", "2.00"],
+        ["", "Expansion Coeff (Ke)", "0.3", "", "", "", "", ""],        
+        ["", "Bend Coeff (Kb)", "0.15", "", "", "", "", ""],
+        ["", "Reset (0: Hold, 1: Eval)", "1", "", "", "", "", ""],
+        ["", "Convergence Limit", "0.001", "", "", "", "", ""],
+        ["", "Relaxation Factor", "0.15", "", "", "", "", ""]
     ]
-    client.update_range(sheet_id, worksheet_name, "B8:I11", param_block, value_input_option="USER_ENTERED")
+    client.update_range(sheet_id, worksheet_name, "B8:I15", param_block, value_input_option="USER_ENTERED")
+    client.format_range(sheet_id, worksheet_name, "B8:I15", {
+        "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+    })
     client.format_range(sheet_id, worksheet_name, "B8:I8", {
         "textFormat": {"bold": True}, "backgroundColor": {"red": 0.85, "green": 0.85, "blue": 0.85}
     })
     
-    # -------------------------------------------------------------
-    # 2. Main Step Method Table
-    # -------------------------------------------------------------
-    start_row = 14
-    table_headers = [
-        [
-            "Sec", "Dist (m)", "Def Ang (deg)", "Length L (m)", "Bed Elev Z (m)", 
-            "Trial Depth y (m)", "Top Width T (m)", "Area A (m2)", "Hyd Depth Dh (m)", "Froude Fr", 
-            "Regime", "W_Perim P (m)", "Hyd Rad R (m)", "Vel v (m/s)", "Vel Head (m)", 
-            "Total Head H (m)", "Fric Slope Sf", "Avg Sf", "Fric Loss hf (m)", "Minor Loss he (m)", 
-            "Error Delta"
-        ]
-    ]
+    start_row = 18
+    num_rows = 10
     
-    # Static anchors:
-    # Q = $D$3
-    # g = $H$6
-    # Manning n = $D$9
-    # Kc = $D$10
-    # Ke = $D$11
-    # Bed Width = $I$9
-    # Side slope z = $I$10
-    # Bend Coeff Kb = $I$11
+    # Two header rows to organize columns cleanly
+    header_1 = [
+        ["Inputs", "", "", "", "", "", "Forward Pass (Supercritical)", "", "", "", "", "", "", "", "", "", "", "",
+         "Backward Pass (Subcritical)", "", "", "", "", "", "", "", "", "", "", "",
+         "Final Profile", ""]
+    ]
+    header_2 = [
+        ["Sec", "Dist", "Bed Z", "Bed Width b", "Side z", "Def Ang",
+         "Length L", "y_sup", "A_sup", "P_sup", "R_sup", "v_sup", "H_sup", "Sf_sup", "Error", "Status", "Fr_sup", "M_sup",
+         "Length L", "y_sub", "A_sub", "P_sub", "R_sub", "v_sub", "H_sub", "Sf_sub", "Error", "Status", "Fr_sub", "M_sub",
+         "y_final", "Regime"]
+    ]
     
     output_block = []
-    output_block.extend(table_headers)
+    output_block.extend(header_1)
+    output_block.extend(header_2)
     
-    for i in range(10):
-        current_row = start_row + 1 + i
-        prev_row = current_row - 1
+    for i in range(num_rows):
+        cur = start_row + 2 + i
+        prv = cur - 1
+        nxt = cur + 1
         
-        # Generic user columns A, B, C
+        # Cross Section Variables
         col_sec = str(i)
-        col_dist = str(i * 50)
-        col_def_ang = "0" if i == 0 else "15" if i == 5 else "0"
+        dist = i * 50
+        col_dist = str(dist)
+        col_z = str(100 - dist * 0.0001) if i == 0 else f"=C{prv} - (0.005 * (B{cur}-B{prv}))"
+        col_b = "3.0"
+        col_z_side = "0.0"
+        col_ang = "0" if i==0 else "30" if i==5 else "0"
+        
+        row_arr = [col_sec, col_dist, col_z, col_b, col_z_side, col_ang]
+        
+        # --- FORWARD PASS (Supercritical) ---
+        if i == 0:
+            row_arr.extend(["0", "=$I$9"])
+        else:
+            len_fwd = f"=B{cur} - B{prv}"
+            iter_y = f"=IF($D$13=0, H{prv}, IF(P{prv}=0, H{prv}, IF(H{cur}=0, H{prv}, IF(ABS(O{cur}) > $D$14, MAX(0.01, H{cur} + (O{cur} * $D$15 * IF(Q{cur} < 1, 1, -1))), H{cur}))))"
+            row_arr.extend([len_fwd, iter_y])
+            
+        col_a_sup = f"=(D{cur} + E{cur}*H{cur})*H{cur}"
+        col_p_sup = f"=D{cur} + 2*H{cur}*SQRT(1+E{cur}^2)"
+        col_r_sup = f"=I{cur} / J{cur}"
+        col_v_sup = f"=$D$3 / I{cur}"
+        col_h_sup = f"=C{cur} + H{cur} + (L{cur}^2) / (2*$H$6)"
+        col_sf_sup= f"=(L{cur} * $D$9 / (K{cur}^(2/3)))^2"
         
         if i == 0:
-            col_l = "0"      # D
-            col_z = "100"    # E
-            col_y = "1.5"    # F (Explicity fixed depth for BC)
+            row_arr.extend([col_a_sup, col_p_sup, col_r_sup, col_v_sup, col_h_sup, col_sf_sup, "0", f"=IF(ABS(O{cur})<$D$14, 1, 0)"])
         else:
-            col_l = f"=B{current_row} - B{prev_row}"
-            col_z = f"=E{prev_row} - (0.001 * D{current_row})"
+            hf = f"( (N{prv}+N{cur})/2 ) * G{cur}"
+            he = f"IF(L{prv}>L{cur}, $D$11*( (L{prv}^2)/(2*$H$6) - (L{cur}^2)/(2*$H$6) ), $D$10*( (L{cur}^2)/(2*$H$6) - (L{prv}^2)/(2*$H$6) )) + ($D$12 * (F{cur}/90) * (L{cur}^2)/(2*$H$6))"
+            err= f"=M{prv} - ({hf}) - ({he}) - M{cur}"
+            stat= f"=IF(ABS(O{cur})<$D$14, 1, 0)"
+            row_arr.extend([col_a_sup, col_p_sup, col_r_sup, col_v_sup, col_h_sup, col_sf_sup, err, stat])
             
-            # The HEC-RAS Newton Raphson Loop:
-            # Prevents #DIV/0 natively during Froude check
-            fr2_delta = f"IF(ABS(1 - J{current_row}^2) < 0.0001, 0.0001, 1 - J{current_row}^2)"
-            newton_step = f"MAX(-0.5, MIN(0.5, U{current_row} / {fr2_delta}))"
-            
-            col_y = f'=IF(F{current_row}=0, F{prev_row}, IF(ABS(U{current_row}) > 0.001, MAX(0.01, F{current_row} + {newton_step}), F{current_row}))'
-            
-        # Geometric Columns (G:I)
-        col_T = f"=$I$9 + 2*$I$10*F{current_row}"
-        col_A = f"=($I$9 + $I$10*F{current_row})*F{current_row}"
-        col_Dh = f"=H{current_row} / G{current_row}"
+        fr_sup = f"=L{cur} / SQRT($H$6 * (I{cur}/(D{cur} + 2*E{cur}*H{cur})))"
+        m_sup  = f"=(D{cur}*H{cur}^2)/2 + (E{cur}*H{cur}^3)/3 + ($D$3^2)/($H$6*I{cur})"
+        row_arr.extend([fr_sup, m_sup])
         
-        # Froude Evaluators (J:K)
-        col_Fr = f"=N{current_row} / SQRT($H$6 * I{current_row})"
-        col_Regime = f'=IF(J{current_row}<1, "Sub-critical", IF(J{current_row}>1, "Super-critical", "Critical"))'
-        
-        # Remaining Hydraulics (L:Q)
-        col_P = f"=$I$9 + 2*F{current_row}*SQRT(1+$I$10^2)"
-        col_R = f"=H{current_row} / L{current_row}"
-        col_v = f"=$D$3 / H{current_row}"
-        col_vh = f"=(N{current_row}^2) / (2*$H$6)"
-        col_H = f"=E{current_row} + F{current_row} + O{current_row}"
-        col_Sf = f"=(N{current_row} * $D$9 / (M{current_row}^(2/3)))^2"
-        
-        if i == 0:
-            col_AvgSf = "0"  # R
-            col_hf = "0"     # S
-            col_he = "0"     # T
-            col_err = "0"    # U
+        # --- BACKWARD PASS (Subcritical) ---
+        if i == num_rows - 1:
+            row_arr.extend(["0", "=$I$10"])
         else:
-            col_AvgSf = f"=(Q{prev_row} + Q{current_row})/2"
-            col_hf = f"=R{current_row} * D{current_row}"
+            len_bwd = f"=B{nxt} - B{cur}"
+            iter_y_sub = f"=IF($D$13=0, T{nxt}, IF(AB{nxt}=0, T{nxt}, IF(T{cur}=0, T{nxt}, IF(ABS(AA{cur}) > $D$14, MAX(0.01, T{cur} + (AA{cur} * $D$15 * IF(AC{cur} < 1, 1, -1))), T{cur}))))"
+            row_arr.extend([len_bwd, iter_y_sub])
             
-            loss_ec = f"IF(O{current_row} > O{prev_row}, $D$10 * ABS(O{current_row}-O{prev_row}), $D$11 * ABS(O{current_row}-O{prev_row}))"
-            loss_bend = f"($I$11 * (C{current_row}/90) * O{current_row})"
-            col_he = f"={loss_ec} + {loss_bend}"
-            
-            col_err = f"= P{prev_row} - S{current_row} - T{current_row} - P{current_row}"
+        col_a_sub = f"=(D{cur} + E{cur}*T{cur})*T{cur}"
+        col_p_sub = f"=D{cur} + 2*T{cur}*SQRT(1+E{cur}^2)"
+        col_r_sub = f"=U{cur} / V{cur}"
+        col_v_sub = f"=$D$3 / U{cur}"
+        col_h_sub = f"=C{cur} + T{cur} + (X{cur}^2) / (2*$H$6)"
+        col_sf_sub= f"=(X{cur} * $D$9 / (W{cur}^(2/3)))^2"
         
-        output_block.append([
-            col_sec, col_dist, col_def_ang, col_l, col_z, col_y, col_T, col_A, col_Dh, 
-            col_Fr, col_Regime, col_P, col_R, col_v, col_vh, col_H, col_Sf, 
-            col_AvgSf, col_hf, col_he, col_err
-        ])
-    
+        if i == num_rows - 1:
+            row_arr.extend([col_a_sub, col_p_sub, col_r_sub, col_v_sub, col_h_sub, col_sf_sub, "0", f"=IF(ABS(AA{cur})<$D$14, 1, 0)"])
+        else:
+            hf_b = f"( (Z{cur}+Z{nxt})/2 ) * S{cur}"
+            he_b = f"IF(X{cur}>X{nxt}, $D$11*( (X{cur}^2)/(2*$H$6) - (X{nxt}^2)/(2*$H$6) ), $D$10*( (X{nxt}^2)/(2*$H$6) - (X{cur}^2)/(2*$H$6) )) + ($D$12 * (F{cur}/90) * (X{cur}^2)/(2*$H$6))"
+            err_b= f"=Y{nxt} + ({hf_b}) + ({he_b}) - Y{cur}"
+            stat_b= f"=IF(ABS(AA{cur})<$D$14, 1, 0)"
+            row_arr.extend([col_a_sub, col_p_sub, col_r_sub, col_v_sub, col_h_sub, col_sf_sub, err_b, stat_b])
+            
+        fr_sub = f"=X{cur} / SQRT($H$6 * (U{cur}/(D{cur} + 2*E{cur}*T{cur})))"
+        m_sub  = f"=(D{cur}*T{cur}^2)/2 + (E{cur}*T{cur}^3)/3 + ($D$3^2)/($H$6*U{cur})"
+        row_arr.extend([fr_sub, m_sub])
+        
+        # --- FINAL ENVELOPE ---
+        y_fin = f"=IF(AD{cur} > R{cur}, T{cur}, H{cur})"
+        reg_fin = f'=IF(AD{cur} > R{cur}, "Subcritical", "Supercritical")'
+        row_arr.extend([y_fin, reg_fin])
+        
+        output_block.append(row_arr)
+
     end_row = start_row + len(output_block) - 1
-    cell_range = f"A{start_row}:U{end_row}"
+    cell_range = f"A{start_row}:AF{end_row}"
     
-    print("Deploying strictly aligned HEC-RAS Newton-Raphson Iterative Formulation...")
+    print("Writing Dual-Pass mixed regime execution matrix...")
     client.update_range(sheet_id, worksheet_name, cell_range, output_block, value_input_option="USER_ENTERED")
     
-    # Header format
-    client.format_range(sheet_id, worksheet_name, f"A{start_row}:U{start_row}", {
-        "textFormat": {"bold": True}, "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0}
+    # -------------------------------------------------------------
+    # Formatting
+    # -------------------------------------------------------------
+    client.format_range(sheet_id, worksheet_name, f"A{start_row}:AF{start_row}", {
+        "textFormat": {"bold": True, "fontSize": 12},
+        "horizontalAlignment": "CENTER"
+    })
+    client.format_range(sheet_id, worksheet_name, f"A{start_row+1}:AF{start_row+1}", {
+        "textFormat": {"bold": True, "fontSize": 10}, "horizontalAlignment": "CENTER", "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}
     })
     
-    worksheet = client.get_worksheet(sheet_id, worksheet_name)
-    sheet_idx = worksheet.id
-    
-    # Conditional formatting for Regime
-    requests = [
-        {
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [{"sheetId": sheet_idx, "startRowIndex": start_row, "endRowIndex": end_row, "startColumnIndex": 10, "endColumnIndex": 11}],
-                    "booleanRule": {
-                        "condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "Super-critical"}]},
-                        "format": {"backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}, "textFormat": {"bold": True}}
-                    }
-                }, "index": 0
-            }
-        },
-        {
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [{"sheetId": sheet_idx, "startRowIndex": start_row, "endRowIndex": end_row, "startColumnIndex": 20, "endColumnIndex": 21}],
-                    "booleanRule": {
-                        "condition": {"type": "NUMBER_BETWEEN", "values": [{"userEnteredValue": "-0.01"}, {"userEnteredValue": "0.01"}]},
-                        "format": {"backgroundColor": {"red": 0.8, "green": 1.0, "blue": 0.8}, "textFormat": {"bold": True}}
-                    }
-                }, "index": 0
-            }
-        }
-    ]
-    client.batch_update(sheet_id, requests)
-    
-    # Format Trial depth y
-    client.format_range(sheet_id, worksheet_name, f"F{start_row+2}:F{end_row}", {
-        "backgroundColor": {"red": 0.95, "green": 0.85, "blue": 1.0}
+    # Shade Trial depths dynamically
+    client.format_range(sheet_id, worksheet_name, f"H{start_row+2}:H{end_row}", {
+        "backgroundColor": {"red": 1.0, "green": 0.9, "blue": 0.8}
     })
-    
-    print("HEC-RAS alignment successfully executed.")
+    client.format_range(sheet_id, worksheet_name, f"T{start_row+2}:T{end_row}", {
+        "backgroundColor": {"red": 0.85, "green": 1.0, "blue": 0.85}
+    })
+    client.format_range(sheet_id, worksheet_name, f"AE{start_row+2}:AF{end_row}", {
+        "textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.8, "blue": 1.0}
+    })
+    print("Dual regime mapping successfully pushed.")
 
 if __name__ == "__main__":
     sheet_id = "1eJ7uyJdZmJus-4TmeQ1CkdMLbETq5xn_BzznjDScr64"
