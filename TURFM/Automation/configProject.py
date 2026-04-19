@@ -7,17 +7,17 @@ class Config:
     Configuration class containing all necessary path settings and variables
     for the DTM processing workflow.
     """
-    PROJECT_FOLDER: str = r"C:\Users\Ripple\Downloads\Turkey Flood\9 HECRAS-Test"
+    PROJECT_FOLDER: str = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-0"
     PROJECT_SHORT_NAME: str = "ATATURK-T"
     
     # Directories and files - generated dynamically
     PROJECT_LONG_NAME: str = field(init=False)
-    PROJ_PATH: str = field(init=False)
+    ESSENTIALS_PATH: str = field(init=False)
     BUR_BUR_PATH: str = field(init=False)
-    HYDRO_PATH: str = field(init=False)
     HEC_PATH: str = field(init=False)
     GIS_PATH: str = field(init=False)
     OUTPUT_PATH: str = field(init=False)
+    TEMP_PATH: str = field(init=False)
     
     DEM_PATH: str = field(init=False)
     CROSS_SECTION_PATH: str = field(init=False)
@@ -33,14 +33,14 @@ class Config:
     def __post_init__(self):
         self.PROJECT_LONG_NAME = f"BUR-BUR-MER-{self.PROJECT_SHORT_NAME}"
         
-        self.PROJ_PATH = os.path.join(self.PROJECT_FOLDER, '0 Proj')
+        self.ESSENTIALS_PATH = os.path.join(self.PROJECT_FOLDER, '0 Essentials')
         self.BUR_BUR_PATH = os.path.join(self.PROJECT_FOLDER, '1 Bur-Bur')
-        self.HYDRO_PATH = os.path.join(self.PROJECT_FOLDER, '2 Hydrology')
-        self.HEC_PATH = os.path.join(self.PROJECT_FOLDER, '3 Hecras')
-        self.GIS_PATH = os.path.join(self.PROJECT_FOLDER, '4 GIS')
-        self.OUTPUT_PATH = os.path.join(self.PROJECT_FOLDER, '5 Outputs')
+        self.HEC_PATH = os.path.join(self.PROJECT_FOLDER, '2 Hecras')
+        self.GIS_PATH = os.path.join(self.PROJECT_FOLDER, '3 GIS')
+        self.OUTPUT_PATH = os.path.join(self.PROJECT_FOLDER, '4 Outputs')
+        self.TEMP_PATH = os.path.join(self.PROJECT_FOLDER, '5 Temp')
         
-        self.DEM_PATH = os.path.join(self.PROJECT_FOLDER, 'SET4_27_DTM_070226_R1.tif')
+        self.DEM_PATH = os.path.join(self.ESSENTIALS_PATH, 'SET4_27_DTM_070226_R1.tif')
         self.CROSS_SECTION_PATH = os.path.join(self.BUR_BUR_PATH, self.PROJECT_LONG_NAME, 'KESIT_TESLIM')
         self.CROSS_SECTION_FILE_PATH = os.path.join(self.CROSS_SECTION_PATH, f"{self.PROJECT_LONG_NAME}_KESIT_TESLIM.csv")
         
@@ -58,8 +58,8 @@ class Config:
     def setup_directories(self):
         """Creates the necessary project folders if they don't already exist."""
         directories = [
-            self.PROJECT_FOLDER, self.PROJ_PATH, self.BUR_BUR_PATH, 
-            self.HYDRO_PATH, self.HEC_PATH, self.GIS_PATH, self.OUTPUT_PATH
+            self.PROJECT_FOLDER, self.ESSENTIALS_PATH, self.BUR_BUR_PATH, 
+            self.TEMP_PATH, self.HEC_PATH, self.GIS_PATH, self.OUTPUT_PATH
         ]
         for directory in directories:
             os.makedirs(directory, exist_ok=True)

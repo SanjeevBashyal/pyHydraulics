@@ -96,29 +96,33 @@ TABLE_VF = 15
 TABLE_WSF = 16
 TABLE_EGF = 17
 TABLE_SFF = 18
-TABLE_ERRF = 19
-TABLE_DONEF = 20
-TABLE_YB = 21
-TABLE_AB = 22
-TABLE_RB = 23
-TABLE_VB = 24
-TABLE_WSB = 25
-TABLE_EGB = 26
-TABLE_SFB = 27
-TABLE_ERRB = 28
-TABLE_DONEB = 29
-TABLE_Y = 30
-TABLE_WS = 31
-TABLE_EG = 32
-TABLE_CREST_L = 33
-TABLE_CREST_R = 34
-TABLE_SPILL_L = 35
-TABLE_SPILL_R = 36
-TABLE_SPILL = 37
-TABLE_CUM_SPILL = 38
-TABLE_FR = 39
-TABLE_REGIME = 40
-TABLE_SF = 41
+TABLE_FRF = 19
+TABLE_MF = 20
+TABLE_ERRF = 21
+TABLE_DONEF = 22
+TABLE_YB = 23
+TABLE_AB = 24
+TABLE_RB = 25
+TABLE_VB = 26
+TABLE_WSB = 27
+TABLE_EGB = 28
+TABLE_SFB = 29
+TABLE_FRB = 30
+TABLE_MB = 31
+TABLE_ERRB = 32
+TABLE_DONEB = 33
+TABLE_Y = 34
+TABLE_WS = 35
+TABLE_EG = 36
+TABLE_CREST_L = 37
+TABLE_CREST_R = 38
+TABLE_SPILL_L = 39
+TABLE_SPILL_R = 40
+TABLE_SPILL = 41
+TABLE_CUM_SPILL = 42
+TABLE_FR = 43
+TABLE_REGIME = 44
+TABLE_SF = 45
 
 
 def col_letter(col_idx):
@@ -365,7 +369,7 @@ def spill_mapping_expr(segments_by_name, segment_table_rows, donor_names, target
                 donor_rows.append(donor_idx)
         if seq < len(donor_rows):
             donor_row = segment_table_rows[donor_name]["data_start"] + donor_rows[seq]
-            terms.append(f"AK{donor_row}")
+            terms.append(a1(donor_row, TABLE_SPILL))
     return "0" if not terms else f"({' + '.join(terms)})"
 
 
@@ -522,7 +526,7 @@ def build_sheet():
     grid = [["" for _ in range(total_cols)] for _ in range(total_rows)]
 
     set_cell(grid, 1, 1, "1D Steady Open Channel Network Solver")
-    set_cell(grid, 3, 1, "Imported bed elevations, bank slopes, junction internal BC formulas, and spill routing to drain.")
+    set_cell(grid, 3, 1, "Two-pass steady 1D workbook: subcritical backwater, supercritical forewater, mixed-flow specific-force selection, and spill routing to drain.")
 
     set_cell(grid, 4, 2, "Parameter")
     set_cell(grid, 4, 3, "Unit")
@@ -572,19 +576,19 @@ def build_sheet():
     set_cell(grid, 12, 9, f"=Z{SOLVER_START_ROW + SOLVER_STEPS - 1}")
     set_cell(grid, 13, 7, "Final J1 WSE")
     set_cell(grid, 13, 8, "m")
-    set_cell(grid, 13, 9, f"=AA{SOLVER_START_ROW + SOLVER_STEPS - 1}")
+    set_cell(grid, 13, 9, f"=AM{SOLVER_START_ROW + SOLVER_STEPS - 1}")
     set_cell(grid, 14, 7, "Final J2 WSE")
     set_cell(grid, 14, 8, "m")
-    set_cell(grid, 14, 9, f"=AB{SOLVER_START_ROW + SOLVER_STEPS - 1}")
+    set_cell(grid, 14, 9, f"=AN{SOLVER_START_ROW + SOLVER_STEPS - 1}")
     set_cell(grid, 15, 7, "Total spill to drain")
     set_cell(grid, 15, 8, "m3/s")
     set_cell(grid, 15, 9, f"=N{summary_rows['drain']}")
-    set_cell(grid, 16, 7, "J1 residual")
+    set_cell(grid, 16, 7, "J1 mixed residual")
     set_cell(grid, 16, 8, "m")
-    set_cell(grid, 16, 9, f"=W{SOLVER_START_ROW + SOLVER_STEPS - 1}")
-    set_cell(grid, 17, 7, "J2 residual")
+    set_cell(grid, 16, 9, f"=AO{SOLVER_START_ROW + SOLVER_STEPS - 1}")
+    set_cell(grid, 17, 7, "J2 mixed residual")
     set_cell(grid, 17, 8, "m")
-    set_cell(grid, 17, 9, f"=X{SOLVER_START_ROW + SOLVER_STEPS - 1}")
+    set_cell(grid, 17, 9, f"=AP{SOLVER_START_ROW + SOLVER_STEPS - 1}")
 
     for col_idx, title in enumerate(["Boundary", "Segment", "End", "Type", "Value", "Resolved Stage", "Remarks"], start=11):
         set_cell(grid, 4, col_idx, title)
@@ -606,7 +610,7 @@ def build_sheet():
         set_cell(grid, row_idx, 17, spec["remarks"])
 
     set_cell(grid, 26, 1, "Junction Internal Boundary Conditions")
-    set_cell(grid, 27, 1, "Common junction water surface is enforced through branch energy equality; split ratios are nudged by specific-force imbalance.")
+    set_cell(grid, 27, 1, "Junction solver follows mixed-flow split logic: subcritical branch backwater, supercritical upstream forewater, then specific-force control selection.")
 
     summary_headers = [
         "Segment", "From", "To", "Pts", "Length",
@@ -631,7 +635,7 @@ def build_sheet():
         set_cell(grid, row, SUM_Z1, round(seg["end_side"], 3))
         set_cell(grid, row, SUM_BED0, round(seg["start_bed"], 4))
         set_cell(grid, row, SUM_BED1, round(seg["end_bed"], 4))
-        set_cell(grid, row, SUM_MODE, "Subcritical")
+        set_cell(grid, row, SUM_MODE, "Mixed")
         set_cell(grid, row, SUM_ANG0, round(seg["start_angle"], 3))
         set_cell(grid, row, SUM_ANG1, round(seg["end_angle"], 3))
 
@@ -671,7 +675,11 @@ def build_sheet():
         "J1 from UsProject", "J1 from waterway", "J1 from UsExit",
         "J2 from waterway", "J2 from forebay", "J2 from sidechannel",
         "Mom J1", "Mom J2", "Err J1", "Err J2",
-        "alpha1 next", "alpha2 next", "J1 next", "J2 next",
+        "alpha1 next", "alpha2 next", "J1 next sub", "J2 next sub",
+        "J1 sub stage", "J2 sub stage", "J1 super stage", "J2 super stage",
+        "SF J1 sub", "SF J1 super", "SF J2 sub", "SF J2 super",
+        "J1 control", "J2 control", "J1 next mixed", "J2 next mixed",
+        "J1 mixed residual", "J2 mixed residual",
     ]
     for col_idx, title in enumerate(solver_headers, start=1):
         set_cell(grid, SOLVER_HEADER_ROW, col_idx, title)
@@ -695,8 +703,8 @@ def build_sheet():
         else:
             set_cell(grid, row, 2, f"=Y{prev_row}")
             set_cell(grid, row, 3, f"=Z{prev_row}")
-            set_cell(grid, row, 4, f"=AA{prev_row}")
-            set_cell(grid, row, 5, f"=AB{prev_row}")
+            set_cell(grid, row, 4, f"=AM{prev_row}")
+            set_cell(grid, row, 5, f"=AN{prev_row}")
 
         set_cell(grid, row, 6, f"={TOTAL_Q_REF}")
         set_cell(grid, row, 7, f'=IF({usexit_type_ref}="None",F{row},MAX(0,F{row}*B{row}))')
@@ -718,30 +726,42 @@ def build_sheet():
         set_cell(grid, row, 13, f"={forebay_stage_ref}")
         set_cell(grid, row, 14, f"={side_stage_ref}")
 
-        up_terms = summary_segment_terms(usproject_row, f"F{row}", f"K{row}", f"D{row}")
-        ww_terms = summary_segment_terms(
-            waterway_row, f"G{row}", f"D{row}", f"E{row}",
+        up_super_terms = summary_segment_terms(usproject_row, f"F{row}", f"K{row}", f"AE{row}")
+        ww_sub_terms = summary_segment_terms(
+            waterway_row, f"G{row}", f"AC{row}", f"AD{row}",
             segments_by_name["waterway"]["junction_delta"], f"H{row}", f"F{row}"
         )
-        ue_terms = summary_segment_terms(
-            usexit_row, f"H{row}", f"D{row}", f"L{row}",
+        ue_sub_terms = summary_segment_terms(
+            usexit_row, f"H{row}", f"AC{row}", f"L{row}",
             segments_by_name["UsExit"]["junction_delta"], f"G{row}", f"F{row}"
         )
-        fb_terms = summary_segment_terms(
-            forebay_row, f"I{row}", f"E{row}", f"M{row}",
+        ww_super_terms = summary_segment_terms(
+            waterway_row, f"G{row}", f"AE{row}", f"AF{row}",
+            segments_by_name["waterway"]["junction_delta"], f"H{row}", f"F{row}"
+        )
+        fb_sub_terms = summary_segment_terms(
+            forebay_row, f"I{row}", f"AD{row}", f"M{row}",
             segments_by_name["forebay"]["junction_delta"], f"J{row}", f"G{row}"
         )
-        sc_terms = summary_segment_terms(
-            side_row, f"J{row}", f"E{row}", f"N{row}",
+        sc_sub_terms = summary_segment_terms(
+            side_row, f"J{row}", f"AD{row}", f"N{row}",
             segments_by_name["sidechannel"]["junction_delta"], f"I{row}", f"G{row}"
         )
+        j1_sub_terms = summary_section_terms(usproject_row, False, f"AC{row}", f"F{row}")
+        j1_super_terms = summary_section_terms(usproject_row, False, f"AE{row}", f"F{row}")
+        j2_sub_terms = summary_section_terms(waterway_row, False, f"AD{row}", f"G{row}")
+        j2_super_terms = summary_section_terms(waterway_row, False, f"AF{row}", f"G{row}")
+        j1_sub_target = f'IF({usexit_type_ref}="None",P{row},MAX(P{row},Q{row}))'
+        j2_sub_target = f'IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),E{row},IF({side_type_ref}="None",S{row},IF({forebay_type_ref}="None",T{row},MAX(S{row},T{row}))))'
+        j1_bed_ref = a1(usproject_row, SUM_BED1)
+        j2_bed_ref = a1(waterway_row, SUM_BED1)
 
-        set_cell(grid, row, 15, f"=K{row}+{up_terms['up']['vh']}-{up_terms['hl']}-{up_terms['dn']['vh']}")
-        set_cell(grid, row, 16, f"=E{row}+{ww_terms['dn']['vh']}+{ww_terms['hl']}-{ww_terms['up']['vh']}")
-        set_cell(grid, row, 17, f"=L{row}+{ue_terms['dn']['vh']}+{ue_terms['hl']}-{ue_terms['up']['vh']}")
-        set_cell(grid, row, 18, f"=D{row}+{ww_terms['up']['vh']}-{ww_terms['hl']}-{ww_terms['dn']['vh']}")
-        set_cell(grid, row, 19, f"=M{row}+{fb_terms['dn']['vh']}+{fb_terms['hl']}-{fb_terms['up']['vh']}")
-        set_cell(grid, row, 20, f"=N{row}+{sc_terms['dn']['vh']}+{sc_terms['hl']}-{sc_terms['up']['vh']}")
+        set_cell(grid, row, 15, f"=K{row}+{up_super_terms['up']['vh']}-{up_super_terms['hl']}-{up_super_terms['dn']['vh']}")
+        set_cell(grid, row, 16, f"=AD{row}+{ww_sub_terms['dn']['vh']}+{ww_sub_terms['hl']}-{ww_sub_terms['up']['vh']}")
+        set_cell(grid, row, 17, f"=L{row}+{ue_sub_terms['dn']['vh']}+{ue_sub_terms['hl']}-{ue_sub_terms['up']['vh']}")
+        set_cell(grid, row, 18, f"=AE{row}+{ww_super_terms['up']['vh']}-{ww_super_terms['hl']}-{ww_super_terms['dn']['vh']}")
+        set_cell(grid, row, 19, f"=M{row}+{fb_sub_terms['dn']['vh']}+{fb_sub_terms['hl']}-{fb_sub_terms['up']['vh']}")
+        set_cell(grid, row, 20, f"=N{row}+{sc_sub_terms['dn']['vh']}+{sc_sub_terms['hl']}-{sc_sub_terms['up']['vh']}")
 
         cos_ww = math.cos(math.radians(segments_by_name["waterway"]["junction_delta"]))
         cos_ue = math.cos(math.radians(segments_by_name["UsExit"]["junction_delta"]))
@@ -751,27 +771,27 @@ def build_sheet():
             grid,
             row,
             21,
-            f"=((({ww_terms['up']['force']})*{cos_ww:.8f})-(({ue_terms['up']['force']})*{cos_ue:.8f}))"
-            f"/MAX({up_terms['dn']['force']},1E-6)",
+            f"=((({ww_sub_terms['up']['force']})*{cos_ww:.8f})-(({ue_sub_terms['up']['force']})*{cos_ue:.8f}))"
+            f"/MAX({up_super_terms['dn']['force']},1E-6)",
         )
         set_cell(
             grid,
             row,
             22,
-            f"=((({fb_terms['up']['force']})*{cos_fb:.8f})-(({sc_terms['up']['force']})*{cos_sc:.8f}))"
-            f"/MAX({ww_terms['dn']['force']},1E-6)",
+            f"=((({fb_sub_terms['up']['force']})*{cos_fb:.8f})-(({sc_sub_terms['up']['force']})*{cos_sc:.8f}))"
+            f"/MAX({ww_super_terms['dn']['force']},1E-6)",
         )
         set_cell(
             grid,
             row,
             23,
-            f'=IF({usexit_type_ref}="None",MAX(ABS(O{row}-D{row}),ABS(P{row}-D{row})),MAX(ABS(O{row}-D{row}),ABS(P{row}-D{row}),ABS(Q{row}-D{row})))',
+            f"=ABS(({j1_sub_target})-D{row})",
         )
         set_cell(
             grid,
             row,
             24,
-            f'=IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),ABS(R{row}-E{row}),IF({side_type_ref}="None",MAX(ABS(R{row}-E{row}),ABS(S{row}-E{row})),IF({forebay_type_ref}="None",MAX(ABS(R{row}-E{row}),ABS(T{row}-E{row})),MAX(ABS(R{row}-E{row}),ABS(S{row}-E{row}),ABS(T{row}-E{row})))))',
+            f"=ABS(({j2_sub_target})-E{row})",
         )
         set_cell(
             grid,
@@ -783,10 +803,44 @@ def build_sheet():
             grid,
             row,
             26,
-            f'=IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),C{row},IF({side_type_ref}="None",1,IF({forebay_type_ref}="None",0,MIN(0.98,MAX(0.02,C{row}+{SPLIT_RELAX_REF}*(((T{row}-S{row})/MAX(ABS(E{row}),1))+({MOMENTUM_WT_REF}*V{row}))))))))',
+            f'=IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),C{row},IF({side_type_ref}="None",1,IF({forebay_type_ref}="None",0,MIN(0.98,MAX(0.02,C{row}+{SPLIT_RELAX_REF}*(((T{row}-S{row})/MAX(ABS(E{row}),1))+(IF(OR({forebay_type_ref}="Spill End",{side_type_ref}="Spill End"),0,{MOMENTUM_WT_REF})*V{row}))))))))',
         )
-        set_cell(grid, row, 27, f'=D{row}+{STAGE_RELAX_REF}*(IF({usexit_type_ref}="None",AVERAGE(O{row}:P{row}),AVERAGE(O{row}:Q{row}))-D{row})')
-        set_cell(grid, row, 28, f'=E{row}+{STAGE_RELAX_REF}*(IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),R{row},IF({side_type_ref}="None",AVERAGE(R{row}:S{row}),IF({forebay_type_ref}="None",AVERAGE(R{row},T{row}),AVERAGE(R{row}:T{row}))))-E{row})')
+        set_cell(
+            grid,
+            row,
+            29,
+            f"=IF({RESET_REF}=0,D{row},IF(AC{row}=0,({j1_sub_target}),IF(ABS(({j1_sub_target})-AC{row})<{PROFILE_TOL_REF},AC{row},MAX(({j1_bed_ref})+{MIN_DEPTH_REF},AC{row}+{STAGE_RELAX_REF}*((({j1_sub_target})-AC{row}))))))",
+        )
+        set_cell(
+            grid,
+            row,
+            30,
+            f"=IF({RESET_REF}=0,E{row},IF(AD{row}=0,({j2_sub_target}),IF(ABS(({j2_sub_target})-AD{row})<{PROFILE_TOL_REF},AD{row},MAX(({j2_bed_ref})+{MIN_DEPTH_REF},AD{row}+{STAGE_RELAX_REF}*((({j2_sub_target})-AD{row}))))))",
+        )
+        set_cell(
+            grid,
+            row,
+            31,
+            f"=IF({RESET_REF}=0,D{row},IF(AE{row}=0,O{row},IF(ABS(O{row}-AE{row})<{PROFILE_TOL_REF},AE{row},MAX(({j1_bed_ref})+{MIN_DEPTH_REF},AE{row}+{STAGE_RELAX_REF}*(O{row}-AE{row}))))))",
+        )
+        set_cell(
+            grid,
+            row,
+            32,
+            f"=IF({RESET_REF}=0,E{row},IF(AF{row}=0,R{row},IF(ABS(R{row}-AF{row})<{PROFILE_TOL_REF},AF{row},MAX(({j2_bed_ref})+{MIN_DEPTH_REF},AF{row}+{STAGE_RELAX_REF}*(R{row}-AF{row}))))))",
+        )
+        set_cell(grid, row, 33, f"={j1_sub_terms['force']}")
+        set_cell(grid, row, 34, f"={j1_super_terms['force']}")
+        set_cell(grid, row, 35, f"={j2_sub_terms['force']}")
+        set_cell(grid, row, 36, f"={j2_super_terms['force']}")
+        set_cell(grid, row, 37, f'=IF(AH{row}>=AG{row},"Supercritical","Subcritical")')
+        set_cell(grid, row, 38, f'=IF(AJ{row}>=AI{row},"Supercritical","Subcritical")')
+        set_cell(grid, row, 27, f'=D{row}+{STAGE_RELAX_REF}*(AC{row}-D{row})')
+        set_cell(grid, row, 28, f'=E{row}+{STAGE_RELAX_REF}*(AD{row}-E{row})')
+        set_cell(grid, row, 39, f'=D{row}+{STAGE_RELAX_REF}*(IF(AK{row}="Supercritical",AE{row},AC{row})-D{row})')
+        set_cell(grid, row, 40, f'=E{row}+{STAGE_RELAX_REF}*(IF(AL{row}="Supercritical",AF{row},AD{row})-E{row})')
+        set_cell(grid, row, 41, f'=ABS(IF(AK{row}="Supercritical",AE{row},AC{row})-D{row})')
+        set_cell(grid, row, 42, f'=ABS(IF(AL{row}="Supercritical",AF{row},AD{row})-E{row})')
 
     stage_inputs = {
         "UsProject": {"start": inlet_stage_ref, "end": FINAL_J1_REF},
@@ -799,15 +853,15 @@ def build_sheet():
 
     table_headers = [
         "SN", "Dist", "Easting", "Northing", "Bed Z", "Width", "Side z", "Type", "Def Ang", "dx",
-        "Q_used", "y_fwd", "A_fwd", "R_fwd", "v_fwd", "WS_fwd", "EG_fwd", "Sf_fwd", "Err_fwd", "Done_fwd",
-        "y_bwd", "A_bwd", "R_bwd", "v_bwd", "WS_bwd", "EG_bwd", "Sf_bwd", "Err_bwd", "Done_bwd",
+        "Q_used", "y_super", "A_super", "R_super", "v_super", "WS_super", "EG_super", "Sf_super", "Fr_super", "M_super", "Err_super", "Done_super",
+        "y_sub", "A_sub", "R_sub", "v_sub", "WS_sub", "EG_sub", "Sf_sub", "Fr_sub", "M_sub", "Err_sub", "Done_sub",
         "y_final", "WS_final", "EG_final", "Crest_L", "Crest_R", "Spill_L", "Spill_R", "Spill_Q", "Cum_spill",
         "Fr_final", "Regime", "Sf_final",
     ]
     table_units = [
         "-", "m", "m", "m", "m", "m", "-", "-", "deg", "m",
-        "m3/s", "m", "m2", "m", "m/s", "m", "m", "-", "m", "-",
-        "m", "m2", "m", "m/s", "m", "m", "-", "m", "-",
+        "m3/s", "m", "m2", "m", "m/s", "m", "m", "-", "-", "m3", "m", "-",
+        "m", "m2", "m", "m/s", "m", "m", "-", "-", "m3", "m", "-",
         "m", "m", "m", "m", "m", "m3/s", "m3/s", "m3/s", "m3/s", "-", "-", "-",
     ]
 
@@ -825,6 +879,11 @@ def build_sheet():
         is_spill_end_bc = end_bc_type == "Spill End"
         is_closed_bc = end_bc_type == "None" and seg["to_node"].lower() == "outlet"
         is_spill_zero_bc = start_bc_type == "Spill Zero" and seg["from_node"].lower() == "inlet"
+        has_lateral_spill = bool(
+            seg["df"]["SpillLeftOn"].any()
+            or seg["df"]["SpillRightOn"].any()
+        )
+        q_floor_expr = "0.001" if (has_lateral_spill or is_spill_end_bc) and not is_closed_bc else "0"
 
         set_cell(grid, rows["title"], 1, f"Segment: {seg['name']}")
         set_cell(grid, rows["title"], 5, f"=E{summary_row}")
@@ -845,6 +904,47 @@ def build_sheet():
             next_row = row + 1
             is_first = row == data_start
             is_last = row == data_end
+            q_cell = a1(row, TABLE_Q)
+            prev_q_cell = a1(prev_row, TABLE_Q)
+            y_super_cell = a1(row, TABLE_YF)
+            prev_y_super_cell = a1(prev_row, TABLE_YF)
+            y_sub_cell = a1(row, TABLE_YB)
+            next_y_sub_cell = a1(next_row, TABLE_YB)
+            area_super_cell = a1(row, TABLE_AF)
+            radius_super_cell = a1(row, TABLE_RF)
+            vel_super_cell = a1(row, TABLE_VF)
+            ws_super_cell = a1(row, TABLE_WSF)
+            eg_super_cell = a1(row, TABLE_EGF)
+            sf_super_cell = a1(row, TABLE_SFF)
+            fr_super_cell = a1(row, TABLE_FRF)
+            m_super_cell = a1(row, TABLE_MF)
+            err_super_cell = a1(row, TABLE_ERRF)
+            done_super_cell = a1(row, TABLE_DONEF)
+            prev_done_super_cell = a1(prev_row, TABLE_DONEF)
+            area_sub_cell = a1(row, TABLE_AB)
+            radius_sub_cell = a1(row, TABLE_RB)
+            vel_sub_cell = a1(row, TABLE_VB)
+            ws_sub_cell = a1(row, TABLE_WSB)
+            eg_sub_cell = a1(row, TABLE_EGB)
+            sf_sub_cell = a1(row, TABLE_SFB)
+            fr_sub_cell = a1(row, TABLE_FRB)
+            m_sub_cell = a1(row, TABLE_MB)
+            err_sub_cell = a1(row, TABLE_ERRB)
+            done_sub_cell = a1(row, TABLE_DONEB)
+            next_done_sub_cell = a1(next_row, TABLE_DONEB)
+            final_y_cell = a1(row, TABLE_Y)
+            final_ws_cell = a1(row, TABLE_WS)
+            final_eg_cell = a1(row, TABLE_EG)
+            crest_l_cell = a1(row, TABLE_CREST_L)
+            crest_r_cell = a1(row, TABLE_CREST_R)
+            spill_l_cell = a1(row, TABLE_SPILL_L)
+            spill_r_cell = a1(row, TABLE_SPILL_R)
+            spill_cell = a1(row, TABLE_SPILL)
+            cum_spill_cell = a1(row, TABLE_CUM_SPILL)
+            prev_cum_spill_cell = a1(prev_row, TABLE_CUM_SPILL)
+            final_fr_cell = a1(row, TABLE_FR)
+            final_regime_cell = a1(row, TABLE_REGIME)
+            final_sf_cell = a1(row, TABLE_SF)
 
             set_cell(grid, row, TABLE_SN, int(rec["SN"]))
             set_cell(grid, row, TABLE_DIST, round(float(rec["Chainage"]), 3))
@@ -855,109 +955,130 @@ def build_sheet():
             set_cell(grid, row, TABLE_SIDE, round(float(rec["SideFilled"]), 3))
             set_cell(grid, row, TABLE_TYPE, str(rec.get("Type", "")))
             set_cell(grid, row, TABLE_DEF, round(float(rec["Deflection"]), 3))
-            set_cell(grid, row, TABLE_DX, 0 if is_first else f"=B{row}-B{prev_row}")
+            set_cell(grid, row, TABLE_DX, 0 if is_first else f"={a1(row, TABLE_DIST)}-{a1(prev_row, TABLE_DIST)}")
             if is_spill_zero_bc and seg["name"] == "drain":
                 if idx < 2:
                     set_cell(grid, row, TABLE_Q, 0)
                 else:
                     mapped_expr = spill_mapping_expr(segments_by_name, segment_table_rows, [name for name in segments_by_name if name != "drain"], "drain", idx)
-                    set_cell(grid, row, TABLE_Q, f"=K{prev_row}+{mapped_expr}")
+                    set_cell(grid, row, TABLE_Q, f"={prev_q_cell}+{mapped_expr}")
             elif is_first:
                 set_cell(grid, row, TABLE_Q, f"={q_ref}")
             else:
-                set_cell(grid, row, TABLE_Q, f"=MAX(0,K{prev_row}-AK{prev_row})")
+                set_cell(grid, row, TABLE_Q, f"=MAX({q_floor_expr},{prev_q_cell}-{a1(prev_row, TABLE_SPILL)})")
 
-            area_fwd = trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_YF))
-            radius_fwd = trap_radius(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_YF))
-            top_fwd = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_YF))
-            vel_fwd = velocity_expr(a1(row, TABLE_Q), area_fwd)
-            fr_fwd = froude_expr(a1(row, TABLE_Q), area_fwd, top_fwd)
-            ws_fwd = f"=E{row}+L{row}"
-            eg_fwd = f"=P{row}+(({vel_fwd})^2)/(2*{G_REF})"
-            sf_fwd = f"={friction_slope_expr(a1(row, TABLE_Q), area_fwd, radius_fwd)}"
+            area_fwd = trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_super_cell)
+            radius_fwd = trap_radius(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_super_cell)
+            top_fwd = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_super_cell)
+            vel_fwd = velocity_expr(q_cell, area_fwd)
+            fr_fwd = froude_expr(q_cell, area_fwd, top_fwd)
+            m_fwd = specific_force_expr(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_super_cell, q_cell, area_fwd)
+            ws_fwd = f"={a1(row, TABLE_BED)}+{y_super_cell}"
+            eg_fwd = f"={ws_super_cell}+(({vel_fwd})^2)/(2*{G_REF})"
+            sf_fwd = f"={friction_slope_expr(q_cell, area_fwd, radius_fwd)}"
+            crit_depth = approx_critical_depth_expr(a1(row, TABLE_Q), a1(row, TABLE_WIDTH))
             if is_first:
                 set_cell(grid, row, TABLE_YF, f"=MAX({MIN_DEPTH_REF},({start_stage_expr})-E{row})")
                 set_cell(grid, row, TABLE_ERRF, 0)
-                set_cell(grid, row, TABLE_DONEF, 1)
+                set_cell(grid, row, TABLE_DONEF, f'=IF({fr_super_cell}>1,1,0)')
             else:
                 set_cell(
                     grid,
                     row,
                     TABLE_YF,
-                    f"=IF({RESET_REF}=0,L{prev_row},"
-                    f"IF(T{prev_row}=0,L{prev_row},"
-                    f"IF(L{row}=0,L{prev_row},"
-                    f"IF(ABS(S{row})>{PROFILE_TOL_REF},"
-                    f"MAX({MIN_DEPTH_REF},L{row}+((S{row})*{PROFILE_RELAX_REF}*IF(({fr_fwd})<1,1,-1))),"
-                    f"L{row}))))",
+                    f"=IF({RESET_REF}=0,{prev_y_super_cell},"
+                    f"IF({prev_done_super_cell}=0,"
+                    f"IF({y_super_cell}=0,{crit_depth},"
+                    f"IF(ABS(({crit_depth})-{y_super_cell})>{PROFILE_TOL_REF},"
+                    f"MAX({MIN_DEPTH_REF},{y_super_cell}+({PROFILE_RELAX_REF}*(({crit_depth})-{y_super_cell}))),"
+                    f"{crit_depth})),"
+                    f"IF({y_super_cell}=0,{prev_y_super_cell},"
+                    f"IF(ABS({err_super_cell})>{PROFILE_TOL_REF},"
+                    f"MAX({MIN_DEPTH_REF},{y_super_cell}+(({err_super_cell})*{PROFILE_RELAX_REF}*IF(({fr_super_cell})<1,1,-1))),"
+                    f"{y_super_cell}))))",
                 )
                 local_fwd = (
-                    f"IF(O{prev_row}>O{row},{KE_REF}*((O{prev_row}^2-O{row}^2)/(2*{G_REF})),"
-                    f"{KC_REF}*((O{row}^2-O{prev_row}^2)/(2*{G_REF})))"
-                    f"+({KB_REF}*(ABS(I{row})/90)*(MAX(O{prev_row}^2,O{row}^2)/(2*{G_REF})))"
+                    f"IF({a1(prev_row, TABLE_VF)}>{vel_super_cell},{KE_REF}*(({a1(prev_row, TABLE_VF)}^2-{vel_super_cell}^2)/(2*{G_REF})),"
+                    f"{KC_REF}*(({vel_super_cell}^2-{a1(prev_row, TABLE_VF)}^2)/(2*{G_REF})))"
+                    f"+({KB_REF}*(ABS({a1(row, TABLE_DEF)})/90)*(MAX({a1(prev_row, TABLE_VF)}^2,{vel_super_cell}^2)/(2*{G_REF})))"
                 )
                 set_cell(
                     grid,
                     row,
                     TABLE_ERRF,
-                    f"=Q{prev_row}-(((R{prev_row}+R{row})/2)*J{row})-({local_fwd})-Q{row}",
+                    f"={a1(prev_row, TABLE_EGF)}-((({a1(prev_row, TABLE_SFF)}+{sf_super_cell})/2)*{a1(row, TABLE_DX)})-({local_fwd})-{eg_super_cell}",
                 )
-                set_cell(grid, row, TABLE_DONEF, f'=IF(ABS(S{row})<{PROFILE_TOL_REF},1,0)')
+                set_cell(grid, row, TABLE_DONEF, f'=IF(AND(ABS({err_super_cell})<{PROFILE_TOL_REF},{fr_super_cell}>1),1,0)')
             set_cell(grid, row, TABLE_AF, f"={area_fwd}")
             set_cell(grid, row, TABLE_RF, f"={radius_fwd}")
             set_cell(grid, row, TABLE_VF, f"={vel_fwd}")
             set_cell(grid, row, TABLE_WSF, ws_fwd)
             set_cell(grid, row, TABLE_EGF, eg_fwd)
             set_cell(grid, row, TABLE_SFF, sf_fwd)
+            set_cell(grid, row, TABLE_FRF, f"={fr_fwd}")
+            set_cell(grid, row, TABLE_MF, f"={m_fwd}")
 
-            area_bwd = trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_YB))
-            radius_bwd = trap_radius(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_YB))
-            top_bwd = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_YB))
-            vel_bwd = velocity_expr(a1(row, TABLE_Q), area_bwd)
-            fr_bwd = froude_expr(a1(row, TABLE_Q), area_bwd, top_bwd)
-            ws_bwd = f"=E{row}+U{row}"
-            eg_bwd = f"=Y{row}+(({vel_bwd})^2)/(2*{G_REF})"
-            sf_bwd = f"={friction_slope_expr(a1(row, TABLE_Q), area_bwd, radius_bwd)}"
+            area_bwd = trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_sub_cell)
+            radius_bwd = trap_radius(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_sub_cell)
+            top_bwd = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_sub_cell)
+            vel_bwd = velocity_expr(q_cell, area_bwd)
+            fr_bwd = froude_expr(q_cell, area_bwd, top_bwd)
+            m_bwd = specific_force_expr(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), y_sub_cell, q_cell, area_bwd)
+            ws_bwd = f"={a1(row, TABLE_BED)}+{y_sub_cell}"
+            eg_bwd = f"={ws_sub_cell}+(({vel_bwd})^2)/(2*{G_REF})"
+            sf_bwd = f"={friction_slope_expr(q_cell, area_bwd, radius_bwd)}"
             if is_last:
                 set_cell(grid, row, TABLE_YB, f"=MAX({MIN_DEPTH_REF},({end_stage_expr})-E{row})")
                 set_cell(grid, row, TABLE_ERRB, 0)
-                set_cell(grid, row, TABLE_DONEB, 1)
+                set_cell(grid, row, TABLE_DONEB, f'=IF({fr_sub_cell}<1,1,0)')
             else:
                 set_cell(
                     grid,
                     row,
                     TABLE_YB,
-                    f"=IF({RESET_REF}=0,U{next_row},"
-                    f"IF(AC{next_row}=0,U{next_row},"
-                    f"IF(U{row}=0,U{next_row},"
-                    f"IF(ABS(AB{row})>{PROFILE_TOL_REF},"
-                    f"MAX({MIN_DEPTH_REF},U{row}+((AB{row})*{PROFILE_RELAX_REF}*IF(({fr_bwd})<1,1,-1))),"
-                    f"U{row}))))",
+                    f"=IF({RESET_REF}=0,{next_y_sub_cell},"
+                    f"IF({next_done_sub_cell}=0,"
+                    f"IF({y_sub_cell}=0,{crit_depth},"
+                    f"IF(ABS(({crit_depth})-{y_sub_cell})>{PROFILE_TOL_REF},"
+                    f"MAX({MIN_DEPTH_REF},{y_sub_cell}+({PROFILE_RELAX_REF}*(({crit_depth})-{y_sub_cell}))),"
+                    f"{crit_depth})),"
+                    f"IF({y_sub_cell}=0,{next_y_sub_cell},"
+                    f"IF(ABS({err_sub_cell})>{PROFILE_TOL_REF},"
+                    f"MAX({MIN_DEPTH_REF},{y_sub_cell}+(({err_sub_cell})*{PROFILE_RELAX_REF}*IF(({fr_sub_cell})<1,1,-1))),"
+                    f"{y_sub_cell}))))",
                 )
                 local_bwd = (
-                    f"IF(X{row}>X{next_row},{KE_REF}*((X{row}^2-X{next_row}^2)/(2*{G_REF})),"
-                    f"{KC_REF}*((X{next_row}^2-X{row}^2)/(2*{G_REF})))"
-                    f"+({KB_REF}*(ABS(I{next_row})/90)*(MAX(X{row}^2,X{next_row}^2)/(2*{G_REF})))"
+                    f"IF({vel_sub_cell}>{a1(next_row, TABLE_VB)},{KE_REF}*(({vel_sub_cell}^2-{a1(next_row, TABLE_VB)}^2)/(2*{G_REF})),"
+                    f"{KC_REF}*(({a1(next_row, TABLE_VB)}^2-{vel_sub_cell}^2)/(2*{G_REF})))"
+                    f"+({KB_REF}*(ABS({a1(next_row, TABLE_DEF)})/90)*(MAX({vel_sub_cell}^2,{a1(next_row, TABLE_VB)}^2)/(2*{G_REF})))"
                 )
                 set_cell(
                     grid,
                     row,
                     TABLE_ERRB,
-                    f"=Z{next_row}+(((AA{row}+AA{next_row})/2)*J{next_row})+({local_bwd})-Z{row}",
+                    f"={a1(next_row, TABLE_EGB)}+((({sf_sub_cell}+{a1(next_row, TABLE_SFB)})/2)*{a1(next_row, TABLE_DX)})+({local_bwd})-{eg_sub_cell}",
                 )
-                set_cell(grid, row, TABLE_DONEB, f'=IF(ABS(AB{row})<{PROFILE_TOL_REF},1,0)')
+                set_cell(grid, row, TABLE_DONEB, f'=IF(AND(ABS({err_sub_cell})<{PROFILE_TOL_REF},{fr_sub_cell}<1),1,0)')
             set_cell(grid, row, TABLE_AB, f"={area_bwd}")
             set_cell(grid, row, TABLE_RB, f"={radius_bwd}")
             set_cell(grid, row, TABLE_VB, f"={vel_bwd}")
             set_cell(grid, row, TABLE_WSB, ws_bwd)
             set_cell(grid, row, TABLE_EGB, eg_bwd)
             set_cell(grid, row, TABLE_SFB, sf_bwd)
+            set_cell(grid, row, TABLE_FRB, f"={fr_bwd}")
+            set_cell(grid, row, TABLE_MB, f"={m_bwd}")
 
-            set_cell(grid, row, TABLE_Y, f'=IF({mode_ref}="Supercritical",L{row},U{row})')
-            vel_final = velocity_expr(a1(row, TABLE_Q), trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_Y)))
-            top_final = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_Y))
-            set_cell(grid, row, TABLE_WS, f"=E{row}+AD{row}")
-            set_cell(grid, row, TABLE_EG, f"=AE{row}+(({vel_final})^2)/(2*{G_REF})")
+            set_cell(
+                grid,
+                row,
+                TABLE_Y,
+                f'=IF({mode_ref}="Supercritical",{y_super_cell},IF({mode_ref}="Subcritical",{y_sub_cell},IF(AND({done_super_cell}=1,{done_sub_cell}=1),IF({m_super_cell}>={m_sub_cell},{y_super_cell},{y_sub_cell}),IF({done_super_cell}=1,{y_super_cell},IF({done_sub_cell}=1,{y_sub_cell},{crit_depth})))))',
+            )
+            final_area = trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), final_y_cell)
+            top_final = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), final_y_cell)
+            vel_final = velocity_expr(q_cell, final_area)
+            set_cell(grid, row, TABLE_WS, f"={a1(row, TABLE_BED)}+{final_y_cell}")
+            set_cell(grid, row, TABLE_EG, f"={final_ws_cell}+(({vel_final})^2)/(2*{G_REF})")
 
             left_crest = ""
             if yes_no(rec.get("SpillLeftOn", False)) and str(rec.get("SpillLeftTo", "")).lower() == "drain" and not pd.isna(rec.get("SpillLeftCrest")):
@@ -971,32 +1092,33 @@ def build_sheet():
                 grid,
                 row,
                 TABLE_SPILL_L,
-                0 if left_crest == "" else f"={SPILL_COEFF_REF}*MAX(J{row},0.1)*POWER(MAX(0,AE{row}-AG{row}),1.5)",
+                0 if left_crest == "" else f"={SPILL_COEFF_REF}*MAX({a1(row, TABLE_DX)},0.1)*POWER(MAX(0,{final_ws_cell}-{crest_l_cell}),1.5)",
             )
             set_cell(
                 grid,
                 row,
                 TABLE_SPILL_R,
-                0 if right_crest == "" else f"={SPILL_COEFF_REF}*MAX(J{row},0.1)*POWER(MAX(0,AE{row}-AH{row}),1.5)",
+                0 if right_crest == "" else f"={SPILL_COEFF_REF}*MAX({a1(row, TABLE_DX)},0.1)*POWER(MAX(0,{final_ws_cell}-{crest_r_cell}),1.5)",
             )
             if is_spill_end_bc and is_last:
-                set_cell(grid, row, TABLE_SPILL, f"=AI{row}+AJ{row}+MAX(0,K{row}-(AI{row}+AJ{row}))")
+                set_cell(grid, row, TABLE_SPILL, f"={spill_l_cell}+{spill_r_cell}+MAX(0,{q_cell}-({spill_l_cell}+{spill_r_cell})-{q_floor_expr})")
             else:
-                set_cell(grid, row, TABLE_SPILL, f"=AI{row}+AJ{row}")
-            set_cell(grid, row, TABLE_CUM_SPILL, f"=AK{row}" if is_first else f"=AL{prev_row}+AK{row}")
-            set_cell(grid, row, TABLE_FR, f"=ABS({vel_final})/SQRT({G_REF}*MAX(({trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_Y))})/MAX({top_final},1E-6),1E-6))")
-            set_cell(grid, row, TABLE_REGIME, f'=IF(AM{row}<1,"Subcritical","Supercritical")')
-            set_cell(grid, row, TABLE_SF, f'=IF({mode_ref}="Supercritical",R{row},AA{row})')
+                set_cell(grid, row, TABLE_SPILL, f"={spill_l_cell}+{spill_r_cell}")
+            set_cell(grid, row, TABLE_CUM_SPILL, f"={spill_cell}" if is_first else f"={prev_cum_spill_cell}+{spill_cell}")
+            set_cell(grid, row, TABLE_FR, f"={froude_expr(q_cell, final_area, top_final)}")
+            set_cell(grid, row, TABLE_REGIME, f'=IF({final_fr_cell}<1,"Subcritical","Supercritical")')
+            final_radius = trap_radius(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_Y))
+            set_cell(grid, row, TABLE_SF, f'={friction_slope_expr(q_cell, final_area, final_radius)}')
 
-        set_cell(grid, summary_row, SUM_WS0, f"=AE{data_start}")
-        set_cell(grid, summary_row, SUM_WS1, f"=AE{data_end}")
-        set_cell(grid, summary_row, SUM_SPILL, "0" if seg["name"] == "drain" else f"=SUM(AK{data_start}:AK{data_end})")
+        set_cell(grid, summary_row, SUM_WS0, f"={a1(data_start, TABLE_WS)}")
+        set_cell(grid, summary_row, SUM_WS1, f"={a1(data_end, TABLE_WS)}")
+        set_cell(grid, summary_row, SUM_SPILL, "0" if seg["name"] == "drain" else f"=SUM({a1(data_start, TABLE_SPILL)}:{a1(data_end, TABLE_SPILL)})")
         if is_closed_bc or is_spill_end_bc:
             set_cell(grid, summary_row, SUM_QOUT, 0)
         else:
-            set_cell(grid, summary_row, SUM_QOUT, f"=MAX(0,K{data_end}-AK{data_end})")
-        set_cell(grid, summary_row, SUM_YAVG, f"=AVERAGE(AD{data_start}:AD{data_end})")
-        set_cell(grid, summary_row, SUM_SFAVG, f"=AVERAGE(AO{data_start}:AO{data_end})")
+            set_cell(grid, summary_row, SUM_QOUT, f"=MAX(0,{a1(data_end, TABLE_Q)}-{a1(data_end, TABLE_SPILL)}-{q_floor_expr})")
+        set_cell(grid, summary_row, SUM_YAVG, f"=AVERAGE({a1(data_start, TABLE_Y)}:{a1(data_end, TABLE_Y)})")
+        set_cell(grid, summary_row, SUM_SFAVG, f"=AVERAGE({a1(data_start, TABLE_SF)}:{a1(data_end, TABLE_SF)})")
         set_cell(grid, summary_row, SUM_HF, f"=E{summary_row}*R{summary_row}")
 
     for seg in segments:
@@ -1084,7 +1206,7 @@ def apply_excel_layout(ws, total_cols):
     apply_fill(ws, 4, 24, 2, 4, panel_fill)
     apply_fill(ws, 4, 20, 11, 17, boundary_fill, bold=True)
     apply_fill(ws, SUMMARY_HEADER_ROW, SUMMARY_HEADER_ROW, 1, 24, summary_fill, bold=True)
-    apply_fill(ws, SOLVER_HEADER_ROW, SOLVER_HEADER_ROW, 1, 28, solver_fill, bold=True)
+    apply_fill(ws, SOLVER_HEADER_ROW, SOLVER_HEADER_ROW, 1, 42, solver_fill, bold=True)
 
 
 def configure_excel_calculation(workbook):

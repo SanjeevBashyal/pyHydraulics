@@ -1,7 +1,7 @@
 label,segment,end,bc_type,bc_value,q_reference,resolved_stage,remarks
 Inlet-UsProject,UsProject,start,Known WSE,637.0,51.0,637.0,Master inlet boundary
 Outlet-UsExit,UsExit,end,None,,0.0,634.3119999999999,Master outlet boundary
-Outlet-forebay,forebay,end,Known WSE,635.5,41.185928476411505,635.5,Master outlet boundary
+Outlet-forebay,forebay,end,Known WSE,635.5,49.780806082708395,635.5,Master outlet boundary
 Outlet-sidechannel,sidechannel,end,Spill End,,0.0,631.55,Master outlet boundary
-Inlet-drain,drain,start,Spill Zero,,251.56501988557076,631.55,Master inlet boundary
-Outlet-drain,drain,end,Known WSE,625.0,251.5650238409715,625.0,Master outlet boundary
+Inlet-drain,drain,start,Spill Zero,,1.2182113909730352,631.55,Master inlet boundary
+Outlet-drain,drain,end,Known WSE,625.0,1.2182113909730352,625.0,Master outlet boundary

@@ -7,6 +7,7 @@ credentials.json
 master_credentials.json
 
 pNet/master_credentials.json
+TURFM/master_credentials.json
 
 *.tif
 

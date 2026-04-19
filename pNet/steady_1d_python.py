@@ -13,12 +13,12 @@ EPS = 1e-6
 DEFAULT_NETWORK_DIR = Path("MTGHP-core")
 DEFAULT_OUTPUT_DIR = Path("steady_1d_python_output")
 DEFAULT_PROFILE_MODES = {
-    "UsProject": "Subcritical",
-    "waterway": "Subcritical",
-    "UsExit": "Subcritical",
-    "forebay": "Subcritical",
-    "sidechannel": "Subcritical",
-    "drain": "Subcritical",
+    "UsProject": "Mixed",
+    "waterway": "Mixed",
+    "UsExit": "Mixed",
+    "forebay": "Mixed",
+    "sidechannel": "Mixed",
+    "drain": "Mixed",
 }
 
 BC_SYNONYMS = {
@@ -57,6 +57,7 @@ class SolverParameters:
     init_alpha2: float = 0.65
     gravity: float = 9.81
     density: float = 998.2
+    min_computational_flow: float = 0.001
     max_junction_iterations: int = 80
     max_profile_iterations: int = 250
     max_segment_iterations: int = 12
@@ -470,6 +471,41 @@ def solve_positive_root(func, start: float, max_depth: float = 200.0) -> float:
     return best_x
 
 
+def solve_profile_root(
+    func,
+    min_depth: float,
+    max_depth: float = 200.0,
+    prefer: str = "lowest",
+    samples: int = 300,
+) -> float:
+    low = max(min_depth, 1e-4)
+    high = max(low + 1e-4, max_depth)
+    roots: List[Tuple[float, float]] = []
+    best_x = low
+    best_abs = abs(func(low))
+    prev_x = low
+    prev_f = func(prev_x)
+    if abs(prev_f) < best_abs:
+        best_abs = abs(prev_f)
+        best_x = prev_x
+    for idx in range(1, samples + 1):
+        x = low + (high - low) * idx / samples
+        f = func(x)
+        if abs(f) < best_abs:
+            best_abs = abs(f)
+            best_x = x
+        if prev_f == 0.0:
+            return prev_x
+        if prev_f * f <= 0.0:
+            roots.append((prev_x, x))
+        prev_x = x
+        prev_f = f
+    if roots:
+        bracket = roots[-1] if prefer == "highest" else roots[0]
+        return solve_bisection_root(func, bracket[0], bracket[1])
+    return best_x
+
+
 def solve_normal_depth(q: float, width: float, side: float, slope: float, params: SolverParameters) -> float:
     if abs(q) <= EPS:
         return params.min_depth
@@ -534,6 +570,62 @@ def segment_end_terms(
     hbend = params.bend_coeff * (abs(segment.end_angle - segment.start_angle) / 90.0) * max(up.velocity_head, dn.velocity_head)
     hj = branch_loss(segment.junction_delta, branch_q, main_q, up.velocity_head, dn.velocity_head, params)
     return SegmentLossTerms(up=up, dn=dn, hf=hf, hve=hve, hbend=hbend, hj=hj, hl=hf + hve + hbend + hj)
+
+
+def solve_upstream_stage_from_downstream(
+    segment: Segment,
+    q: float,
+    stage_dn: float,
+    params: SolverParameters,
+    branch_q: float = 0.0,
+    main_q: float = 1.0,
+    start_stage_guess: Optional[float] = None,
+) -> Tuple[float, SegmentLossTerms]:
+    crit_stage = segment.start_bed + solve_critical_depth(q, segment.start_width, segment.start_side, params)
+    norm_stage = segment.start_bed + solve_normal_depth(q, segment.start_width, segment.start_side, boundary_slope(segment, params), params)
+    seed_stage = max(stage_dn, crit_stage, norm_stage)
+    if start_stage_guess is not None:
+        seed_stage = max(seed_stage, start_stage_guess)
+
+    def residual(depth_up: float) -> float:
+        stage_up = segment.start_bed + max(params.min_depth, depth_up)
+        terms = segment_end_terms(segment, q, stage_up, stage_dn, params, branch_q, main_q)
+        return terms.dn.energy_grade + terms.hl - terms.up.energy_grade
+
+    seed_depth = max(params.min_depth, seed_stage - segment.start_bed)
+    max_depth = max(50.0, seed_depth * 2.0 + 10.0, abs(stage_dn - segment.start_bed) + 20.0)
+    depth_up = max(params.min_depth, solve_profile_root(residual, params.min_depth, max_depth=max_depth, prefer="highest"))
+    stage_up = segment.start_bed + depth_up
+    terms = segment_end_terms(segment, q, stage_up, stage_dn, params, branch_q, main_q)
+    return stage_up, terms
+
+
+def solve_downstream_stage_from_upstream(
+    segment: Segment,
+    q: float,
+    stage_up: float,
+    params: SolverParameters,
+    branch_q: float = 0.0,
+    main_q: float = 1.0,
+    end_stage_guess: Optional[float] = None,
+) -> Tuple[float, SegmentLossTerms]:
+    crit_stage = segment.end_bed + solve_critical_depth(q, segment.end_width, segment.end_side, params)
+    norm_stage = segment.end_bed + solve_normal_depth(q, segment.end_width, segment.end_side, boundary_slope(segment, params), params)
+    seed_stage = max(segment.end_bed + params.min_depth, crit_stage, norm_stage)
+    if end_stage_guess is not None:
+        seed_stage = max(segment.end_bed + params.min_depth, end_stage_guess)
+
+    def residual(depth_dn: float) -> float:
+        stage_dn = segment.end_bed + max(params.min_depth, depth_dn)
+        terms = segment_end_terms(segment, q, stage_up, stage_dn, params, branch_q, main_q)
+        return terms.up.energy_grade - terms.hl - terms.dn.energy_grade
+
+    seed_depth = max(params.min_depth, seed_stage - segment.end_bed)
+    max_depth = max(50.0, seed_depth * 2.0 + 10.0, abs(stage_up - segment.end_bed) + 20.0)
+    depth_dn = max(params.min_depth, solve_profile_root(residual, params.min_depth, max_depth=max_depth, prefer="lowest"))
+    stage_dn = segment.end_bed + depth_dn
+    terms = segment_end_terms(segment, q, stage_up, stage_dn, params, branch_q, main_q)
+    return stage_dn, terms
 
 
 def boundary_slope(segment: Segment, params: SolverParameters) -> float:
@@ -671,38 +763,149 @@ def solve_junction_network(
         forebay_stage = boundary_stage_map[boundary_label("forebay", "end")]
         side_stage = boundary_stage_map[boundary_label("sidechannel", "end")]
 
-        up_terms = segment_end_terms(segments_by_name["UsProject"], q_total, inlet_stage, j1, params)
-        ww_terms = segment_end_terms(segments_by_name["waterway"], q_waterway, j1, j2, params, q_usexit, q_total)
-        ue_terms = segment_end_terms(segments_by_name["UsExit"], q_usexit, j1, usexit_stage, params, q_waterway, q_total)
-        fb_terms = segment_end_terms(segments_by_name["forebay"], q_forebay, j2, forebay_stage, params, q_side, max(q_waterway, EPS))
-        sc_terms = segment_end_terms(segments_by_name["sidechannel"], q_side, j2, side_stage, params, q_forebay, max(q_waterway, EPS))
+        j1_from_usproject, up_terms = solve_downstream_stage_from_upstream(
+            segments_by_name["UsProject"],
+            q_total,
+            inlet_stage,
+            params,
+            end_stage_guess=j1,
+        )
+        j2_from_waterway, ww_super_terms = solve_downstream_stage_from_upstream(
+            segments_by_name["waterway"],
+            q_waterway,
+            j1,
+            params,
+            q_usexit,
+            q_total,
+            end_stage_guess=j2,
+        )
 
-        j1_from_usproject = inlet_stage + up_terms.up.velocity_head - up_terms.hl - up_terms.dn.velocity_head
-        j1_from_waterway = j2 + ww_terms.dn.velocity_head + ww_terms.hl - ww_terms.up.velocity_head
-        j1_from_usexit = usexit_stage + ue_terms.dn.velocity_head + ue_terms.hl - ue_terms.up.velocity_head
-
-        j2_from_waterway = j1 + ww_terms.up.velocity_head - ww_terms.hl - ww_terms.dn.velocity_head
-        j2_from_forebay = forebay_stage + fb_terms.dn.velocity_head + fb_terms.hl - fb_terms.up.velocity_head
-        j2_from_sidechannel = side_stage + sc_terms.dn.velocity_head + sc_terms.hl - sc_terms.up.velocity_head
-
-        j1_equations = [j1_from_usproject, j1_from_waterway]
+        j1_from_waterway, ww_sub_terms = solve_upstream_stage_from_downstream(
+            segments_by_name["waterway"],
+            q_waterway,
+            j2,
+            params,
+            q_usexit,
+            q_total,
+            start_stage_guess=j1,
+        )
         if usexit_open:
-            j1_equations.append(j1_from_usexit)
-        j2_equations = [j2_from_waterway]
-        if forebay_open:
-            j2_equations.append(j2_from_forebay)
-        if sidechannel_open:
-            j2_equations.append(j2_from_sidechannel)
+            j1_from_usexit, ue_terms = solve_upstream_stage_from_downstream(
+                segments_by_name["UsExit"],
+                q_usexit,
+                usexit_stage,
+                params,
+                q_waterway,
+                q_total,
+                start_stage_guess=j1,
+            )
+        else:
+            j1_from_usexit = float("nan")
+            ue_terms = segment_end_terms(segments_by_name["UsExit"], q_usexit, j1, usexit_stage, params, q_waterway, q_total)
 
-        err_j1 = max(abs(value - j1) for value in j1_equations)
-        err_j2 = max(abs(value - j2) for value in j2_equations)
+        if forebay_open:
+            j2_from_forebay, fb_terms = solve_upstream_stage_from_downstream(
+                segments_by_name["forebay"],
+                q_forebay,
+                forebay_stage,
+                params,
+                q_side,
+                max(q_waterway, EPS),
+                start_stage_guess=j2,
+            )
+        else:
+            j2_from_forebay = float("nan")
+            fb_terms = segment_end_terms(segments_by_name["forebay"], q_forebay, j2, forebay_stage, params, q_side, max(q_waterway, EPS))
+
+        if sidechannel_open:
+            j2_from_sidechannel, sc_terms = solve_upstream_stage_from_downstream(
+                segments_by_name["sidechannel"],
+                q_side,
+                side_stage,
+                params,
+                q_forebay,
+                max(q_waterway, EPS),
+                start_stage_guess=j2,
+            )
+        else:
+            j2_from_sidechannel = float("nan")
+            sc_terms = segment_end_terms(segments_by_name["sidechannel"], q_side, j2, side_stage, params, q_forebay, max(q_waterway, EPS))
+
+        j1_sub = max(
+            [value for value in [j1_from_waterway, j1_from_usexit if usexit_open else None] if value is not None and not math.isnan(value)],
+            default=j1_from_waterway,
+        )
+        j2_sub_candidates = []
+        if forebay_open and not math.isnan(j2_from_forebay):
+            j2_sub_candidates.append(j2_from_forebay)
+        if sidechannel_open and not math.isnan(j2_from_sidechannel):
+            j2_sub_candidates.append(j2_from_sidechannel)
+        j2_sub = max(j2_sub_candidates) if j2_sub_candidates else j2
+
+        j1_super = j1_from_usproject
+        j2_super = j2_from_waterway
+
+        j1_sub_state = section_state(
+            segments_by_name["UsProject"].end_bed,
+            segments_by_name["UsProject"].end_width,
+            segments_by_name["UsProject"].end_side,
+            q_total,
+            max(params.min_depth, j1_sub - segments_by_name["UsProject"].end_bed),
+            params,
+        )
+        j1_super_state = section_state(
+            segments_by_name["UsProject"].end_bed,
+            segments_by_name["UsProject"].end_width,
+            segments_by_name["UsProject"].end_side,
+            q_total,
+            max(params.min_depth, j1_super - segments_by_name["UsProject"].end_bed),
+            params,
+        )
+        j2_sub_state = section_state(
+            segments_by_name["waterway"].end_bed,
+            segments_by_name["waterway"].end_width,
+            segments_by_name["waterway"].end_side,
+            q_waterway,
+            max(params.min_depth, j2_sub - segments_by_name["waterway"].end_bed),
+            params,
+        )
+        j2_super_state = section_state(
+            segments_by_name["waterway"].end_bed,
+            segments_by_name["waterway"].end_width,
+            segments_by_name["waterway"].end_side,
+            q_waterway,
+            max(params.min_depth, j2_super - segments_by_name["waterway"].end_bed),
+            params,
+        )
+
+        j1_sub_valid = j1_sub_state.froude < 1.0
+        j1_super_valid = j1_super_state.froude > 1.0
+        j2_sub_valid = j2_sub_state.froude < 1.0
+        j2_super_valid = j2_super_state.froude > 1.0
+
+        if j1_super_valid and (not j1_sub_valid or j1_super_state.specific_force >= j1_sub_state.specific_force):
+            j1_target = j1_super
+            j1_control = "Supercritical"
+        else:
+            j1_target = j1_sub
+            j1_control = "Subcritical"
+
+        if j2_super_valid and (not j2_sub_valid or j2_super_state.specific_force >= j2_sub_state.specific_force):
+            j2_target = j2_super
+            j2_control = "Supercritical"
+        else:
+            j2_target = j2_sub
+            j2_control = "Subcritical"
+
+        err_j1 = abs(j1_target - j1)
+        err_j2 = abs(j2_target - j2)
 
         cos_ww = math.cos(math.radians(segments_by_name["waterway"].junction_delta))
         cos_ue = math.cos(math.radians(segments_by_name["UsExit"].junction_delta))
         cos_fb = math.cos(math.radians(segments_by_name["forebay"].junction_delta))
         cos_sc = math.cos(math.radians(segments_by_name["sidechannel"].junction_delta))
-        mom_j1 = ((ww_terms.up.specific_force * cos_ww) - (ue_terms.up.specific_force * cos_ue)) / max(up_terms.dn.specific_force, EPS)
-        mom_j2 = ((fb_terms.up.specific_force * cos_fb) - (sc_terms.up.specific_force * cos_sc)) / max(ww_terms.dn.specific_force, EPS)
+        mom_j1 = ((ww_sub_terms.up.specific_force * cos_ww) - (ue_terms.up.specific_force * cos_ue)) / max(up_terms.dn.specific_force, EPS)
+        mom_j2 = ((fb_terms.up.specific_force * cos_fb) - (sc_terms.up.specific_force * cos_sc)) / max(ww_super_terms.dn.specific_force, EPS)
 
         if usexit_open:
             alpha1_next = min(
@@ -711,11 +914,13 @@ def solve_junction_network(
                     0.02,
                     alpha1
                     + params.split_relaxation
-                    * (((j1_from_usexit - j1_from_waterway) / max(abs(j1), 1.0)) + (params.momentum_weight * mom_j1)),
+                    * (((j1_from_usexit - j1_from_waterway) / max(abs(j1_target), 1.0)) + (params.momentum_weight * mom_j1)),
                 ),
             )
         else:
             alpha1_next = 1.0
+
+        j2_momentum_weight = 0.0 if is_spill_end(segments_by_name["forebay"]) or is_spill_end(segments_by_name["sidechannel"]) else params.momentum_weight
 
         if forebay_open and sidechannel_open:
             alpha2_next = min(
@@ -724,7 +929,7 @@ def solve_junction_network(
                     0.02,
                     alpha2
                     + params.split_relaxation
-                    * (((j2_from_sidechannel - j2_from_forebay) / max(abs(j2), 1.0)) + (params.momentum_weight * mom_j2)),
+                    * (((j2_from_sidechannel - j2_from_forebay) / max(abs(j2_target), 1.0)) + (j2_momentum_weight * mom_j2)),
                 ),
             )
         elif forebay_open:
@@ -734,8 +939,8 @@ def solve_junction_network(
         else:
             alpha2_next = alpha2
 
-        j1_next = j1 + params.stage_relaxation * (sum(j1_equations) / len(j1_equations) - j1)
-        j2_next = j2 + params.stage_relaxation * (sum(j2_equations) / len(j2_equations) - j2)
+        j1_next = j1 + params.stage_relaxation * (j1_target - j1)
+        j2_next = j2 + params.stage_relaxation * (j2_target - j2)
 
         records.append(
             {
@@ -759,6 +964,16 @@ def solve_junction_network(
                 "j2_from_waterway": j2_from_waterway,
                 "j2_from_forebay": j2_from_forebay if forebay_open else float("nan"),
                 "j2_from_sidechannel": j2_from_sidechannel if sidechannel_open else float("nan"),
+                "j1_sub_stage": j1_sub,
+                "j2_sub_stage": j2_sub,
+                "j1_super_stage": j1_super,
+                "j2_super_stage": j2_super,
+                "j1_control": j1_control,
+                "j2_control": j2_control,
+                "sf_j1_sub": j1_sub_state.specific_force,
+                "sf_j1_super": j1_super_state.specific_force,
+                "sf_j2_sub": j2_sub_state.specific_force,
+                "sf_j2_super": j2_super_state.specific_force,
                 "momentum_j1": mom_j1,
                 "momentum_j2": mom_j2,
                 "err_j1": err_j1,
@@ -837,36 +1052,119 @@ def pass_result_row(prefix: str, row: Dict[str, float]) -> Dict[str, float]:
         f"specific_force_{prefix}": row["specific_force"],
         f"error_{prefix}": row["error"],
         f"done_{prefix}": row["done"],
+        f"valid_{prefix}": row.get("valid_regime", False),
+        f"critical_default_{prefix}": row.get("critical_default", False),
         f"iterations_{prefix}": row["iterations"],
         f"local_loss_{prefix}": row["local_loss"],
         f"fallback_{prefix}": row["fallback_used"],
     }
 
 
-def solve_forward_profile(segment: Segment, q_array: List[float], start_stage: float, params: SolverParameters) -> List[Dict[str, float]]:
-    rows = segment.df.reset_index(drop=True)
-    results: List[Dict[str, float]] = []
+def row_from_state(
+    state: SectionState,
+    *,
+    error: float = 0.0,
+    done: bool = True,
+    iterations: int = 0,
+    local_loss: float = 0.0,
+    fallback_used: bool = False,
+    valid_regime: bool = True,
+    critical_default: bool = False,
+) -> Dict[str, float]:
+    return {
+        "error": error,
+        "done": done,
+        "iterations": iterations,
+        "local_loss": local_loss,
+        "fallback_used": fallback_used,
+        "valid_regime": valid_regime,
+        "critical_default": critical_default,
+        **raw_state_row(state),
+    }
 
-    first_depth = max(params.min_depth, start_stage - float(rows.loc[0, "BedFilled"]))
-    first_state = section_state(
-        float(rows.loc[0, "BedFilled"]),
-        float(rows.loc[0, "WidthFilled"]),
-        float(rows.loc[0, "SideFilled"]),
-        q_array[0],
-        first_depth,
+
+def critical_default_row(
+    bed: float,
+    width: float,
+    side: float,
+    q: float,
+    params: SolverParameters,
+    *,
+    error: float = 0.0,
+    local_loss: float = 0.0,
+) -> Dict[str, float]:
+    depth = solve_critical_depth(q, width, side, params)
+    state = section_state(bed, width, side, q, depth, params)
+    return row_from_state(
+        state,
+        error=error,
+        done=False,
+        iterations=0,
+        local_loss=local_loss,
+        fallback_used=True,
+        valid_regime=False,
+        critical_default=True,
+    )
+
+
+def solve_forward_profile(
+    segment: Segment,
+    q_array: List[float],
+    start_stage: float,
+    params: SolverParameters,
+    seed_index: Optional[int] = 0,
+) -> List[Dict[str, float]]:
+    rows = segment.df.reset_index(drop=True)
+    results: List[Optional[Dict[str, float]]] = [None] * len(rows)
+
+    if seed_index is None:
+        for idx in range(len(rows)):
+            results[idx] = critical_default_row(
+                float(rows.loc[idx, "BedFilled"]),
+                float(rows.loc[idx, "WidthFilled"]),
+                float(rows.loc[idx, "SideFilled"]),
+                q_array[idx],
+                params,
+            )
+        return [row for row in results if row is not None]
+
+    for idx in range(seed_index):
+        results[idx] = critical_default_row(
+            float(rows.loc[idx, "BedFilled"]),
+            float(rows.loc[idx, "WidthFilled"]),
+            float(rows.loc[idx, "SideFilled"]),
+            q_array[idx],
+            params,
+        )
+
+    seed_depth = max(params.min_depth, start_stage - float(rows.loc[seed_index, "BedFilled"]))
+    seed_state = section_state(
+        float(rows.loc[seed_index, "BedFilled"]),
+        float(rows.loc[seed_index, "WidthFilled"]),
+        float(rows.loc[seed_index, "SideFilled"]),
+        q_array[seed_index],
+        seed_depth,
         params,
     )
-    results.append({"error": 0.0, "done": True, "iterations": 0, "local_loss": 0.0, "fallback_used": False, **raw_state_row(first_state)})
+    results[seed_index] = row_from_state(
+        seed_state,
+        valid_regime=seed_state.froude > 1.0,
+        critical_default=seed_index > 0,
+    )
 
-    for idx in range(1, len(rows)):
+    for idx in range(seed_index + 1, len(rows)):
         prev = results[idx - 1]
+        assert prev is not None
         dx = float(rows.loc[idx, "Chainage"] - rows.loc[idx - 1, "Chainage"])
         deflection = float(rows.loc[idx, "Deflection"])
         bed = float(rows.loc[idx, "BedFilled"])
         width = float(rows.loc[idx, "WidthFilled"])
         side = float(rows.loc[idx, "SideFilled"])
         q_here = q_array[idx]
-        depth = max(params.min_depth, prev["depth"])
+        if prev.get("critical_default", False):
+            depth = solve_critical_depth(q_here, width, side, params)
+        else:
+            depth = max(params.min_depth, prev["depth"])
         done = False
         local_loss = 0.0
         error = 0.0
@@ -879,7 +1177,7 @@ def solve_forward_profile(segment: Segment, q_array: List[float], start_stage: f
             for iteration in range(1, params.max_profile_iterations + 1):
                 state = section_state(bed, width, side, q_here, depth, params)
                 error, local_loss = forward_step_error(prev, state, dx, deflection, params)
-                if abs(error) < params.profile_tolerance:
+                if abs(error) < params.profile_tolerance and state.froude > 1.0:
                     done = True
                     break
                 direction = 1.0 if state.froude < 1.0 else -1.0
@@ -899,18 +1197,29 @@ def solve_forward_profile(segment: Segment, q_array: List[float], start_stage: f
 
         state = section_state(bed, width, side, q_here, depth, params)
         error, local_loss = forward_step_error(prev, state, dx, deflection, params)
-        results.append(
-            {
-                "error": error,
-                "done": abs(error) < params.profile_tolerance if params.reset == 1 else False,
-                "iterations": iteration if params.reset == 1 else 0,
-                "local_loss": local_loss,
-                "fallback_used": fallback_used,
-                **raw_state_row(state),
-            }
-        )
+        if abs(error) < params.profile_tolerance and state.froude > 1.0:
+            results[idx] = row_from_state(
+                state,
+                error=error,
+                done=True if params.reset == 1 else False,
+                iterations=iteration if params.reset == 1 else 0,
+                local_loss=local_loss,
+                fallback_used=fallback_used,
+                valid_regime=True,
+                critical_default=False,
+            )
+        else:
+            results[idx] = critical_default_row(
+                bed,
+                width,
+                side,
+                q_here,
+                params,
+                error=error,
+                local_loss=local_loss,
+            )
 
-    return results
+    return [row for row in results if row is not None]
 
 
 def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: float, params: SolverParameters) -> List[Dict[str, float]]:
@@ -927,7 +1236,16 @@ def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: fl
         last_depth,
         params,
     )
-    results[last_idx] = {"error": 0.0, "done": True, "iterations": 0, "local_loss": 0.0, "fallback_used": False, **raw_state_row(last_state)}
+    if last_state.froude < 1.0:
+        results[last_idx] = row_from_state(last_state, valid_regime=True, critical_default=False)
+    else:
+        results[last_idx] = critical_default_row(
+            float(rows.loc[last_idx, "BedFilled"]),
+            float(rows.loc[last_idx, "WidthFilled"]),
+            float(rows.loc[last_idx, "SideFilled"]),
+            q_array[last_idx],
+            params,
+        )
 
     for idx in range(last_idx - 1, -1, -1):
         next_row = results[idx + 1]
@@ -938,7 +1256,10 @@ def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: fl
         width = float(rows.loc[idx, "WidthFilled"])
         side = float(rows.loc[idx, "SideFilled"])
         q_here = q_array[idx]
-        depth = max(params.min_depth, next_row["depth"])
+        if next_row.get("critical_default", False):
+            depth = solve_critical_depth(q_here, width, side, params)
+        else:
+            depth = max(params.min_depth, next_row["depth"])
         done = False
         local_loss = 0.0
         error = 0.0
@@ -951,7 +1272,7 @@ def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: fl
             for iteration in range(1, params.max_profile_iterations + 1):
                 state = section_state(bed, width, side, q_here, depth, params)
                 error, local_loss = backward_step_error(state, next_row, dx, deflection, params)
-                if abs(error) < params.profile_tolerance:
+                if abs(error) < params.profile_tolerance and state.froude < 1.0:
                     done = True
                     break
                 direction = 1.0 if state.froude < 1.0 else -1.0
@@ -971,14 +1292,27 @@ def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: fl
 
         state = section_state(bed, width, side, q_here, depth, params)
         error, local_loss = backward_step_error(state, next_row, dx, deflection, params)
-        results[idx] = {
-            "error": error,
-            "done": abs(error) < params.profile_tolerance if params.reset == 1 else False,
-            "iterations": iteration if params.reset == 1 else 0,
-            "local_loss": local_loss,
-            "fallback_used": fallback_used,
-            **raw_state_row(state),
-        }
+        if abs(error) < params.profile_tolerance and state.froude < 1.0:
+            results[idx] = row_from_state(
+                state,
+                error=error,
+                done=True if params.reset == 1 else False,
+                iterations=iteration if params.reset == 1 else 0,
+                local_loss=local_loss,
+                fallback_used=fallback_used,
+                valid_regime=True,
+                critical_default=False,
+            )
+        else:
+            results[idx] = critical_default_row(
+                bed,
+                width,
+                side,
+                q_here,
+                params,
+                error=error,
+                local_loss=local_loss,
+            )
 
     return [row for row in results if row is not None]
 
@@ -993,15 +1327,23 @@ def build_section_discharge_array(
     q_in: float,
     row_spill_total: List[float],
     lateral_inflows: Optional[List[float]] = None,
+    params: Optional[SolverParameters] = None,
 ) -> List[float]:
     inflows = lateral_inflows or [0.0] * segment.npts
     q_array: List[float] = []
     running = 0.0 if is_spill_zero(segment) else max(q_in, 0.0)
+    pilot_q = params.min_computational_flow if params is not None else 0.0
+    use_pilot = segment_has_spill_targets(segment) or is_spill_end(segment)
 
     for idx in range(segment.npts):
         running += inflows[idx]
-        q_array.append(max(running, 0.0))
-        running = max(running - row_spill_total[idx], 0.0)
+        q_here = max(running, 0.0)
+        if use_pilot and q_here > EPS:
+            q_here = max(q_here, pilot_q)
+        q_array.append(q_here)
+        running = max(q_here - row_spill_total[idx], 0.0)
+        if use_pilot and running > EPS:
+            running = max(running, pilot_q)
 
     return q_array
 
@@ -1049,13 +1391,42 @@ def assemble_profile_dataframe(
 ) -> pd.DataFrame:
     base = segment.df.reset_index(drop=True)
     records: List[Dict[str, float]] = []
-    is_supercritical = str(mode).strip().lower() == "supercritical"
+    mode_key = str(mode).strip().lower()
 
     for idx, rec in base.iterrows():
         dx = 0.0 if idx == 0 else float(base.loc[idx, "Chainage"] - base.loc[idx - 1, "Chainage"])
         forward = forward_rows[idx]
         backward = backward_rows[idx]
-        final_depth = forward["depth"] if is_supercritical else backward["depth"]
+        if mode_key == "supercritical":
+            final_depth = forward["depth"]
+            final_source = "forward"
+        elif mode_key == "subcritical":
+            final_depth = backward["depth"]
+            final_source = "backward"
+        else:
+            forward_valid = bool(forward.get("valid_regime", False))
+            backward_valid = bool(backward.get("valid_regime", False))
+            if forward_valid and backward_valid:
+                if float(forward["specific_force"]) >= float(backward["specific_force"]):
+                    final_depth = forward["depth"]
+                    final_source = "forward"
+                else:
+                    final_depth = backward["depth"]
+                    final_source = "backward"
+            elif forward_valid:
+                final_depth = forward["depth"]
+                final_source = "forward"
+            elif backward_valid:
+                final_depth = backward["depth"]
+                final_source = "backward"
+            else:
+                final_depth = solve_critical_depth(
+                    q_array[idx],
+                    float(rec["WidthFilled"]),
+                    float(rec["SideFilled"]),
+                    params,
+                )
+                final_source = "critical"
         final_state = section_state(
             float(rec["BedFilled"]),
             float(rec["WidthFilled"]),
@@ -1087,6 +1458,7 @@ def assemble_profile_dataframe(
                 "sf_final": final_state.friction_slope,
                 "froude_final": final_state.froude,
                 "specific_force_final": final_state.specific_force,
+                "final_source": final_source,
                 "regime": "Subcritical" if final_state.froude < 1.0 else "Supercritical",
             }
         )
@@ -1145,7 +1517,7 @@ def evaluate_spills(
             recipient_spills.setdefault(right_target, [0.0] * segment.npts)[idx] += right_actual
 
     if is_spill_end(segment):
-        residual = max(0.0, q_in + sum(lateral_inflows) - sum(total_values))
+        residual = max(0.0, q_in + sum(lateral_inflows) - params.min_computational_flow - sum(total_values))
         if residual > EPS:
             target_idx, target_name, target_side = choose_spill_end_target(segment)
             total_values[target_idx] += residual
@@ -1215,11 +1587,25 @@ def solve_segment_profile(
         iterations = params.max_segment_iterations
 
     for _ in range(iterations):
-        q_array = build_section_discharge_array(segment, q_in, row_spills, inflows)
+        q_array = build_section_discharge_array(segment, q_in, row_spills, inflows, params)
         if start_stage_value is None:
             start_stage_value = heuristic_start_stage(segment, q_array[0], params)
-        forward_rows = solve_forward_profile(segment, q_array, start_stage_value, params)
         backward_rows = solve_backward_profile(segment, q_array, end_stage, params)
+        start_depth = max(params.min_depth, start_stage_value - segment.start_bed)
+        start_state = section_state(segment.start_bed, segment.start_width, segment.start_side, q_array[0], start_depth, params)
+        seed_index: Optional[int]
+        seed_stage: float
+        if start_state.froude > 1.0 and start_state.specific_force > float(backward_rows[0]["specific_force"]):
+            seed_index = 0
+            seed_stage = start_stage_value
+        else:
+            seed_index = next((idx for idx, row in enumerate(backward_rows) if row.get("critical_default", False)), None)
+            seed_stage = (
+                float(segment.df.reset_index(drop=True).loc[seed_index, "BedFilled"]) + float(backward_rows[seed_index]["depth"])
+                if seed_index is not None
+                else start_stage_value
+            )
+        forward_rows = solve_forward_profile(segment, q_array, seed_stage, params, seed_index=seed_index)
         profile = assemble_profile_dataframe(segment, q_array, mode, forward_rows, backward_rows, inflows, params)
         spill_eval = evaluate_spills(segment, profile, q_in, inflows, params)
         next_row_spills = list(spill_eval["spill_total"])
@@ -1228,11 +1614,23 @@ def solve_segment_profile(
             break
         row_spills = next_row_spills
 
-    q_array = build_section_discharge_array(segment, q_in, row_spills, inflows)
+    q_array = build_section_discharge_array(segment, q_in, row_spills, inflows, params)
     if start_stage_value is None:
         start_stage_value = heuristic_start_stage(segment, q_array[0], params)
-    forward_rows = solve_forward_profile(segment, q_array, start_stage_value, params)
     backward_rows = solve_backward_profile(segment, q_array, end_stage, params)
+    start_depth = max(params.min_depth, start_stage_value - segment.start_bed)
+    start_state = section_state(segment.start_bed, segment.start_width, segment.start_side, q_array[0], start_depth, params)
+    if start_state.froude > 1.0 and start_state.specific_force > float(backward_rows[0]["specific_force"]):
+        seed_index = 0
+        seed_stage = start_stage_value
+    else:
+        seed_index = next((idx for idx, row in enumerate(backward_rows) if row.get("critical_default", False)), None)
+        seed_stage = (
+            float(segment.df.reset_index(drop=True).loc[seed_index, "BedFilled"]) + float(backward_rows[seed_index]["depth"])
+            if seed_index is not None
+            else start_stage_value
+        )
+    forward_rows = solve_forward_profile(segment, q_array, seed_stage, params, seed_index=seed_index)
     profile = assemble_profile_dataframe(segment, q_array, mode, forward_rows, backward_rows, inflows, params)
     spill_eval = evaluate_spills(segment, profile, q_in, inflows, params)
     return finalize_profile_dataframe(segment, profile, spill_eval)

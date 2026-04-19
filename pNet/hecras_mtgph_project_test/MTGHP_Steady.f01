@@ -1,0 +1,52 @@
+Flow Title=MTGHP_Steady_Flow
+Program Version=6.70
+BEGIN FILE DESCRIPTION:
+Auto-generated from MTGHP-core and steady_1d_python.
+Flow splits and spill-fed drain inflow are prescribed from the offline network solution.
+END FILE DESCRIPTION:
+Number of Profiles= 1 
+Profile Names=Base
+River Rch & RM=MTGHP,UsProject       ,10.742  
+  51.000
+River Rch & RM=MTGHP,waterway        ,1382.398
+  51.000
+River Rch & RM=MTGHP,UsExit          ,17.255  
+   0.000
+River Rch & RM=MTGHP,forebay         ,38      
+  49.980
+River Rch & RM=MTGHP,sidechannel     ,34.931  
+   1.020
+River Rch & RM=MTGHP,drain           ,45.363  
+   1.218
+Boundary for River Rch & Prof#=MTGHP,UsProject       , 1 
+Up Type= 1 
+Up Known WS=637.000
+Dn Type= 0 
+Boundary for River Rch & Prof#=MTGHP,waterway        , 1 
+Up Type= 0 
+Dn Type= 0 
+Boundary for River Rch & Prof#=MTGHP,UsExit          , 1 
+Up Type= 0 
+Dn Type= 1 
+Dn Known WS=634.312
+Boundary for River Rch & Prof#=MTGHP,forebay         , 1 
+Up Type= 0 
+Dn Type= 1 
+Dn Known WS=635.500
+Boundary for River Rch & Prof#=MTGHP,sidechannel     , 1 
+Up Type= 0 
+Dn Type= 1 
+Dn Known WS=631.694
+Boundary for River Rch & Prof#=MTGHP,drain           , 1 
+Up Type= 1 
+Up Known WS=631.566
+Dn Type= 1 
+Dn Known WS=625.000
+DSS Import StartDate=
+DSS Import StartTime=
+DSS Import EndDate=
+DSS Import EndTime=
+DSS Import GetInterval= 0 
+DSS Import Interval=
+DSS Import GetPeak= 0 
+DSS Import FillOption= 0 
