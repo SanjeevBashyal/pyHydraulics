@@ -30,6 +30,7 @@ DEFAULT_RIVER_NAME = "MTGHP"
 DEFAULT_XS_INTERVAL = 5.0
 DEFAULT_XS_MARGIN = 0.2
 DEFAULT_XS_MAX_TOP_DEPTH = 10.0
+DEFAULT_CENTERLINE_INTERVAL = 1.0
 WINDOWS_NEWLINE = "\r\n"
 
 
@@ -56,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-q", type=float, default=None)
     parser.add_argument("--xs-interval", type=float, default=DEFAULT_XS_INTERVAL)
     parser.add_argument("--xs-margin", type=float, default=DEFAULT_XS_MARGIN)
+    parser.add_argument("--centerline-interval", type=float, default=DEFAULT_CENTERLINE_INTERVAL)
     return parser.parse_args()
 
 
@@ -227,6 +229,52 @@ def interpolate_centerline_point(
         interpolate_linear(chainages, xs, target),
         interpolate_linear(chainages, ys, target),
     )
+
+
+def dedupe_sorted_values(values: Sequence[float], tolerance: float = 1e-6) -> List[float]:
+    result: List[float] = []
+    for value in sorted(float(item) for item in values):
+        if result and abs(value - result[-1]) <= tolerance:
+            continue
+        result.append(value)
+    return result
+
+
+def build_reach_centerline_chainages(
+    segment,
+    section_chainages: Sequence[float],
+    centerline_interval: float,
+) -> List[float]:
+    original_chainages = segment.df["Chainage"].astype(float).tolist()
+    length = float(getattr(segment, "length", 0.0))
+    if length <= EPS:
+        return [0.0]
+
+    spacing = max(float(centerline_interval), 0.25)
+    chainages: List[float] = [0.0, length]
+    chainages.extend(original_chainages)
+    chainages.extend(float(value) for value in section_chainages)
+
+    cursor = spacing
+    while cursor < length - EPS:
+        chainages.append(cursor)
+        cursor += spacing
+
+    return dedupe_sorted_values(chainages)
+
+
+def build_reach_centerline_points(
+    original_chainages: Sequence[float],
+    original_points: Sequence[Tuple[float, float]],
+    reach_chainages: Sequence[float],
+) -> List[Tuple[float, float]]:
+    points: List[Tuple[float, float]] = []
+    for chainage in reach_chainages:
+        point = interpolate_centerline_point(original_chainages, original_points, chainage)
+        if points and math.hypot(point[0] - points[-1][0], point[1] - points[-1][1]) <= 1e-6:
+            continue
+        points.append(point)
+    return points
 
 
 def build_cut_line(
@@ -476,6 +524,7 @@ def build_geometry_file(
     program_version: str,
     xs_interval: float,
     xs_margin: float,
+    centerline_interval: float,
 ) -> str:
     profiles: Dict[str, pd.DataFrame] = solution["profiles"]  # type: ignore[assignment]
     min_x, max_x, max_y, min_y = compute_view_rectangle(segments)
@@ -522,14 +571,20 @@ def build_geometry_file(
         segment_river = segment_river_name(segment, river_name)
         segment_reach = segment_reach_name(segment)
         profile = profiles[segment.name].copy().sort_values("chainage").reset_index(drop=True)
-        centerline = list(
+        source_centerline = list(
             zip(
                 segment.df["Easting"].astype(float).tolist(),
                 segment.df["Northing"].astype(float).tolist(),
             )
         )
-        centerline_chainages = segment.df["Chainage"].astype(float).tolist()
+        source_centerline_chainages = segment.df["Chainage"].astype(float).tolist()
         section_chainages = sample_section_chainages(segment, xs_interval)
+        centerline_chainages = build_reach_centerline_chainages(segment, section_chainages, centerline_interval)
+        centerline = build_reach_centerline_points(
+            source_centerline_chainages,
+            source_centerline,
+            centerline_chainages,
+        )
         text_x = sum(pt[0] for pt in centerline) / len(centerline)
         text_y = sum(pt[1] for pt in centerline) / len(centerline)
         lines.append(f"River Reach={pad_name(segment_river)},{pad_name(segment_reach)}\n")
@@ -703,6 +758,25 @@ def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def archive_stale_derived_geometry(output_dir: Path, project_name: str) -> List[Dict[str, str]]:
+    backup_dir = output_dir / "Backup"
+    timestamp = datetime.now().strftime("%Y-%b-%d_%H%M%S")
+    archived: List[Dict[str, str]] = []
+    for suffix in ("g01.hdf", "p01.hdf"):
+        path = output_dir / f"{project_name}.{suffix}"
+        if not path.exists():
+            continue
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"{project_name}.{timestamp}.{suffix}"
+        counter = 1
+        while backup_path.exists():
+            backup_path = backup_dir / f"{project_name}.{timestamp}({counter}).{suffix}"
+            counter += 1
+        path.replace(backup_path)
+        archived.append({"source": str(path), "backup": str(backup_path)})
+    return archived
+
+
 def expected_cross_section_count(segments, xs_interval: float) -> int:
     return sum(len(sample_section_chainages(segment, xs_interval)) for segment in segments)
 
@@ -774,6 +848,7 @@ def generate_project(
     total_q: Optional[float] = None,
     xs_interval: float = DEFAULT_XS_INTERVAL,
     xs_margin: float = DEFAULT_XS_MARGIN,
+    centerline_interval: float = DEFAULT_CENTERLINE_INTERVAL,
 ) -> Dict[str, object]:
     params = SolverParameters()
     segments, boundaries, detected_total_q = load_network(network_dir)
@@ -785,6 +860,7 @@ def generate_project(
     solution = solve_network(segments, boundaries, params, DEFAULT_PROFILE_MODES)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    archived_derived = archive_stale_derived_geometry(output_dir, project_name)
     prj_path = output_dir / f"{project_name}.prj"
     geom_path = output_dir / f"{project_name}.g01"
     flow_path = output_dir / f"{project_name}.f01"
@@ -802,6 +878,7 @@ def generate_project(
             program_version=program_version,
             xs_interval=xs_interval,
             xs_margin=xs_margin,
+            centerline_interval=centerline_interval,
         ),
     )
     flow_text, boundary_mappings, prescribed_flows = build_flow_file(
@@ -834,9 +911,19 @@ def generate_project(
         "1. Split discharges and drain inflow are prescribed from the offline solver results.",
         "2. 'None', 'Spill End', and 'Spill Zero' master BCs are translated into solved-equivalent HEC-RAS placeholder stages so the steady model has runnable external boundaries.",
         f"3. Cross sections are exported on approximately {xs_interval:.2f} m spacing, with internal junction ends held back where needed to reduce crossing and bow-tie issues.",
-        f"4. GIS cut lines and station/elevation templates are limited to the bed width plus {xs_margin:.2f} m offset on each side.",
-        "5. Spill locations are exported in spill_inventory.csv for manual refinement into true lateral structures if you want native HEC-RAS spill mechanics instead of prescribed-flow equivalence.",
+        f"4. River centerlines are rebuilt from the MTGHP-core CSV coordinates plus every exported cross-section intersection at no more than {centerline_interval:.2f} m spacing, so bends remain curved in RAS Mapper.",
+        f"5. GIS cut lines and station/elevation templates are limited to the bed width plus {xs_margin:.2f} m offset on each side.",
+        "6. Spill locations are exported in spill_inventory.csv for manual refinement into true lateral structures if you want native HEC-RAS spill mechanics instead of prescribed-flow equivalence.",
     ]
+    if archived_derived:
+        note_lines.extend(
+            [
+                "",
+                "Derived HEC-RAS geometry caches archived:",
+                *[f"- {row['source']} -> {row['backup']}" for row in archived_derived],
+                "Open the project in HEC-RAS and let it rebuild the geometry HDF so RAS Mapper uses the current curved centerlines.",
+            ]
+        )
     write_text(output_dir / "README.txt", "\n".join(note_lines) + "\n")
 
     internal_nodes = sorted(
@@ -867,6 +954,7 @@ def generate_project(
         "geometry_file": str(geom_path),
         "flow_file": str(flow_path),
         "plan_file": str(plan_path),
+        "archived_derived_geometry": archived_derived,
         "validation": validation,
     }
 
@@ -882,6 +970,7 @@ def main() -> None:
         total_q=args.total_q,
         xs_interval=args.xs_interval,
         xs_margin=args.xs_margin,
+        centerline_interval=args.centerline_interval,
     )
     print(f"Generated HEC-RAS project in {result['project_dir']}")
     print(f"Project file: {result['project_file']}")

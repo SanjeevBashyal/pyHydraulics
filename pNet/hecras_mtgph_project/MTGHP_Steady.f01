@@ -8,16 +8,16 @@ Number of Profiles= 1
 Profile Names=Base
 River Rch & RM=MTGHP,UsProject,10.742  
   51.000
-River Rch & RM=MTGHP,waterway,1377.398
-  51.000
+River Rch & RM=MTGHP,waterway,1380.515
+  50.950
 River Rch & RM=MTGHP,UsExit,12.255  
-   0.000
+   0.050
 River Rch & RM=MTGHP,forebay,33      
-  28.778
+   1.834
 River Rch & RM=MTGHP,sidechannel,29.931  
-  22.222
+  49.116
 River Rch & RM=MTGHP,drain,45.363  
-  50.998
+  50.850
 Boundary for River Rch & Prof#=MTGHP,UsProject, 1 
 Up Type= 1 
 Up Known WS=637.000
@@ -28,7 +28,7 @@ Dn Type= 0
 Boundary for River Rch & Prof#=MTGHP,UsExit, 1 
 Up Type= 0 
 Dn Type= 1 
-Dn Known WS=634.312
+Dn Known WS=638.078
 Boundary for River Rch & Prof#=MTGHP,forebay, 1 
 Up Type= 0 
 Dn Type= 1 
@@ -36,10 +36,10 @@ Dn Known WS=622.028
 Boundary for River Rch & Prof#=MTGHP,sidechannel, 1 
 Up Type= 0 
 Dn Type= 1 
-Dn Known WS=633.011
+Dn Known WS=634.064
 Boundary for River Rch & Prof#=MTGHP,drain, 1 
 Up Type= 1 
-Up Known WS=633.001
+Up Known WS=632.992
 Dn Type= 1 
 Dn Known WS=625.000
 DSS Import StartDate=

@@ -1,7 +1,7 @@
 segment,river,reach,river_station,prescribed_q
 UsProject,MTGHP,UsProject,10.742,51.0
-waterway,MTGHP,waterway,1377.398,51.0
-UsExit,MTGHP,UsExit,12.255,0.0
-forebay,MTGHP,forebay,33,28.778247652809092
-sidechannel,MTGHP,sidechannel,29.931,22.221752347190908
-drain,MTGHP,drain,45.363,50.998
+waterway,MTGHP,waterway,1377.398,50.95
+UsExit,MTGHP,UsExit,12.255,0.05
+forebay,MTGHP,forebay,33,1.833518410719606
+sidechannel,MTGHP,sidechannel,29.931,49.1164815892804
+drain,MTGHP,drain,45.363,50.85000000000001

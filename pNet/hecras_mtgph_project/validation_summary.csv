@@ -1,2 +1,2 @@
 files_ok,cross_section_count,reach_count,junction_count,expected_reach_count,expected_junction_count,expected_cross_section_count,counts_match
-True,304,6,2,6,2,304,True
+True,305,6,2,6,2,305,True

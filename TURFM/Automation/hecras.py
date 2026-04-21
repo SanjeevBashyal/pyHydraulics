@@ -208,16 +208,19 @@ class HECRAS:
        set.
     """
 
+    LOWER_REACH_SUFFIX = "-L"
+    LEGACY_LOWER_REACH_SUFFIX = "-Lower"
+
     def __init__(
         self,
-        hecras_version: str = "RAS66.HECRASController",
+        hecras_version: str = "RAS67.HECRASController",
         ras_exe_path: Optional[str | Path] = None,
     ) -> None:
         self.hecras_version = hecras_version
         self.ras_exe_path = (
             Path(ras_exe_path)
             if ras_exe_path is not None
-            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\Ras.exe")
+            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\Ras.exe")
         )
         self.hec = None
         self.project_path: Optional[Path] = None
@@ -1286,7 +1289,7 @@ class HECRAS:
             reach_name=main_context["reach"],
             river_station_offset=4000.0,
         )
-        lower_reach_name = f"{main_context['reach']}-Lower"
+        lower_reach_name = self._lower_reach_name(main_context["reach"])
         lower_context = self._build_reach_context_from_existing_context(
             geometry_context=main_context,
             start_index=main_split["downstream_start_index"],
@@ -1415,7 +1418,10 @@ class HECRAS:
             lower_context = self._replace_reach_identity(
                 lower_context,
                 river=downstream_reach[0],
-                reach=downstream_reach[1],
+                reach=self._normalize_lower_reach_name(
+                    main_reach=main_upper["reach"],
+                    candidate_reach=downstream_reach[1],
+                ),
             )
         return tributary_context, main_upper, lower_context
 
@@ -2128,6 +2134,30 @@ class HECRAS:
         return f"{compact}_junc"
 
     @classmethod
+    def _lower_reach_name(cls, main_reach: str) -> str:
+        reach = str(main_reach).strip()
+        if reach.endswith(cls.LOWER_REACH_SUFFIX):
+            return reach
+        if reach.endswith(cls.LEGACY_LOWER_REACH_SUFFIX):
+            reach = reach[: -len(cls.LEGACY_LOWER_REACH_SUFFIX)]
+        return f"{reach}{cls.LOWER_REACH_SUFFIX}"
+
+    @classmethod
+    def _normalize_lower_reach_name(
+        cls,
+        main_reach: str,
+        candidate_reach: Optional[str] = None,
+    ) -> str:
+        reach = str(candidate_reach).strip() if candidate_reach else ""
+        if not reach:
+            return cls._lower_reach_name(main_reach)
+        if reach.endswith(cls.LEGACY_LOWER_REACH_SUFFIX):
+            return cls._lower_reach_name(
+                reach[: -len(cls.LEGACY_LOWER_REACH_SUFFIX)]
+            )
+        return reach
+
+    @classmethod
     def _infer_junction_naming_template(
         cls,
         main_river: str,
@@ -2148,7 +2178,7 @@ class HECRAS:
                 (tributary_river, tributary_reach),
                 (main_river, main_reach),
             ],
-            downstream_reach=(main_river, f"{main_reach}-Lower"),
+            downstream_reach=(main_river, cls._lower_reach_name(main_reach)),
         )
 
     @staticmethod
@@ -4756,7 +4786,7 @@ class HECRAS:
         )
         lines = [
             f"Geom Title={geom_title}\n",
-            "Program Version=6.60\n",
+            "Program Version=6.70\n",
             (
                 "Viewing Rectangle= "
                 f"{xmin:.4f} , {xmax:.4f} , {ymax:.3f} , {ymin:.3f} \n"
@@ -4937,7 +4967,7 @@ class HECRAS:
 
         lines = [
             f"Geom Title={geom_title}\n",
-            "Program Version=6.60\n",
+            "Program Version=6.70\n",
             (
                 "Viewing Rectangle= "
                 f"{xmin:.4f} , {xmax:.4f} , {ymax:.3f} , {ymin:.3f} \n"
@@ -5246,7 +5276,7 @@ class HECRAS:
     ) -> None:
         content = [
             f"Flow Title={flow_title}\n",
-            "Program Version=6.60\n",
+            "Program Version=6.70\n",
             "Number of Profiles= 1 \n",
             f"Profile Names={profile_name}\n",
             (
@@ -5285,7 +5315,7 @@ class HECRAS:
     ) -> None:
         content = [
             f"Flow Title={flow_title}\n",
-            "Program Version=6.60\n",
+            "Program Version=6.70\n",
             "Number of Profiles= 1 \n",
             f"Profile Names={profile_name}\n",
         ]
@@ -5348,7 +5378,7 @@ class HECRAS:
     ) -> None:
         content = [
             f"Plan Title={plan_title}\n",
-            "Program Version=6.60\n",
+            "Program Version=6.70\n",
             f"Short Identifier={plan_title[:64]:<64}\n",
             "Simulation Date=,,,\n",
             "Geom File=g01\n",

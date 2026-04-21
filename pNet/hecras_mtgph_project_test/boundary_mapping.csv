@@ -4,10 +4,10 @@ UsProject,end,Internal,0,,,"Internal junction end, no external steady boundary."
 waterway,start,Internal,0,,,"Internal junction end, no external steady boundary."
 waterway,end,Internal,0,,,"Internal junction end, no external steady boundary."
 UsExit,start,Internal,0,,,"Internal junction end, no external steady boundary."
-UsExit,end,None,1,Known WS,634.312,Closed outlet approximated with zero-flow branch and solved-equivalent stage placeholder. Add a true gate/inline structure in HEC-RAS if needed.
+UsExit,end,None,1,Known WS,638.077,Closed outlet approximated with zero-flow branch and solved-equivalent stage placeholder. Add a true gate/inline structure in HEC-RAS if needed.
 forebay,start,Internal,0,,,"Internal junction end, no external steady boundary."
 forebay,end,Spill End,1,Known WS,622.028,Spill-end branch approximated with solved-equivalent outlet stage; side spill itself is exported separately for manual lateral-structure refinement.
 sidechannel,start,Internal,0,,,"Internal junction end, no external steady boundary."
-sidechannel,end,Spill End,1,Known WS,633.011,Spill-end branch approximated with solved-equivalent outlet stage; side spill itself is exported separately for manual lateral-structure refinement.
-drain,start,Spill Zero,1,Known WS,633.001,Spill-zero inlet approximated with solved-equivalent stage so the HEC-RAS run has a valid mixed-flow upstream boundary.
+sidechannel,end,Spill End,1,Known WS,634.064,Spill-end branch approximated with solved-equivalent outlet stage; side spill itself is exported separately for manual lateral-structure refinement.
+drain,start,Spill Zero,1,Known WS,632.992,Spill-zero inlet approximated with solved-equivalent stage so the HEC-RAS run has a valid mixed-flow upstream boundary.
 drain,end,Known WSE,1,Known WS,625.000,Directly from master.xlsx.
