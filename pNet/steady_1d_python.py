@@ -58,6 +58,7 @@ class SolverParameters:
     gravity: float = 9.81
     density: float = 998.2
     min_computational_flow: float = 0.001
+    dead_end_pilot_flow: float = 0.05
     max_junction_iterations: int = 80
     max_profile_iterations: int = 250
     max_segment_iterations: int = 12
@@ -628,6 +629,83 @@ def solve_downstream_stage_from_upstream(
     return stage_dn, terms
 
 
+def section_state_at_junction(segment: Segment, q: float, stage: float, at_start: bool, params: SolverParameters) -> SectionState:
+    bed = segment.start_bed if at_start else segment.end_bed
+    width = segment.start_width if at_start else segment.end_width
+    side = segment.start_side if at_start else segment.end_side
+    depth = max(params.min_depth, stage - bed)
+    return section_state(bed, width, side, q, depth, params)
+
+
+def split_junction_momentum_residual(
+    common_stage: float,
+    upstream_segment: Segment,
+    upstream_q: float,
+    branch_a_segment: Segment,
+    branch_a_q: float,
+    branch_b_segment: Segment,
+    branch_b_q: float,
+    params: SolverParameters,
+) -> float:
+    upstream_state = section_state_at_junction(upstream_segment, upstream_q, common_stage, False, params)
+    projected_force = 0.0
+    if abs(branch_a_q) > EPS:
+        branch_a_state = section_state_at_junction(branch_a_segment, branch_a_q, common_stage, True, params)
+        projected_force += branch_a_state.specific_force * math.cos(math.radians(branch_a_segment.junction_delta))
+    if abs(branch_b_q) > EPS:
+        branch_b_state = section_state_at_junction(branch_b_segment, branch_b_q, common_stage, True, params)
+        projected_force += branch_b_state.specific_force * math.cos(math.radians(branch_b_segment.junction_delta))
+    return upstream_state.specific_force - projected_force
+
+
+def solve_split_junction_super_stage(
+    upstream_segment: Segment,
+    upstream_q: float,
+    branch_a_segment: Segment,
+    branch_a_q: float,
+    branch_b_segment: Segment,
+    branch_b_q: float,
+    params: SolverParameters,
+    stage_guess: float,
+) -> Tuple[float, float]:
+    bed_floor = upstream_segment.end_bed
+    if abs(branch_a_q) > EPS:
+        bed_floor = max(bed_floor, branch_a_segment.start_bed)
+    if abs(branch_b_q) > EPS:
+        bed_floor = max(bed_floor, branch_b_segment.start_bed)
+    if abs(upstream_q) <= EPS:
+        stage = bed_floor + params.min_depth
+        return stage, 0.0
+
+    def residual(depth: float) -> float:
+        stage = bed_floor + max(params.min_depth, depth)
+        return split_junction_momentum_residual(
+            stage,
+            upstream_segment,
+            upstream_q,
+            branch_a_segment,
+            branch_a_q,
+            branch_b_segment,
+            branch_b_q,
+            params,
+        )
+
+    seed_depth = max(params.min_depth, stage_guess - bed_floor)
+    max_depth = max(50.0, seed_depth * 2.0 + 10.0, abs(stage_guess - bed_floor) + 20.0)
+    depth = solve_profile_root(residual, params.min_depth, max_depth=max_depth, prefer="lowest")
+    stage = bed_floor + depth
+    return stage, split_junction_momentum_residual(
+        stage,
+        upstream_segment,
+        upstream_q,
+        branch_a_segment,
+        branch_a_q,
+        branch_b_segment,
+        branch_b_q,
+        params,
+    )
+
+
 def boundary_slope(segment: Segment, params: SolverParameters) -> float:
     if segment.length <= EPS:
         return params.boundary_slope
@@ -645,6 +723,26 @@ def is_spill_end(segment: Segment) -> bool:
 
 def is_spill_zero(segment: Segment) -> bool:
     return segment.from_node.lower() == "inlet" and canonical_bc_type(segment.upstream_bc_type) == "Spill Zero"
+
+
+def pilot_flow_for_segment(segment: Segment, params: SolverParameters) -> float:
+    if is_closed_outlet(segment) or is_spill_end(segment):
+        return params.dead_end_pilot_flow
+    if segment_has_spill_targets(segment):
+        return params.min_computational_flow
+    return 0.0
+
+
+def closed_branch_inflow(spill_total_guess: float, params: SolverParameters) -> float:
+    return max(params.dead_end_pilot_flow, max(0.0, spill_total_guess) + params.dead_end_pilot_flow)
+
+
+def outlet_start_stage_from_junction(segment_name: str, junction_state: Dict[str, float]) -> float:
+    if segment_name == "UsExit":
+        return junction_state["j1_wse"]
+    if segment_name in {"forebay", "sidechannel"}:
+        return junction_state["j2_wse"]
+    raise KeyError(f"Unsupported outlet segment for junction start stage: {segment_name}")
 
 
 def resolve_boundary_stage(boundary: BoundaryCondition, segment: Segment, q_reference: float, params: SolverParameters) -> float:
@@ -684,18 +782,49 @@ def split_branch_flow(total_q: float, alpha: float, branch_a_open: bool, branch_
     return branch_a, total_q - branch_a
 
 
+def junction_branch_flows(
+    total_q: float,
+    alpha: float,
+    branch_a_segment: Segment,
+    branch_b_segment: Segment,
+    spill_guess_map: Dict[str, float],
+    params: SolverParameters,
+) -> Tuple[float, float]:
+    total_q = max(0.0, total_q)
+    branch_a_closed = is_closed_outlet(branch_a_segment)
+    branch_b_closed = is_closed_outlet(branch_b_segment)
+    branch_a_closed_q = closed_branch_inflow(spill_guess_map.get(branch_a_segment.name, 0.0), params)
+    branch_b_closed_q = closed_branch_inflow(spill_guess_map.get(branch_b_segment.name, 0.0), params)
+    alpha = min(0.98, max(0.02, alpha))
+
+    if branch_a_closed and branch_b_closed:
+        branch_a_q = max(0.0, total_q * alpha)
+        return branch_a_q, max(0.0, total_q - branch_a_q)
+    if branch_a_closed:
+        branch_a_q = branch_a_closed_q
+        return branch_a_q, max(0.0, total_q - branch_a_q)
+    if branch_b_closed:
+        branch_b_q = branch_b_closed_q
+        return max(0.0, total_q - branch_b_q), branch_b_q
+    branch_a_q = max(0.0, total_q * alpha)
+    return branch_a_q, max(0.0, total_q - branch_a_q)
+
+
 def initial_qout_guess(params: SolverParameters, segments_by_name: Dict[str, Segment]) -> Dict[str, float]:
-    q_waterway, q_usexit = split_branch_flow(
-        params.total_inflow_q,
-        params.init_alpha1,
-        True,
-        not is_closed_outlet(segments_by_name["UsExit"]),
-    )
-    q_forebay, q_side = split_branch_flow(
+    spill_guess_map = {name: 0.0 for name in segments_by_name}
+    if is_closed_outlet(segments_by_name["UsExit"]):
+        q_usexit = closed_branch_inflow(0.0, params)
+        q_waterway = max(0.0, params.total_inflow_q - q_usexit)
+    else:
+        q_waterway = max(0.0, params.total_inflow_q * min(0.98, max(0.02, params.init_alpha1)))
+        q_usexit = max(0.0, params.total_inflow_q - q_waterway)
+    q_forebay, q_side = junction_branch_flows(
         q_waterway,
         params.init_alpha2,
-        not is_closed_outlet(segments_by_name["forebay"]),
-        not is_closed_outlet(segments_by_name["sidechannel"]),
+        segments_by_name["forebay"],
+        segments_by_name["sidechannel"],
+        spill_guess_map,
+        params,
     )
     return {
         "UsProject": params.total_inflow_q,
@@ -734,9 +863,71 @@ def resolve_boundary_stages(
     return boundary_stage_map, boundary_rows
 
 
+def apply_internal_boundary_stage_overrides(
+    boundary_stage_map: Dict[str, float],
+    boundary_rows: List[Dict[str, float]],
+    stage_overrides: Dict[str, float],
+) -> None:
+    if not stage_overrides:
+        return
+    row_lookup = {row["label"]: row for row in boundary_rows}
+    for label, stage in stage_overrides.items():
+        boundary_stage_map[label] = stage
+        if label in row_lookup:
+            row_lookup[label]["resolved_stage"] = stage
+
+
+def sync_internal_outlet_boundaries(
+    boundary_stage_map: Dict[str, float],
+    boundary_rows: List[Dict[str, float]],
+    segments_by_name: Dict[str, Segment],
+    junction_state: Dict[str, float],
+    profiles: Optional[Dict[str, pd.DataFrame]] = None,
+) -> Dict[str, float]:
+    row_lookup = {row["label"]: row for row in boundary_rows}
+    next_stage_guesses: Dict[str, float] = {}
+
+    for segment_name in ("UsExit", "forebay", "sidechannel"):
+        segment = segments_by_name[segment_name]
+        label = boundary_label(segment_name, "end")
+        if label not in boundary_stage_map:
+            continue
+
+        start_stage = outlet_start_stage_from_junction(segment_name, junction_state)
+        has_branch_spill = segment_has_spill_targets(segment)
+        stage = boundary_stage_map[label]
+        remarks: Optional[str] = None
+
+        if is_closed_outlet(segment):
+            if has_branch_spill:
+                if profiles and segment_name in profiles:
+                    stage = float(profiles[segment_name]["ws_final"].iloc[-1])
+                remarks = "Closed outlet with lateral spill; resolved stage follows the computed branch profile"
+                next_stage_guesses[label] = stage
+            else:
+                stage = start_stage
+                remarks = "Closed outlet; resolved stage pools to the connected junction water surface"
+        elif is_spill_end(segment):
+            if profiles and segment_name in profiles:
+                stage = float(profiles[segment_name]["ws_final"].iloc[-1])
+            remarks = "Spill End outlet; resolved stage follows the computed branch profile while the outlet pilot flow is held at 0.05"
+            next_stage_guesses[label] = stage
+        else:
+            continue
+
+        boundary_stage_map[label] = stage
+        if label in row_lookup:
+            row_lookup[label]["resolved_stage"] = stage
+            if remarks is not None:
+                row_lookup[label]["remarks"] = remarks
+
+    return next_stage_guesses
+
+
 def solve_junction_network(
     segments_by_name: Dict[str, Segment],
     boundary_stage_map: Dict[str, float],
+    spill_guess_map: Dict[str, float],
     params: SolverParameters,
     init_alpha1: float,
     init_alpha2: float,
@@ -755,8 +946,21 @@ def solve_junction_network(
 
     for iteration in range(params.max_junction_iterations):
         q_total = params.total_inflow_q
-        q_waterway, q_usexit = split_branch_flow(q_total, alpha1, True, usexit_open)
-        q_forebay, q_side = split_branch_flow(q_waterway, alpha2, forebay_open, sidechannel_open)
+        if is_closed_outlet(segments_by_name["UsExit"]):
+            q_usexit = closed_branch_inflow(spill_guess_map.get("UsExit", 0.0), params)
+            q_waterway = max(0.0, q_total - q_usexit)
+        else:
+            q_waterway = max(0.0, q_total * min(0.98, max(0.02, alpha1)))
+            q_usexit = max(0.0, q_total - q_waterway)
+
+        q_forebay, q_side = junction_branch_flows(
+            q_waterway,
+            alpha2,
+            segments_by_name["forebay"],
+            segments_by_name["sidechannel"],
+            spill_guess_map,
+            params,
+        )
 
         inlet_stage = boundary_stage_map[boundary_label("UsProject", "start")]
         usexit_stage = boundary_stage_map[boundary_label("UsExit", "end")]
@@ -842,8 +1046,28 @@ def solve_junction_network(
             j2_sub_candidates.append(j2_from_sidechannel)
         j2_sub = max(j2_sub_candidates) if j2_sub_candidates else j2
 
-        j1_super = j1_from_usproject
-        j2_super = j2_from_waterway
+        j1_super_energy = j1_from_usproject
+        j2_super_energy = j2_from_waterway
+        j1_super, mom_j1 = solve_split_junction_super_stage(
+            segments_by_name["UsProject"],
+            q_total,
+            segments_by_name["waterway"],
+            q_waterway,
+            segments_by_name["UsExit"],
+            q_usexit if usexit_open else 0.0,
+            params,
+            stage_guess=j1_super_energy,
+        )
+        j2_super, mom_j2 = solve_split_junction_super_stage(
+            segments_by_name["waterway"],
+            q_waterway,
+            segments_by_name["forebay"],
+            q_forebay if forebay_open else 0.0,
+            segments_by_name["sidechannel"],
+            q_side if sidechannel_open else 0.0,
+            params,
+            stage_guess=j2_super_energy,
+        )
 
         j1_sub_state = section_state(
             segments_by_name["UsProject"].end_bed,
@@ -900,36 +1124,36 @@ def solve_junction_network(
         err_j1 = abs(j1_target - j1)
         err_j2 = abs(j2_target - j2)
 
-        cos_ww = math.cos(math.radians(segments_by_name["waterway"].junction_delta))
-        cos_ue = math.cos(math.radians(segments_by_name["UsExit"].junction_delta))
-        cos_fb = math.cos(math.radians(segments_by_name["forebay"].junction_delta))
-        cos_sc = math.cos(math.radians(segments_by_name["sidechannel"].junction_delta))
-        mom_j1 = ((ww_sub_terms.up.specific_force * cos_ww) - (ue_terms.up.specific_force * cos_ue)) / max(up_terms.dn.specific_force, EPS)
-        mom_j2 = ((fb_terms.up.specific_force * cos_fb) - (sc_terms.up.specific_force * cos_sc)) / max(ww_super_terms.dn.specific_force, EPS)
-
         if usexit_open:
             alpha1_next = min(
                 0.98,
                 max(
                     0.02,
                     alpha1
-                    + params.split_relaxation
-                    * (((j1_from_usexit - j1_from_waterway) / max(abs(j1_target), 1.0)) + (params.momentum_weight * mom_j1)),
+                    + params.split_relaxation * ((j1_from_usexit - j1_from_waterway) / max(abs(j1_target), 1.0)),
                 ),
             )
         else:
-            alpha1_next = 1.0
+            alpha1_next = min(
+                0.98,
+                max(
+                    0.02,
+                    max(0.0, 1.0 - (q_usexit / max(q_total, EPS))),
+                ),
+            )
 
-        j2_momentum_weight = 0.0 if is_spill_end(segments_by_name["forebay"]) or is_spill_end(segments_by_name["sidechannel"]) else params.momentum_weight
-
-        if forebay_open and sidechannel_open:
+        if not forebay_open and not sidechannel_open:
+            alpha2_next = min(
+                0.98,
+                max(0.02, q_forebay / max(q_waterway, EPS)),
+            )
+        elif forebay_open and sidechannel_open:
             alpha2_next = min(
                 0.98,
                 max(
                     0.02,
                     alpha2
-                    + params.split_relaxation
-                    * (((j2_from_sidechannel - j2_from_forebay) / max(abs(j2_target), 1.0)) + (j2_momentum_weight * mom_j2)),
+                    + params.split_relaxation * ((j2_from_sidechannel - j2_from_forebay) / max(abs(j2_target), 1.0)),
                 ),
             )
         elif forebay_open:
@@ -968,6 +1192,8 @@ def solve_junction_network(
                 "j2_sub_stage": j2_sub,
                 "j1_super_stage": j1_super,
                 "j2_super_stage": j2_super,
+                "j1_super_energy_stage": j1_super_energy,
+                "j2_super_energy_stage": j2_super_energy,
                 "j1_control": j1_control,
                 "j2_control": j2_control,
                 "sf_j1_sub": j1_sub_state.specific_force,
@@ -991,8 +1217,20 @@ def solve_junction_network(
         if max(err_j1, err_j2, alpha_delta, stage_delta) < params.outer_tolerance:
             break
 
-    final_q_waterway, final_q_usexit = split_branch_flow(params.total_inflow_q, alpha1, True, usexit_open)
-    final_q_forebay, final_q_side = split_branch_flow(final_q_waterway, alpha2, forebay_open, sidechannel_open)
+    if is_closed_outlet(segments_by_name["UsExit"]):
+        final_q_usexit = closed_branch_inflow(spill_guess_map.get("UsExit", 0.0), params)
+        final_q_waterway = max(0.0, params.total_inflow_q - final_q_usexit)
+    else:
+        final_q_waterway = max(0.0, params.total_inflow_q * min(0.98, max(0.02, alpha1)))
+        final_q_usexit = max(0.0, params.total_inflow_q - final_q_waterway)
+    final_q_forebay, final_q_side = junction_branch_flows(
+        final_q_waterway,
+        alpha2,
+        segments_by_name["forebay"],
+        segments_by_name["sidechannel"],
+        spill_guess_map,
+        params,
+    )
     return (
         {
             "alpha1": alpha1,
@@ -1098,11 +1336,11 @@ def critical_default_row(
     return row_from_state(
         state,
         error=error,
-        done=False,
+        done=True,
         iterations=0,
         local_loss=local_loss,
         fallback_used=True,
-        valid_regime=False,
+        valid_regime=True,
         critical_default=True,
     )
 
@@ -1148,8 +1386,8 @@ def solve_forward_profile(
     )
     results[seed_index] = row_from_state(
         seed_state,
-        valid_regime=seed_state.froude > 1.0,
-        critical_default=seed_index > 0,
+        valid_regime=seed_state.froude > 1.0 or round(seed_state.froude, 3) == 1.0,
+        critical_default=seed_index > 0 and round(seed_state.froude, 3) == 1.0,
     )
 
     for idx in range(seed_index + 1, len(rows)):
@@ -1177,7 +1415,7 @@ def solve_forward_profile(
             for iteration in range(1, params.max_profile_iterations + 1):
                 state = section_state(bed, width, side, q_here, depth, params)
                 error, local_loss = forward_step_error(prev, state, dx, deflection, params)
-                if abs(error) < params.profile_tolerance and state.froude > 1.0:
+                if round(state.froude, 3) == 1.0 or (abs(error) < params.profile_tolerance and state.froude > 1.0):
                     done = True
                     break
                 direction = 1.0 if state.froude < 1.0 else -1.0
@@ -1197,7 +1435,7 @@ def solve_forward_profile(
 
         state = section_state(bed, width, side, q_here, depth, params)
         error, local_loss = forward_step_error(prev, state, dx, deflection, params)
-        if abs(error) < params.profile_tolerance and state.froude > 1.0:
+        if round(state.froude, 3) == 1.0 or (abs(error) < params.profile_tolerance and state.froude > 1.0):
             results[idx] = row_from_state(
                 state,
                 error=error,
@@ -1272,7 +1510,7 @@ def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: fl
             for iteration in range(1, params.max_profile_iterations + 1):
                 state = section_state(bed, width, side, q_here, depth, params)
                 error, local_loss = backward_step_error(state, next_row, dx, deflection, params)
-                if abs(error) < params.profile_tolerance and state.froude < 1.0:
+                if round(state.froude, 3) == 1.0 or (abs(error) < params.profile_tolerance and state.froude < 1.0):
                     done = True
                     break
                 direction = 1.0 if state.froude < 1.0 else -1.0
@@ -1292,7 +1530,7 @@ def solve_backward_profile(segment: Segment, q_array: List[float], end_stage: fl
 
         state = section_state(bed, width, side, q_here, depth, params)
         error, local_loss = backward_step_error(state, next_row, dx, deflection, params)
-        if abs(error) < params.profile_tolerance and state.froude < 1.0:
+        if round(state.froude, 3) == 1.0 or (abs(error) < params.profile_tolerance and state.froude < 1.0):
             results[idx] = row_from_state(
                 state,
                 error=error,
@@ -1332,8 +1570,8 @@ def build_section_discharge_array(
     inflows = lateral_inflows or [0.0] * segment.npts
     q_array: List[float] = []
     running = 0.0 if is_spill_zero(segment) else max(q_in, 0.0)
-    pilot_q = params.min_computational_flow if params is not None else 0.0
-    use_pilot = segment_has_spill_targets(segment) or is_spill_end(segment)
+    pilot_q = pilot_flow_for_segment(segment, params) if params is not None else 0.0
+    use_pilot = pilot_q > 0.0
 
     for idx in range(segment.npts):
         running += inflows[idx]
@@ -1517,7 +1755,7 @@ def evaluate_spills(
             recipient_spills.setdefault(right_target, [0.0] * segment.npts)[idx] += right_actual
 
     if is_spill_end(segment):
-        residual = max(0.0, q_in + sum(lateral_inflows) - params.min_computational_flow - sum(total_values))
+        residual = max(0.0, q_in + sum(lateral_inflows) - pilot_flow_for_segment(segment, params) - sum(total_values))
         if residual > EPS:
             target_idx, target_name, target_side = choose_spill_end_target(segment)
             total_values[target_idx] += residual
@@ -1719,10 +1957,12 @@ def solve_network(
 ) -> Dict[str, object]:
     segments_by_name = {segment.name: segment for segment in segments}
     qout_guess = initial_qout_guess(params, segments_by_name)
+    spill_guess_map = {segment.name: 0.0 for segment in segments}
     alpha1_guess = params.init_alpha1
     alpha2_guess = params.init_alpha2
     j1_guess = params.init_j1_wse
     j2_guess = params.init_j2_wse
+    internal_boundary_stage_guess: Dict[str, float] = {}
 
     outer_records: List[Dict[str, float]] = []
     final_boundary_rows: List[Dict[str, float]] = []
@@ -1733,15 +1973,25 @@ def solve_network(
 
     for outer_iter in range(params.max_outer_iterations):
         boundary_stage_map, boundary_rows = resolve_boundary_stages(boundary_conditions, segments_by_name, qout_guess, params)
+        apply_internal_boundary_stage_overrides(boundary_stage_map, boundary_rows, internal_boundary_stage_guess)
 
         junction_state, junction_df = solve_junction_network(
             segments_by_name,
             boundary_stage_map,
+            spill_guess_map,
             params,
             init_alpha1=alpha1_guess,
             init_alpha2=alpha2_guess,
             init_j1=j1_guess,
             init_j2=j2_guess,
+        )
+
+        sync_internal_outlet_boundaries(
+            boundary_stage_map,
+            boundary_rows,
+            segments_by_name,
+            junction_state,
+            profiles=None,
         )
 
         q_in_map = {
@@ -1823,13 +2073,19 @@ def solve_network(
             lateral_inflows=drain_inflows,
         )
 
+        internal_boundary_stage_guess = sync_internal_outlet_boundaries(
+            boundary_stage_map,
+            boundary_rows,
+            segments_by_name,
+            junction_state,
+            profiles=profiles,
+        )
+
         qout_new = {name: float(profile["q_after_row"].iloc[-1]) for name, profile in profiles.items()}
-        if is_closed_outlet(segments_by_name["UsExit"]):
-            qout_new["UsExit"] = 0.0
-        if is_closed_outlet(segments_by_name["forebay"]):
-            qout_new["forebay"] = 0.0
-        if is_closed_outlet(segments_by_name["sidechannel"]) or is_spill_end(segments_by_name["sidechannel"]):
-            qout_new["sidechannel"] = 0.0
+        for segment_name in ("UsExit", "forebay", "sidechannel"):
+            if is_closed_outlet(segments_by_name[segment_name]) or is_spill_end(segments_by_name[segment_name]):
+                qout_new[segment_name] = 0.0
+        spill_guess_new = {name: float(profile["spill_total"].sum()) for name, profile in profiles.items()}
 
         outer_records.append(
             {
@@ -1865,6 +2121,7 @@ def solve_network(
 
         qout_delta = max(abs(qout_new[name] - qout_guess.get(name, 0.0)) for name in qout_new)
         qout_guess = qout_new
+        spill_guess_map = spill_guess_new
         if qout_delta < params.outer_tolerance:
             break
 

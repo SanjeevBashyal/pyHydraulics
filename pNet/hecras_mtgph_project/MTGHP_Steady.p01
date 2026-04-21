@@ -1,0 +1,30 @@
+Plan Title=MTGHP_Steady
+Program Version=6.70
+Short Identifier=MTGHP_Steady            
+Simulation Date=,,,
+Geom File=g01
+Flow File=f01
+Mixed Flow
+K Sum by GR= 0 
+Std Step Tol= 0.003 
+Critical Tol= 0.003 
+Num of Std Step Trials= 20 
+Max Error Tol= 0.1 
+Flow Tol Ratio= 0.001 
+Split Flow NTrial= 30 
+Split Flow Tol= 0.006 
+Split Flow Ratio= 0.02 
+Log Output Level= 0 
+Friction Slope Method= 1 
+Parabolic Critical Depth
+Global Vel Dist= 0 , 0 , 0 
+CheckData=True
+Computation Interval=1MIN
+Output Interval=1HOUR
+Instantaneous Interval=1HOUR
+Mapping Interval=1HOUR
+Run HTab= 0 
+Run UNet= 0 
+Run Sediment= 0 
+Run PostProcess= 0 
+Run WQNet= 0 

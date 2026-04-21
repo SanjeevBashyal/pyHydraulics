@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,10 @@ DEFAULT_OUTPUT_DIR = Path("hecras_mtgph_project")
 DEFAULT_PROJECT_NAME = "MTGHP_Steady"
 DEFAULT_PROGRAM_VERSION = "6.70"
 DEFAULT_RIVER_NAME = "MTGHP"
+DEFAULT_XS_INTERVAL = 5.0
+DEFAULT_XS_MARGIN = 0.2
+DEFAULT_XS_MAX_TOP_DEPTH = 10.0
+WINDOWS_NEWLINE = "\r\n"
 
 
 @dataclass
@@ -49,11 +54,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--river-name", default=DEFAULT_RIVER_NAME)
     parser.add_argument("--program-version", default=DEFAULT_PROGRAM_VERSION)
     parser.add_argument("--total-q", type=float, default=None)
+    parser.add_argument("--xs-interval", type=float, default=DEFAULT_XS_INTERVAL)
+    parser.add_argument("--xs-margin", type=float, default=DEFAULT_XS_MARGIN)
     return parser.parse_args()
 
 
 def pad_name(name: str, width: int = 16) -> str:
     return f"{str(name).strip():<{width}}"[:width]
+
+
+def trim_name(name: str, width: int = 16) -> str:
+    return str(name).strip()[:width]
+
+
+def segment_river_name(segment, default_river_name: str = "") -> str:
+    river_name = trim_name(default_river_name or DEFAULT_RIVER_NAME)
+    if river_name:
+        return river_name
+    return trim_name(getattr(segment, "name", segment)) or trim_name(DEFAULT_RIVER_NAME)
+
+
+def segment_reach_name(segment) -> str:
+    segment_name = trim_name(getattr(segment, "name", segment))
+    return segment_name or "Reach"
 
 
 def format_rs(value: float) -> str:
@@ -130,6 +153,10 @@ def compute_view_rectangle(segments) -> Tuple[float, float, float, float]:
     return min_x - pad_x, max_x + pad_x, max_y + pad_y, min_y - pad_y
 
 
+def is_internal_node(node_name: str) -> bool:
+    return str(node_name).strip().lower() not in {"inlet", "outlet", "spill"}
+
+
 def tangent_vector(points: Sequence[Tuple[float, float]], index: int) -> Tuple[float, float]:
     if len(points) == 1:
         return 1.0, 0.0
@@ -148,43 +175,143 @@ def tangent_vector(points: Sequence[Tuple[float, float]], index: int) -> Tuple[f
     return dx / norm, dy / norm
 
 
+def interpolate_linear(x_values: Sequence[float], y_values: Sequence[float], target: float) -> float:
+    if not x_values or not y_values:
+        return 0.0
+    if len(x_values) == 1:
+        return float(y_values[0])
+    if target <= x_values[0] + EPS:
+        return float(y_values[0])
+    if target >= x_values[-1] - EPS:
+        return float(y_values[-1])
+
+    right_index = bisect_right(x_values, target)
+    left_index = max(right_index - 1, 0)
+    right_index = min(right_index, len(x_values) - 1)
+    x0 = float(x_values[left_index])
+    x1 = float(x_values[right_index])
+    y0 = float(y_values[left_index])
+    y1 = float(y_values[right_index])
+    if abs(x1 - x0) < EPS:
+        return y0
+    ratio = (target - x0) / (x1 - x0)
+    return y0 + ratio * (y1 - y0)
+
+
+def nearest_chainage_index(chainages: Sequence[float], target: float) -> int:
+    if not chainages:
+        return 0
+    if len(chainages) == 1:
+        return 0
+    if target <= chainages[0] + EPS:
+        return 0
+    if target >= chainages[-1] - EPS:
+        return len(chainages) - 1
+
+    right_index = bisect_right(chainages, target)
+    left_index = max(right_index - 1, 0)
+    right_index = min(right_index, len(chainages) - 1)
+    if abs(chainages[left_index] - target) <= abs(chainages[right_index] - target):
+        return left_index
+    return right_index
+
+
+def interpolate_centerline_point(
+    chainages: Sequence[float],
+    points: Sequence[Tuple[float, float]],
+    target: float,
+) -> Tuple[float, float]:
+    xs = [float(x) for x, _ in points]
+    ys = [float(y) for _, y in points]
+    return (
+        interpolate_linear(chainages, xs, target),
+        interpolate_linear(chainages, ys, target),
+    )
+
+
 def build_cut_line(
     points: Sequence[Tuple[float, float]],
-    index: int,
+    chainages: Sequence[float],
+    target_chainage: float,
     half_length: float,
 ) -> List[Tuple[float, float]]:
-    cx, cy = points[index]
-    tx, ty = tangent_vector(points, index)
+    cx, cy = interpolate_centerline_point(chainages, points, target_chainage)
+    nearest_idx = nearest_chainage_index(chainages, target_chainage)
+    tx, ty = tangent_vector(points, nearest_idx)
     nx, ny = -ty, tx
     return [
-        (cx - nx * half_length, cy - ny * half_length),
         (cx + nx * half_length, cy + ny * half_length),
+        (cx - nx * half_length, cy - ny * half_length),
     ]
 
 
 def build_sta_elev_points(
     bed_width: float,
-    side_slope: float,
     bed_elev: float,
     top_depth: float,
-    floodplain_margin: float = 5.0,
+    margin_offset: float = DEFAULT_XS_MARGIN,
 ) -> Tuple[List[Tuple[float, float]], float, float]:
-    depth = max(top_depth, 3.0)
-    side = max(side_slope, 0.0)
-    left_toe = floodplain_margin + side * depth
-    right_toe = left_toe + max(bed_width, 0.5)
-    right_top = right_toe + side * depth
-    total_width = right_top + floodplain_margin
+    depth = min(max(top_depth, 1.0), DEFAULT_XS_MAX_TOP_DEPTH)
+    bed_width_eff = max(bed_width, 0.5)
+    offset = max(margin_offset, 0.05)
+    left_bank = offset
+    right_bank = left_bank + bed_width_eff
+    total_width = right_bank + offset
     top_elev = bed_elev + depth
     points = [
         (0.0, top_elev),
-        (floodplain_margin, top_elev),
-        (left_toe, bed_elev),
-        (right_toe, bed_elev),
-        (right_top, top_elev),
+        (left_bank, top_elev),
+        (left_bank, bed_elev),
+        (right_bank, bed_elev),
+        (right_bank, top_elev),
         (total_width, top_elev),
     ]
-    return points, left_toe, right_toe
+    return points, left_bank, right_bank
+
+
+def sample_section_chainages(segment, interval: float) -> List[float]:
+    length = float(getattr(segment, "length", 0.0))
+    if length <= EPS:
+        return [0.0]
+
+    spacing = max(float(interval), 0.1)
+    start_offset = min(spacing, length / 2.0) if is_internal_node(segment.from_node) else 0.0
+    end_offset = min(spacing, length / 2.0) if is_internal_node(segment.to_node) else 0.0
+    start_limit = start_offset
+    end_limit = max(start_limit, length - end_offset)
+
+    chainages = [start_limit, end_limit]
+    cursor = spacing
+    while cursor < length - EPS:
+        if start_limit + EPS < cursor < end_limit - EPS:
+            chainages.append(cursor)
+        cursor += spacing
+
+    unique_chainages: List[float] = []
+    for value in sorted(round(float(chainage), 6) for chainage in chainages):
+        if unique_chainages and abs(value - unique_chainages[-1]) < 1e-6:
+            continue
+        unique_chainages.append(value)
+
+    min_spacing = spacing * 0.75
+    while len(unique_chainages) > 2 and unique_chainages[1] - unique_chainages[0] < min_spacing - EPS:
+        unique_chainages.pop(1)
+    while len(unique_chainages) > 2 and unique_chainages[-1] - unique_chainages[-2] < min_spacing - EPS:
+        unique_chainages.pop(-2)
+
+    return unique_chainages
+
+
+def interpolate_profile_row(profile_df: pd.DataFrame, chainage: float) -> Dict[str, float]:
+    chainages = profile_df["chainage"].astype(float).tolist()
+    interpolated = {"chainage": float(chainage)}
+    for column in ("bed_width", "side_slope", "bed_elevation", "y_final", "ws_final"):
+        interpolated[column] = interpolate_linear(
+            chainages,
+            profile_df[column].astype(float).tolist(),
+            chainage,
+        )
+    return interpolated
 
 
 def get_boundary_lookup(boundary_df: pd.DataFrame) -> Dict[str, Dict[str, object]]:
@@ -347,8 +474,9 @@ def build_geometry_file(
     river_name: str,
     geom_title: str,
     program_version: str,
+    xs_interval: float,
+    xs_margin: float,
 ) -> str:
-    boundary_lookup = get_boundary_lookup(solution["boundaries"])  # type: ignore[arg-type]
     profiles: Dict[str, pd.DataFrame] = solution["profiles"]  # type: ignore[assignment]
     min_x, max_x, max_y, min_y = compute_view_rectangle(segments)
 
@@ -379,24 +507,32 @@ def build_geometry_file(
         lines.append("Junct Desc=, 0 , 0 , 0 ,0\n")
         lines.append(f"Junct X Y & Text X Y={jx:.6f},{jy:.6f},{jx:.6f},{jy:.6f}\n")
         for segment in data["up"]:
-            lines.append(f"Up River,Reach={pad_name(river_name)},{pad_name(segment.name)}\n")
+            segment_river = segment_river_name(segment, river_name)
+            segment_reach = segment_reach_name(segment)
+            lines.append(f"Up River,Reach={pad_name(segment_river)},{pad_name(segment_reach)}\n")
         for segment in data["down"]:
-            lines.append(f"Dn River,Reach={pad_name(river_name)},{pad_name(segment.name)}\n")
+            segment_river = segment_river_name(segment, river_name)
+            segment_reach = segment_reach_name(segment)
+            lines.append(f"Dn River,Reach={pad_name(segment_river)},{pad_name(segment_reach)}\n")
         for _ in range(max(len(data["up"]), len(data["down"]))):
             lines.append("Junc L&A=0,0\n")
         lines.append("\n")
 
     for segment in segments:
-        profile = profiles[segment.name].copy().sort_values("chainage", ascending=False).reset_index(drop=True)
+        segment_river = segment_river_name(segment, river_name)
+        segment_reach = segment_reach_name(segment)
+        profile = profiles[segment.name].copy().sort_values("chainage").reset_index(drop=True)
         centerline = list(
             zip(
                 segment.df["Easting"].astype(float).tolist(),
                 segment.df["Northing"].astype(float).tolist(),
             )
         )
+        centerline_chainages = segment.df["Chainage"].astype(float).tolist()
+        section_chainages = sample_section_chainages(segment, xs_interval)
         text_x = sum(pt[0] for pt in centerline) / len(centerline)
         text_y = sum(pt[1] for pt in centerline) / len(centerline)
-        lines.append(f"River Reach={pad_name(river_name)},{pad_name(segment.name)}\n")
+        lines.append(f"River Reach={pad_name(segment_river)},{pad_name(segment_reach)}\n")
         lines.append(f"Reach XY= {len(centerline)} \n")
         reach_xy_values: List[float] = []
         for x, y in centerline:
@@ -406,10 +542,9 @@ def build_geometry_file(
         lines.append("Reverse River Text= 0 \n")
         lines.append("\n")
 
-        original_df = segment.df.reset_index(drop=True)
         downstream_reference_chainage: Optional[float] = None
-        for idx, row in profile.iterrows():
-            chainage = float(row["chainage"])
+        for chainage in sorted(section_chainages, reverse=True):
+            row = interpolate_profile_row(profile, chainage)
             rs = format_rs(segment.length - chainage)
             if downstream_reference_chainage is None:
                 length_part = ",,,"
@@ -418,19 +553,22 @@ def build_geometry_file(
                 length_part = f",{dx:.3f},{dx:.3f},{dx:.3f}"
             lines.append(f"Type RM Length L Ch R = 1 ,{rs:<8}{length_part}\n")
 
-            nearest_idx = int((original_df["Chainage"] - chainage).abs().idxmin())
             bed_width = float(row["bed_width"])
-            side_slope = float(row["side_slope"])
             bed_elev = float(row["bed_elevation"])
             top_depth = max(float(row["y_final"]) + 2.0, float(row["ws_final"]) - bed_elev + 1.0)
             sta_elev_points, bank_left, bank_right = build_sta_elev_points(
                 bed_width=bed_width,
-                side_slope=side_slope,
                 bed_elev=bed_elev,
                 top_depth=top_depth,
+                margin_offset=xs_margin,
             )
-            top_width = sta_elev_points[-1][0]
-            cut_line = build_cut_line(centerline, nearest_idx, half_length=max(top_width * 0.75, 8.0))
+            half_length = max((max(bed_width, 0.5) / 2.0) + max(xs_margin, 0.05), 0.25)
+            cut_line = build_cut_line(
+                centerline,
+                centerline_chainages,
+                target_chainage=chainage,
+                half_length=half_length,
+            )
 
             lines.append(f"XS GIS Cut Line={len(cut_line)}\n")
             cut_values: List[float] = []
@@ -468,6 +606,7 @@ def build_flow_file(
     river_name: str,
     flow_title: str,
     program_version: str,
+    xs_interval: float,
 ) -> Tuple[str, List[BoundaryMapping], List[Dict[str, object]]]:
     boundary_lookup = get_boundary_lookup(solution["boundaries"])  # type: ignore[arg-type]
     summary_lookup = get_summary_lookup(solution["segment_summary"])  # type: ignore[arg-type]
@@ -486,28 +625,33 @@ def build_flow_file(
     ]
 
     for segment in segments:
+        segment_river = segment_river_name(segment, river_name)
+        segment_reach = segment_reach_name(segment)
         summary_row = summary_lookup[segment.name]
         q_in = float(summary_row["q_in"])
         if segment.name == "drain" and q_in <= EPS:
             q_in = float(summary_row.get("q_lateral_in_total", 0.0))
-        upstream_rs = format_rs(segment.length - float(segment.df["Chainage"].iloc[0]))
-        lines.append(f"River Rch & RM={river_name},{pad_name(segment.name)},{upstream_rs:<8}\n")
+        section_chainages = sample_section_chainages(segment, xs_interval)
+        upstream_rs = format_rs(segment.length - min(section_chainages))
+        lines.append(f"River Rch & RM={segment_river},{segment_reach},{upstream_rs:<8}\n")
         lines.extend(format_fixed_width([q_in], width=8, per_line=10, decimals=3))
         prescribed_flows.append(
             {
                 "segment": segment.name,
-                "river": river_name,
-                "reach": segment.name,
+                "river": segment_river,
+                "reach": segment_reach,
                 "river_station": upstream_rs,
                 "prescribed_q": q_in,
             }
         )
 
     for segment in segments:
+        segment_river = segment_river_name(segment, river_name)
+        segment_reach = segment_reach_name(segment)
         mappings = boundary_mapping_for_segment(segment, summary_lookup[segment.name], boundary_lookup, params)
         boundary_mappings.extend(mappings)
         map_by_end = {mapping.end: mapping for mapping in mappings}
-        lines.append(f"Boundary for River Rch & Prof#={river_name},{pad_name(segment.name)}, 1 \n")
+        lines.append(f"Boundary for River Rch & Prof#={segment_river},{segment_reach}, 1 \n")
 
         up_map = map_by_end["start"]
         lines.append(f"Up Type= {up_map.hecras_type_code} \n")
@@ -540,17 +684,27 @@ def build_flow_file(
 
 
 def write_text(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8", newline="\n")
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write(normalized.replace("\n", WINDOWS_NEWLINE))
 
 
 def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
     if not rows:
-        path.write_text("", encoding="utf-8")
+        path.write_text("", encoding="utf-8", newline="")
         return
     with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(
+            f,
+            fieldnames=list(rows[0].keys()),
+            lineterminator=WINDOWS_NEWLINE,
+        )
         writer.writeheader()
         writer.writerows(rows)
+
+
+def expected_cross_section_count(segments, xs_interval: float) -> int:
+    return sum(len(sample_section_chainages(segment, xs_interval)) for segment in segments)
 
 
 def validate_project(
@@ -618,6 +772,8 @@ def generate_project(
     river_name: str,
     program_version: str,
     total_q: Optional[float] = None,
+    xs_interval: float = DEFAULT_XS_INTERVAL,
+    xs_margin: float = DEFAULT_XS_MARGIN,
 ) -> Dict[str, object]:
     params = SolverParameters()
     segments, boundaries, detected_total_q = load_network(network_dir)
@@ -644,6 +800,8 @@ def generate_project(
             river_name=river_name,
             geom_title=f"{project_name}_Geometry",
             program_version=program_version,
+            xs_interval=xs_interval,
+            xs_margin=xs_margin,
         ),
     )
     flow_text, boundary_mappings, prescribed_flows = build_flow_file(
@@ -653,6 +811,7 @@ def generate_project(
         river_name=river_name,
         flow_title=f"{project_name}_Flow",
         program_version=program_version,
+        xs_interval=xs_interval,
     )
     write_text(flow_path, flow_text)
     write_text(plan_path, build_plan_file(project_name, program_version))
@@ -665,7 +824,8 @@ def generate_project(
     write_csv(output_dir / "spill_inventory.csv", spill_rows)
 
     summary_df: pd.DataFrame = solution["segment_summary"]  # type: ignore[assignment]
-    summary_df.to_csv(output_dir / "reference_segment_summary.csv", index=False)
+    with (output_dir / "reference_segment_summary.csv").open("w", encoding="utf-8", newline="") as f:
+        summary_df.to_csv(f, index=False, lineterminator=WINDOWS_NEWLINE)
 
     note_lines = [
         "This project is auto-generated from MTGHP-core and steady_1d_python.py.",
@@ -673,7 +833,9 @@ def generate_project(
         "Important approximations:",
         "1. Split discharges and drain inflow are prescribed from the offline solver results.",
         "2. 'None', 'Spill End', and 'Spill Zero' master BCs are translated into solved-equivalent HEC-RAS placeholder stages so the steady model has runnable external boundaries.",
-        "3. Spill locations are exported in spill_inventory.csv for manual refinement into true lateral structures if you want native HEC-RAS spill mechanics instead of prescribed-flow equivalence.",
+        f"3. Cross sections are exported on approximately {xs_interval:.2f} m spacing, with internal junction ends held back where needed to reduce crossing and bow-tie issues.",
+        f"4. GIS cut lines and station/elevation templates are limited to the bed width plus {xs_margin:.2f} m offset on each side.",
+        "5. Spill locations are exported in spill_inventory.csv for manual refinement into true lateral structures if you want native HEC-RAS spill mechanics instead of prescribed-flow equivalence.",
     ]
     write_text(output_dir / "README.txt", "\n".join(note_lines) + "\n")
 
@@ -694,7 +856,7 @@ def generate_project(
         project_name,
         expected_reaches=len(segments),
         expected_junctions=len(internal_nodes),
-        expected_cross_sections=sum(segment.npts for segment in segments),
+        expected_cross_sections=expected_cross_section_count(segments, xs_interval),
     )
     write_csv(output_dir / "validation_summary.csv", [validation])
 
@@ -718,6 +880,8 @@ def main() -> None:
         river_name=args.river_name,
         program_version=args.program_version,
         total_q=args.total_q,
+        xs_interval=args.xs_interval,
+        xs_margin=args.xs_margin,
     )
     print(f"Generated HEC-RAS project in {result['project_dir']}")
     print(f"Project file: {result['project_file']}")

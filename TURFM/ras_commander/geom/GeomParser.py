@@ -1,0 +1,1033 @@
+"""
+GeomParser - Utility functions for parsing HEC-RAS geometry files
+
+This module provides reusable utility functions for parsing and manipulating
+HEC-RAS geometry files. These utilities handle FORTRAN-era fixed-width formats,
+count interpretation, section identification, and file manipulation.
+
+All methods are static and designed to be used without instantiation.
+
+List of Functions:
+- parse_fixed_width() - Parse fixed-width numeric data (8 or 16 char columns)
+- format_fixed_width() - Format values into fixed-width lines
+- interpret_count() - Interpret count declarations based on context
+- identify_section() - Find section boundaries by keyword marker
+- extract_keyword_value() - Extract value following keyword
+- extract_comma_list() - Extract comma-separated list
+- create_backup() - Create .bak backup before modification
+- validate_river_reach_rs() - Validate river/reach/RS exists
+
+Example Usage:
+    >>> from ras_commander import GeomParser
+    >>> # Parse fixed-width line (8-char columns)
+    >>> line = "       0  963.04    27.2  963.04"
+    >>> values = GeomParser.parse_fixed_width(line, column_width=8)
+    >>> print(values)
+    [0.0, 963.04, 27.2, 963.04]
+
+    >>> # Interpret count declaration
+    >>> total_values = GeomParser.interpret_count("#Sta/Elev", 40)
+    >>> print(f"40 pairs = {total_values} total values")
+    40 pairs = 80 total values
+"""
+
+import re
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict, Any, Union
+from datetime import datetime
+
+from ..LoggingConfig import get_logger
+from ..Decorators import log_call
+
+logger = get_logger(__name__)
+
+
+class GeomParser:
+    """
+    Utility functions for parsing HEC-RAS geometry files.
+
+    All methods are static and designed to be used without instantiation.
+    """
+
+    @staticmethod
+    def parse_fixed_width(line: str, column_width: int = 8) -> List[float]:
+        """
+        Parse fixed-width numeric data from a line.
+
+        HEC-RAS uses FORTRAN-era fixed-width columns for numeric data:
+        - 8-character columns: Station/elevation, Manning's n, elevation-volume
+        - 16-character columns: 2D coordinates (X, Y pairs)
+
+        Values are right-aligned and left-padded with spaces within each column.
+        This function MUST parse by column position, NOT by whitespace splitting.
+
+        Parameters:
+            line (str): Line containing fixed-width values
+            column_width (int): Width of each column in characters. Defaults to 8.
+                               Use 16 for 2D coordinate data.
+
+        Returns:
+            List[float]: Parsed numeric values
+
+        Raises:
+            ValueError: If a column contains non-numeric data that can't be parsed
+
+        Example:
+            >>> # 8-character columns (station/elevation)
+            >>> line = "       0  963.04    27.2  963.04   32.64  963.02"
+            >>> values = GeomParser.parse_fixed_width(line, 8)
+            >>> print(values)
+            [0.0, 963.04, 27.2, 963.04, 32.64, 963.02]
+
+            >>> # 16-character columns (2D coordinates)
+            >>> line = "   648224.43125   4551425.84375   648229.43125   4551425.84375"
+            >>> coords = GeomParser.parse_fixed_width(line, 16)
+            >>> print(coords)
+            [648224.43125, 4551425.84375, 648229.43125, 4551425.84375]
+
+        Notes:
+            - Based on successful RasUnsteady.parse_fixed_width_table() pattern
+            - Handles merged values (adjacent numbers without spaces) using regex
+            - Skips empty columns
+            - Strips line before parsing to remove trailing newlines
+        """
+        values = []
+        line_stripped = line.rstrip('\n\r')
+
+        # Parse by column position (CRITICAL: do NOT use .split())
+        for i in range(0, len(line_stripped), column_width):
+            column = line_stripped[i:i+column_width].strip()
+
+            if not column:
+                continue  # Skip empty columns
+
+            try:
+                # Try direct conversion first
+                values.append(float(column))
+            except ValueError:
+                # Handle merged values (e.g., "123.45678.90" without space)
+                # Use regex to split merged numeric values
+                merged_values = re.findall(r'-?\d+\.?\d*', column)
+                if merged_values:
+                    for val_str in merged_values:
+                        try:
+                            values.append(float(val_str))
+                        except ValueError:
+                            logger.warning(f"Could not parse value '{val_str}' from merged column '{column}'")
+                else:
+                    logger.warning(f"Could not parse column '{column}' as numeric")
+
+        return values
+
+    @staticmethod
+    def format_fixed_width(values: List[float],
+                          column_width: int = 8,
+                          values_per_line: int = 10,
+                          precision: int = 2) -> List[str]:
+        """
+        Format values into fixed-width lines for writing to geometry files.
+
+        Creates properly formatted lines with right-aligned values, left-padded
+        with spaces to fill the column width. Follows HEC-RAS conventions:
+        - 8-char columns: Typically 10 values per line (80 chars total)
+        - 16-char columns: Typically 4 values per line (64 chars total)
+
+        Parameters:
+            values (List[float]): List of numeric values to format
+            column_width (int): Width of each column in characters. Defaults to 8.
+            values_per_line (int): Number of values per line. Defaults to 10.
+            precision (int): Decimal places for formatting. Defaults to 2.
+
+        Returns:
+            List[str]: Lines with fixed-width formatted values (with newlines)
+
+        Example:
+            >>> values = [0.0, 963.04, 27.2, 963.04]
+            >>> lines = GeomParser.format_fixed_width(values, 8, 10, 2)
+            >>> print(lines[0])
+            '    0.00  963.04   27.20  963.04\\n'
+
+            >>> # 16-char columns for coordinates
+            >>> coords = [648224.43125, 4551425.84375]
+            >>> lines = GeomParser.format_fixed_width(coords, 16, 4, 5)
+            >>> print(lines[0])
+            '  648224.43125  4551425.84375\\n'
+
+        Notes:
+            - Based on RasUnsteady.write_table_to_file() pattern
+            - Values are formatted as f'{value:{column_width}.{precision}f}'
+            - Right-aligned within column, left-padded with spaces
+            - Last line may have fewer than values_per_line values
+        """
+        lines = []
+
+        for i in range(0, len(values), values_per_line):
+            row_values = values[i:i+values_per_line]
+            # Format each value with specified width and precision
+            formatted_row = ''.join(f'{value:{column_width}.{precision}f}' for value in row_values)
+            lines.append(formatted_row + '\n')
+
+        return lines
+
+    @staticmethod
+    @log_call
+    def interpret_count(keyword: str,
+                       count_value: int,
+                       additional_values: Optional[List[int]] = None) -> int:
+        """
+        Interpret count declarations based on keyword context.
+
+        CRITICAL: Different keywords use counts differently. This is a common
+        source of parsing bugs if not handled correctly.
+
+        Count Interpretation Rules:
+        - "#Sta/Elev= 40" -> 40 PAIRS -> 80 total values (station + elevation)
+        - "#Mann= 3 , 0 , 0" -> 3 SEGMENTS -> 9 total values (3 left + 3 channel + 3 right)
+        - "Reach XY= 591" -> 591 PAIRS -> 1182 total values (591 X + 591 Y)
+        - "Storage Area Elev Volume= 53" -> 53 PAIRS -> 106 total values
+        - "Levee= 12 , 0" -> 12 + 0 = 12 values (left side only)
+
+        Parameters:
+            keyword (str): Section keyword (e.g., "#Sta/Elev", "#Mann", "Reach XY")
+            count_value (int): First count value after keyword
+            additional_values (Optional[List[int]]): Additional count values if comma-separated
+
+        Returns:
+            int: Total number of values to read from the file
+
+        Example:
+            >>> # Station/elevation: 40 pairs = 80 values
+            >>> GeomParser.interpret_count("#Sta/Elev", 40)
+            80
+
+            >>> # Manning's n: 3 segments x 3 positions = 9 values
+            >>> GeomParser.interpret_count("#Mann", 3, [0, 0])
+            9
+
+            >>> # Reach coordinates: 591 pairs = 1182 values
+            >>> GeomParser.interpret_count("Reach XY", 591)
+            1182
+
+            >>> # Levees: 12 left + 0 right = 12 values
+            >>> GeomParser.interpret_count("Levee", 12, [0])
+            12
+
+        Notes:
+            - See _PARSING_PATTERNS_REFERENCE.md for complete count interpretation guide
+            - This is based on extensive validation against HDF files
+        """
+        keyword_lower = keyword.lower()
+
+        # Station/Elevation pairs (most common)
+        if 'sta' in keyword_lower and 'elev' in keyword_lower:
+            return count_value * 2  # Pairs: station + elevation
+
+        # Manning's n segments (triplets: left, channel, right)
+        if 'mann' in keyword_lower:
+            # #Mann= 3 , 0 , 0 means 3 segments with left/channel/right values each
+            return count_value * 3
+
+        # Coordinate pairs (X, Y)
+        if 'xy' in keyword_lower or ('x' in keyword_lower and 'y' in keyword_lower):
+            return count_value * 2  # Pairs: X + Y
+
+        # Elevation-Volume pairs (storage areas)
+        if 'elev' in keyword_lower and 'volume' in keyword_lower:
+            return count_value * 2  # Pairs: elevation + volume
+
+        # Levees (can have left and right counts)
+        if 'levee' in keyword_lower:
+            if additional_values:
+                return count_value + sum(additional_values)
+            return count_value
+
+        # Default: count is total values (not pairs)
+        logger.debug(f"Using default count interpretation for keyword '{keyword}': {count_value} values")
+        return count_value
+
+    @staticmethod
+    @log_call
+    def identify_section(lines: List[str],
+                        keyword: str,
+                        start_index: int = 0) -> Optional[Tuple[int, int]]:
+        """
+        Find section boundaries based on keyword marker.
+
+        Searches for a line starting with the specified keyword and determines
+        where the section ends (either at the next keyword or end of file).
+
+        Parameters:
+            lines (List[str]): All lines from geometry file
+            keyword (str): Section marker keyword to search for
+            start_index (int): Line index to start searching from. Defaults to 0.
+
+        Returns:
+            Optional[Tuple[int, int]]: (start_line, end_line) or None if not found
+                                       start_line: Index of line with keyword
+                                       end_line: Index of last line in section (exclusive)
+
+        Example:
+            >>> with open("geometry.g01") as f:
+            ...     lines = f.readlines()
+            >>> section = GeomParser.identify_section(lines, "River Reach=")
+            >>> if section:
+            ...     start, end = section
+            ...     print(f"River Reach section: lines {start} to {end}")
+
+        Notes:
+            - Keyword matching is case-insensitive
+            - Returns None if keyword not found
+            - Section ends at next keyword starting with capital letter or "=" sign
+        """
+        start_line = None
+
+        # Find the start of the section
+        for i in range(start_index, len(lines)):
+            if lines[i].strip().lower().startswith(keyword.lower()):
+                start_line = i
+                break
+
+        if start_line is None:
+            logger.debug(f"Keyword '{keyword}' not found starting from line {start_index}")
+            return None
+
+        # Find the end of the section (next keyword or end of file)
+        end_line = len(lines)
+        for i in range(start_line + 1, len(lines)):
+            line_stripped = lines[i].strip()
+            # Section ends at next keyword (starts with capital or contains "=")
+            if line_stripped and (line_stripped[0].isupper() or '=' in line_stripped):
+                # Check if it looks like a keyword (not just data with "=")
+                if '=' in line_stripped:
+                    end_line = i
+                    break
+
+        logger.debug(f"Section '{keyword}' found: lines {start_line} to {end_line}")
+        return (start_line, end_line)
+
+    @staticmethod
+    def extract_keyword_value(line: str, keyword: str) -> str:
+        """
+        Extract value following keyword marker.
+
+        Finds keyword followed by "=" and returns everything after the "=".
+
+        Parameters:
+            line (str): Line containing keyword
+            keyword (str): Keyword to search for
+
+        Returns:
+            str: Value after "=" (stripped of leading/trailing whitespace)
+
+        Example:
+            >>> line = "Geom Title=White Lick Creek Geometry"
+            >>> title = GeomParser.extract_keyword_value(line, "Geom Title")
+            >>> print(title)
+            'White Lick Creek Geometry'
+
+            >>> line = "Program Version=6.30"
+            >>> version = GeomParser.extract_keyword_value(line, "Program Version")
+            >>> print(version)
+            '6.30'
+
+        Notes:
+            - Keyword matching is case-insensitive
+            - Returns empty string if keyword not found or no value after "="
+        """
+        # Pattern: keyword (case-insensitive) followed by = and value
+        pattern = rf'{re.escape(keyword)}\s*=\s*(.+)'
+        match = re.search(pattern, line, re.IGNORECASE)
+
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    @staticmethod
+    def extract_comma_list(line: str, keyword: str) -> List[str]:
+        """
+        Extract comma-separated list following keyword.
+
+        Handles embedded commas in quoted strings properly.
+
+        Parameters:
+            line (str): Line containing keyword and comma-separated values
+            keyword (str): Keyword before the list
+
+        Returns:
+            List[str]: List of values (stripped of whitespace)
+
+        Example:
+            >>> line = "River Reach=White Lick,Reach 1"
+            >>> values = GeomParser.extract_comma_list(line, "River Reach")
+            >>> print(values)
+            ['White Lick', 'Reach 1']
+
+            >>> line = "Storage Area=Res Pool 1"
+            >>> values = GeomParser.extract_comma_list(line, "Storage Area")
+            >>> print(values)
+            ['Res Pool 1']
+
+        Notes:
+            - Handles cases with or without commas
+            - Handles quoted strings with embedded commas
+        """
+        value_str = GeomParser.extract_keyword_value(line, keyword)
+
+        if not value_str:
+            return []
+
+        # Split by comma, handling quoted strings
+        # Simple approach: split by comma and strip
+        values = [v.strip().strip('"\'') for v in value_str.split(',')]
+
+        return values
+
+    @staticmethod
+    @log_call
+    def create_backup(file_path: Path) -> Path:
+        """
+        Create .bak backup of file before modification.
+
+        Creates a backup copy with .bak extension. If .bak already exists,
+        creates .bak1, .bak2, etc.
+
+        Parameters:
+            file_path (Path): Path to file to backup
+
+        Returns:
+            Path: Path to backup file
+
+        Raises:
+            FileNotFoundError: If original file doesn't exist
+            IOError: If backup creation fails
+
+        Example:
+            >>> from pathlib import Path
+            >>> geom_file = Path("MyProject.g01")
+            >>> backup = GeomParser.create_backup(geom_file)
+            >>> print(f"Backup created: {backup}")
+            Backup created: MyProject.g01.bak
+
+        Notes:
+            - Based on RasGeo.set_mannings_baseoverrides() pattern
+            - Always creates backup before file modification
+            - Finds next available .bakN filename if .bak exists
+        """
+        file_path = Path(file_path)
+
+        if not file_path.exists():
+            raise FileNotFoundError(f"Cannot create backup: file not found: {file_path}")
+
+        # Find next available backup filename
+        backup_path = file_path.with_suffix(file_path.suffix + '.bak')
+        counter = 1
+
+        while backup_path.exists():
+            backup_path = file_path.with_suffix(f'{file_path.suffix}.bak{counter}')
+            counter += 1
+
+        try:
+            # Copy file to backup
+            import shutil
+            shutil.copy2(file_path, backup_path)
+            logger.info(f"Created backup: {backup_path}")
+            return backup_path
+
+        except Exception as e:
+            logger.error(f"Failed to create backup of {file_path}: {str(e)}")
+            raise IOError(f"Backup creation failed: {str(e)}")
+
+    @staticmethod
+    def update_timestamp(lines: List[str], keyword: str) -> List[str]:
+        """
+        Update timestamp for a modified section.
+
+        Finds lines with timestamp keywords and updates them to current time.
+
+        Parameters:
+            lines (List[str]): File lines to modify
+            keyword (str): Timestamp keyword to search for
+
+        Returns:
+            List[str]: Modified lines with updated timestamp
+
+        Example:
+            >>> lines = ["LCMann Time=01Jan2023 14:30:45\\n"]
+            >>> updated = GeomParser.update_timestamp(lines, "LCMann Time")
+            >>> print(updated[0])
+            'LCMann Time=11Nov2025 10:45:30\\n'
+
+        Notes:
+            - Timestamp format: DDMmmYYYY HH:MM:SS
+            - Only updates lines matching the specified keyword
+            - Preserves all other lines unchanged
+        """
+        current_time = datetime.now()
+        timestamp_str = current_time.strftime("%d%b%Y %H:%M:%S")
+
+        updated_lines = []
+        for line in lines:
+            if keyword in line and '=' in line:
+                # Replace the timestamp after the "="
+                parts = line.split('=')
+                updated_line = f"{parts[0]}={timestamp_str}\n"
+                updated_lines.append(updated_line)
+            else:
+                updated_lines.append(line)
+
+        return updated_lines
+
+    @staticmethod
+    @log_call
+    def safe_write_geometry(geom_file: Path,
+                            modified_lines: List[str],
+                            create_backup: bool = True) -> Optional[Path]:
+        """
+        Atomically write geometry file with backup.
+
+        This method provides safe file writing with backup creation and
+        atomic write via temp file. If the write fails, the original
+        file remains intact.
+
+        Process:
+            1. Create backup: geom_file.bak (if create_backup=True)
+            2. Write to temp file: geom_file.tmp
+            3. Validate temp file (basic syntax check)
+            4. Rename temp -> original (atomic on most filesystems)
+            5. Return backup path for potential rollback
+
+        Parameters:
+            geom_file (Path): Path to geometry file to write
+            modified_lines (List[str]): Lines to write to file
+            create_backup (bool): Create .bak file before modifying (default True)
+
+        Returns:
+            Optional[Path]: Backup file path (for rollback if needed),
+                           or None if create_backup=False
+
+        Raises:
+            FileNotFoundError: If original file doesn't exist
+            IOError: If write fails
+
+        Example:
+            >>> from pathlib import Path
+            >>> geom_file = Path("model.g01")
+            >>> with open(geom_file, 'r', encoding='utf-8', errors='replace') as f:
+            ...     lines = f.readlines()
+            >>> # Modify lines...
+            >>> backup = GeomParser.safe_write_geometry(geom_file, lines)
+            >>> print(f"Backup at: {backup}")
+
+        Notes:
+            - Uses atomic rename where supported by filesystem
+            - Backup can be used with rollback_geometry() for recovery
+            - Validates temp file has content before rename
+        """
+        geom_file = Path(geom_file)
+
+        if not geom_file.exists():
+            raise FileNotFoundError(f"Geometry file not found: {geom_file}")
+
+        backup_path = None
+        temp_path = geom_file.with_suffix(geom_file.suffix + '.tmp')
+
+        try:
+            # Step 1: Create backup if requested
+            if create_backup:
+                backup_path = GeomParser.create_backup(geom_file)
+                logger.debug(f"Created backup: {backup_path}")
+
+            # Step 2: Write to temp file
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.writelines(modified_lines)
+
+            # Step 3: Basic validation - check temp file has content
+            if temp_path.stat().st_size == 0:
+                raise IOError("Temp file is empty - write failed")
+
+            # Step 4: Atomic rename temp -> original
+            import os
+            if os.name == 'nt':  # Windows
+                # Windows doesn't support atomic rename over existing file
+                # Remove original first, then rename
+                geom_file.unlink()
+                temp_path.rename(geom_file)
+            else:  # Unix-like
+                # Atomic rename
+                temp_path.rename(geom_file)
+
+            logger.info(f"Successfully wrote geometry file: {geom_file}")
+            return backup_path
+
+        except Exception as e:
+            logger.error(f"Failed to write geometry file: {e}")
+            # Clean up temp file if it exists
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            raise IOError(f"Failed to write geometry file: {e}")
+
+    @staticmethod
+    @log_call
+    def rollback_geometry(geom_file: Path, backup_path: Path) -> None:
+        """
+        Restore geometry file from backup.
+
+        Used for recovery after a failed write or modification.
+
+        Parameters:
+            geom_file (Path): Path to geometry file to restore
+            backup_path (Path): Path to backup file to restore from
+
+        Raises:
+            FileNotFoundError: If backup file doesn't exist
+            IOError: If restore fails
+
+        Example:
+            >>> from pathlib import Path
+            >>> geom_file = Path("model.g01")
+            >>> backup_path = Path("model.g01.bak")
+            >>> GeomParser.rollback_geometry(geom_file, backup_path)
+
+        Notes:
+            - Overwrites current geometry file with backup contents
+            - Does not delete backup file (preserved for additional recovery)
+        """
+        geom_file = Path(geom_file)
+        backup_path = Path(backup_path)
+
+        if not backup_path.exists():
+            raise FileNotFoundError(f"Backup file not found: {backup_path}")
+
+        try:
+            import shutil
+            shutil.copy2(backup_path, geom_file)
+            logger.info(f"Restored geometry file from backup: {geom_file}")
+        except Exception as e:
+            logger.error(f"Failed to restore geometry file: {e}")
+            raise IOError(f"Failed to restore geometry file: {e}")
+
+    @staticmethod
+    @log_call
+    def validate_river_reach_rs(geom_file: Path,
+                               river: str,
+                               reach: str,
+                               rs: str) -> bool:
+        """
+        Validate that river/reach/RS combination exists in geometry file.
+
+        Parameters:
+            geom_file (Path): Path to geometry file
+            river (str): River name
+            reach (str): Reach name
+            rs (str): River station
+
+        Returns:
+            bool: True if combination exists
+
+        Raises:
+            ValueError: If river/reach/RS not found in geometry file
+
+        Example:
+            >>> from pathlib import Path
+            >>> geom_file = Path("BaldEagle.g01")
+            >>> valid = GeomParser.validate_river_reach_rs(
+            ...     geom_file, "Bald Eagle Creek", "Reach 1", "138154.4"
+            ... )
+            >>> print(valid)
+            True
+
+        Notes:
+            - Used before modification operations to ensure valid target
+            - Searches for "Type RM Length L Ch R =" line with matching RS
+        """
+        geom_file = Path(geom_file)
+
+        if not geom_file.exists():
+            raise FileNotFoundError(f"Geometry file not found: {geom_file}")
+
+        try:
+            with open(geom_file, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+
+            # Find River Reach line
+            current_river = None
+            current_reach = None
+
+            for i, line in enumerate(lines):
+                # Check for River Reach definition
+                if line.startswith("River Reach="):
+                    values = GeomParser.extract_comma_list(line, "River Reach")
+                    if len(values) >= 2:
+                        current_river = values[0]
+                        current_reach = values[1]
+
+                # Check for cross section with matching RS
+                if line.startswith("Type RM Length L Ch R ="):
+                    # Next line should have river station
+                    if i + 1 < len(lines):
+                        parts = lines[i].split('=')
+                        if len(parts) > 1:
+                            values = parts[1].strip().split(',')
+                            if len(values) > 0:
+                                xs_rs = values[0].strip()
+                                if (current_river == river and
+                                    current_reach == reach and
+                                    xs_rs == rs):
+                                    logger.debug(f"Found XS: {river}/{reach}/RS {rs}")
+                                    return True
+
+            raise ValueError(f"Cross section not found: {river}, {reach}, RS {rs}")
+
+        except FileNotFoundError:
+            raise
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"Error validating river/reach/RS: {str(e)}")
+            raise ValueError(f"Validation failed: {str(e)}")
+
+    @staticmethod
+    @log_call
+    def get_xs_cut_lines(
+        geom_file: Union[str, Path],
+        ras_object=None
+    ):
+        """
+        Extract cross-section GIS cut line coordinates from geometry file.
+
+        Parses "XS GIS Cut Line=" sections from .g## files and returns
+        a GeoDataFrame with LineString geometries for each cross-section.
+
+        Parameters:
+            geom_file (Union[str, Path]): Path to geometry file (.g##)
+            ras_object: Optional RasPrj instance (unused, for API consistency)
+
+        Returns:
+            gpd.GeoDataFrame: DataFrame with columns: river, reach, station,
+                geometry (LineString). CRS is not set (caller should set based
+                on project CRS).
+
+        Raises:
+            FileNotFoundError: If geometry file does not exist
+            ImportError: If geopandas or shapely are not installed
+
+        Example:
+            >>> from ras_commander import GeomParser
+            >>> xs_gdf = GeomParser.get_xs_cut_lines("model.g01")
+            >>> print(f"Found {len(xs_gdf)} cross-sections")
+            >>> xs_gdf = xs_gdf.set_crs(epsg=2278)  # Set project CRS
+        """
+        try:
+            import geopandas as gpd
+            from shapely.geometry import LineString
+        except ImportError:
+            raise ImportError(
+                "geopandas and shapely are required for get_xs_cut_lines(). "
+                "Install with: pip install geopandas shapely"
+            )
+
+        geom_file = Path(geom_file)
+        if not geom_file.exists():
+            raise FileNotFoundError(f"Geometry file not found: {geom_file}")
+
+        logger.info(f"Extracting XS cut lines from: {geom_file}")
+
+        with open(geom_file, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+
+        xs_list = []
+        current_river = None
+        current_reach = None
+        current_station = None
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Track current river/reach
+            if line.startswith("River Reach="):
+                parts = line.split("=")[1].split(",")
+                if len(parts) >= 2:
+                    current_river = parts[0].strip()
+                    current_reach = parts[1].strip()
+
+            # Track current station
+            elif line.startswith("Type RM Length L Ch R ="):
+                value_str = line.split("=")[1]
+                values = [v.strip() for v in value_str.split(',')]
+                if len(values) >= 2:
+                    current_station = values[1]
+
+            # Parse XS GIS Cut Line coordinates
+            elif line.startswith("XS GIS Cut Line="):
+                if current_river is None or current_reach is None or current_station is None:
+                    i += 1
+                    continue
+
+                count_str = line.split("=")[1].strip()
+                num_points = int(count_str)
+                if num_points > 500:
+                    logger.warning(
+                        f"XS {current_river}/{current_reach}/RS {current_station} has "
+                        f"{num_points} GIS cut line points. HEC-RAS computational limit "
+                        f"is 500 station-elevation points per XS. Consider filtering "
+                        f"points before computation."
+                    )
+                total_values = num_points * 2
+
+                coords = []
+                i += 1
+                values_read = 0
+
+                # Collect raw data lines for this cut line section
+                data_lines_raw = []
+                scan_i = i
+                while scan_i < len(lines):
+                    data_line_raw = lines[scan_i]
+                    data_stripped = data_line_raw.strip()
+
+                    if not data_stripped or data_stripped.startswith(
+                        ('River', 'Type', 'Node', '#', 'XS', 'Levee', 'Bank')
+                    ):
+                        break
+
+                    data_lines_raw.append(data_line_raw)
+                    scan_i += 1
+
+                i = scan_i  # Advance past data lines
+
+                # Strategy 1: 16-char fixed-width parsing
+                # HEC-RAS standard format uses 16-char columns for GIS
+                # coordinates. This correctly handles field overflow where
+                # large values fill all 16 chars with no whitespace gap.
+                COORD_WIDTH = 16
+                fw_coords = []
+                for raw_line in data_lines_raw:
+                    for col_start in range(0, len(raw_line.rstrip('\n\r')), COORD_WIDTH):
+                        if len(fw_coords) >= total_values:
+                            break
+                        col_end = min(col_start + COORD_WIDTH, len(raw_line.rstrip('\n\r')))
+                        value_str = raw_line[col_start:col_end].strip()
+                        if value_str:
+                            try:
+                                fw_coords.append(float(value_str))
+                            except ValueError:
+                                pass
+
+                # Strategy 2: Whitespace split parsing (fallback)
+                # Handles non-standard field widths but cannot separate
+                # concatenated values from field overflow.
+                split_coords = []
+                for raw_line in data_lines_raw:
+                    for token in raw_line.split():
+                        if len(split_coords) >= total_values:
+                            break
+                        try:
+                            split_coords.append(float(token))
+                        except ValueError:
+                            break
+
+                # Selection logic:
+                # - If fixed-width read MORE values, it handled concatenated
+                #   fields that split() couldn't separate. Use fixed-width.
+                # - If both read the same count (or split read more), prefer
+                #   split() because it correctly handles any field width,
+                #   while fixed-width with wrong width silently reads wrong
+                #   values from misaligned column boundaries.
+                if len(fw_coords) > len(split_coords):
+                    coords = fw_coords[:total_values]
+                    values_read = len(coords)
+                else:
+                    coords = split_coords[:total_values]
+                    values_read = len(coords)
+
+                if values_read < total_values and len(coords) > 0:
+                    logger.warning(
+                        f"Partial XS GIS Cut Line for "
+                        f"{current_river}/{current_reach}/{current_station}: "
+                        f"expected {num_points} points ({total_values} values), "
+                        f"got {values_read} values"
+                    )
+
+                if len(coords) >= 4:
+                    points = [(coords[j], coords[j+1]) for j in range(0, len(coords)-1, 2)]
+                    if len(points) >= 2:
+                        xs_list.append({
+                            'river': current_river,
+                            'reach': current_reach,
+                            'station': current_station,
+                            'geometry': LineString(points)
+                        })
+                continue
+
+            i += 1
+
+        logger.info(f"Found {len(xs_list)} XS cut lines")
+        return gpd.GeoDataFrame(xs_list, geometry='geometry') if xs_list else gpd.GeoDataFrame(
+            columns=['river', 'reach', 'station', 'geometry']
+        )
+
+    @staticmethod
+    @log_call
+    def get_river_centerlines(
+        geom_file: Union[str, Path],
+        ras_object=None
+    ):
+        """
+        Extract river/reach centerline coordinates from geometry file.
+
+        Parses "Reach XY=" sections from .g## files and returns a
+        GeoDataFrame with LineString geometries for each river reach.
+
+        Parameters:
+            geom_file (Union[str, Path]): Path to geometry file (.g##)
+            ras_object: Optional RasPrj instance (unused, for API consistency)
+
+        Returns:
+            gpd.GeoDataFrame: DataFrame with columns: river, reach,
+                geometry (LineString). CRS is not set.
+
+        Raises:
+            FileNotFoundError: If geometry file does not exist
+            ImportError: If geopandas or shapely are not installed
+
+        Example:
+            >>> from ras_commander import GeomParser
+            >>> rivers = GeomParser.get_river_centerlines("model.g01")
+            >>> for _, row in rivers.iterrows():
+            ...     print(f"{row['river']}/{row['reach']}: {len(row['geometry'].coords)} pts")
+        """
+        try:
+            import geopandas as gpd
+            from shapely.geometry import LineString
+        except ImportError:
+            raise ImportError(
+                "geopandas and shapely are required for get_river_centerlines(). "
+                "Install with: pip install geopandas shapely"
+            )
+
+        geom_file = Path(geom_file)
+        if not geom_file.exists():
+            raise FileNotFoundError(f"Geometry file not found: {geom_file}")
+
+        logger.info(f"Extracting river centerlines from: {geom_file}")
+
+        with open(geom_file, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+
+        reaches = []
+        current_river = None
+        current_reach = None
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Track current river/reach
+            if line.startswith("River Reach="):
+                parts = line.split("=")[1].split(",")
+                if len(parts) >= 2:
+                    current_river = parts[0].strip()
+                    current_reach = parts[1].strip()
+
+            # Parse Reach XY coordinates
+            elif line.startswith("Reach XY="):
+                if current_river is None or current_reach is None:
+                    i += 1
+                    continue
+
+                count_str = line.split("=")[1].strip()
+                num_pairs = int(count_str)
+                total_values = num_pairs * 2
+
+                # Collect raw Reach XY lines first so we can choose the
+                # parsing strategy after seeing the full section.
+                data_lines_raw = []
+                scan_i = i + 1
+                while scan_i < len(lines):
+                    data_line_raw = lines[scan_i]
+                    data_stripped = data_line_raw.strip()
+
+                    if not data_stripped or data_stripped.startswith(
+                        (
+                            'River',
+                            'Junct',
+                            'Type',
+                            'Node',
+                            '#',
+                            'Rch Text X Y=',
+                            'Reverse River Text=',
+                        )
+                    ):
+                        break
+
+                    data_lines_raw.append(data_line_raw)
+                    scan_i += 1
+
+                i = scan_i
+
+                # Strategy 1: fixed-width 16-char parsing for legacy
+                # centerline rows, which may have no whitespace between
+                # adjacent values when the field width is fully used.
+                fw_coords = []
+                for raw_line in data_lines_raw:
+                    if len(fw_coords) >= total_values:
+                        break
+
+                    remaining = total_values - len(fw_coords)
+                    parsed = GeomParser.parse_fixed_width(
+                        raw_line,
+                        column_width=16,
+                    )
+                    fw_coords.extend(parsed[:remaining])
+
+                # Strategy 2: whitespace parsing as a fallback for
+                # non-standard modern rows that still separate values.
+                split_coords = []
+                for raw_line in data_lines_raw:
+                    if len(split_coords) >= total_values:
+                        break
+
+                    for token in raw_line.split():
+                        if len(split_coords) >= total_values:
+                            break
+
+                        try:
+                            split_coords.append(float(token))
+                        except ValueError:
+                            break
+
+                if len(fw_coords) > len(split_coords):
+                    coords = fw_coords[:total_values]
+                else:
+                    coords = split_coords[:total_values]
+
+                if len(coords) < total_values and len(coords) > 0:
+                    logger.warning(
+                        f"Partial Reach XY for {current_river}/"
+                        f"{current_reach}: expected {num_pairs} points "
+                        f"({total_values} values), got {len(coords)} values"
+                    )
+
+                if len(coords) >= 4:
+                    points = [
+                        (coords[j], coords[j + 1])
+                        for j in range(0, len(coords) - 1, 2)
+                    ]
+                    if len(points) >= 2:
+                        reaches.append({
+                            'river': current_river,
+                            'reach': current_reach,
+                            'geometry': LineString(points)
+                        })
+                continue
+
+            i += 1
+
+        logger.info(f"Found {len(reaches)} river centerlines")
+        return gpd.GeoDataFrame(reaches, geometry='geometry') if reaches else gpd.GeoDataFrame(
+            columns=['river', 'reach', 'geometry']
+        )

@@ -6,7 +6,7 @@ PWD = os.path.dirname(os.path.abspath(__file__))
 if PWD not in sys.path:
     sys.path.insert(0, PWD)
 
-from Automation.configProject import Config
+from configProject import Config
 from Automation.callDTM import DTM
 
 print("===========================================")
@@ -17,9 +17,9 @@ print("===========================================\n")
 print("Loading Configuration and ensuring directories exist...")
 app_config = Config()
 
-# Example: Set project context dynamically (Users can modify this path for their own usage)
-user_project_path = r"C:\Users\Legion\Downloads\Test-HEC"
-app_config.set_project_folder(user_project_path, short_name="SULTAN_DERE3A")
+# Example: select the project/sub-project to model.
+# File paths are resolved with wildcard/version-aware matching from the master project.
+app_config.set_active_sub_project(project_name="SULTAN", sub_project_name="SULTAN-DERE")
 
 app_config.setup_directories()
 

@@ -1,0 +1,14 @@
+Proj Title=MTGHP_Steady
+Current Geom=g01
+Current Flow=f01
+Default Exp/Contr=0.3,0.1
+SI Units
+Geom File=g01
+Flow File=f01
+Plan File=p01
+Y Axis Title=Elevation
+X Axis Title(PF)=Main Channel Distance
+X Axis Title(XS)=Station
+BEGIN DESCRIPTION:
+Auto-generated from MTGHP-core and steady_1d_python.
+END DESCRIPTION:
