@@ -19,8 +19,8 @@ SUMMARY_HEADER_ROW = 30
 SUMMARY_START_ROW = 31
 SOLVER_HEADER_ROW = 42
 SOLVER_START_ROW = 43
-SOLVER_STEPS = 80
-TABLE_START_ROW = 130
+SOLVER_STEPS = 0
+TABLE_START_ROW = 42
 WRITE_CHUNK_ROWS = 160
 BOUNDARY_OPTIONS = ["Known WSE", "Known Depth", "Normal Depth", "Critical Depth", "None", "Spill End", "Spill Zero"]
 
@@ -34,7 +34,7 @@ KJ_REF = "$D$11"
 SPILL_COEFF_REF = "$D$12"
 STAGE_RELAX_REF = "$D$13"
 SPLIT_RELAX_REF = "$D$14"
-MOMENTUM_WT_REF = "$D$15"
+JUNCTION_ENERGY_WT_REF = "$D$15"
 MIN_DEPTH_REF = "$D$16"
 DEFAULT_SLOPE_REF = "$D$17"
 PROFILE_RELAX_REF = "$D$18"
@@ -575,6 +575,7 @@ def build_sheet():
     j1_super_stage_actual = f"IFERROR({us_end_ws_super_ref},{INIT_J1_REF})"
     j1_super_force_actual = f"IFERROR({us_end_m_super_ref},-1E99)"
     j1_target_actual = f"IF(({j1_super_force_actual})>=({j1_sub_force_actual}),({j1_super_stage_actual}),({j1_sub_stage_actual}))"
+    j1_error_actual = f"(({j1_target_actual})-({current_j1}))"
     j1_branch_stage_delta = (
         f"(IFERROR({ue_start_ws_final_ref},IFERROR({ue_start_ws_sub_ref},{FINAL_J1_REF}))-"
         f"IFERROR({ww_start_ws_final_ref},IFERROR({ww_start_ws_sub_ref},{FINAL_J1_REF})))"
@@ -589,6 +590,7 @@ def build_sheet():
     j2_super_stage_actual = f"IFERROR({ww_end_ws_super_ref},{INIT_J2_REF})"
     j2_super_force_actual = f"IFERROR({ww_end_m_super_ref},-1E99)"
     j2_target_actual = f"IF(({j2_super_force_actual})>=({j2_sub_force_actual}),({j2_super_stage_actual}),({j2_sub_stage_actual}))"
+    j2_error_actual = f"(({j2_target_actual})-({current_j2}))"
     j2_branch_stage_delta = (
         f"(IFERROR({sc_start_ws_final_ref},IFERROR({sc_start_ws_sub_ref},{FINAL_J2_REF}))-"
         f"IFERROR({fb_start_ws_final_ref},IFERROR({fb_start_ws_sub_ref},{FINAL_J2_REF})))"
@@ -611,7 +613,7 @@ def build_sheet():
         ("Spill coeff Cw", "-", 1.70),
         ("Stage relaxation", "-", 0.35),
         ("Split relaxation", "-", 0.08),
-        ("Momentum weight", "-", 0.05),
+        ("Junction energy weight", "-", 0.05),
         ("Minimum depth", "m", 0.05),
         ("Boundary slope", "-", 0.001),
         ("Profile relaxation", "-", 0.15),
@@ -668,8 +670,8 @@ def build_sheet():
         13,
         9,
         f'=IF({RESET_REF}=0,{current_j1},'
-        f'IF(ABS(({j1_target_actual})-({current_j1}))<{PROFILE_TOL_REF},({j1_target_actual}),'
-        f'MAX(({j1_bed_ref})+{MIN_DEPTH_REF},({current_j1})+({STAGE_RELAX_REF}*((({j1_target_actual})-({current_j1})))))))',
+        f'IF(ABS({j1_error_actual})<{PROFILE_TOL_REF},({current_j1}),'
+        f'MAX(({j1_bed_ref})+{MIN_DEPTH_REF},({current_j1})+({STAGE_RELAX_REF}*({j1_error_actual}))))))',
     )
     set_cell(grid, 14, 7, "Final J2 WSE")
     set_cell(grid, 14, 8, "m")
@@ -678,18 +680,18 @@ def build_sheet():
         14,
         9,
         f'=IF({RESET_REF}=0,{current_j2},'
-        f'IF(ABS(({j2_target_actual})-({current_j2}))<{PROFILE_TOL_REF},({j2_target_actual}),'
-        f'MAX(({j2_bed_ref})+{MIN_DEPTH_REF},({current_j2})+({STAGE_RELAX_REF}*((({j2_target_actual})-({current_j2})))))))',
+        f'IF(ABS({j2_error_actual})<{PROFILE_TOL_REF},({current_j2}),'
+        f'MAX(({j2_bed_ref})+{MIN_DEPTH_REF},({current_j2})+({STAGE_RELAX_REF}*({j2_error_actual}))))))',
     )
     set_cell(grid, 15, 7, "Total spill to drain")
     set_cell(grid, 15, 8, "m3/s")
     set_cell(grid, 15, 9, f"=IFERROR(N{summary_rows['drain']},0)")
-    set_cell(grid, 16, 7, "J1 mixed residual")
+    set_cell(grid, 16, 7, "J1 junction error")
     set_cell(grid, 16, 8, "m")
-    set_cell(grid, 16, 9, f"=ABS(({j1_target_actual})-({FINAL_J1_REF}))")
-    set_cell(grid, 17, 7, "J2 mixed residual")
+    set_cell(grid, 16, 9, f"=IFERROR({j1_error_actual},0)")
+    set_cell(grid, 17, 7, "J2 junction error")
     set_cell(grid, 17, 8, "m")
-    set_cell(grid, 17, 9, f"=ABS(({j2_target_actual})-({FINAL_J2_REF}))")
+    set_cell(grid, 17, 9, f"=IFERROR({j2_error_actual},0)")
 
     for col_idx, title in enumerate(["Boundary", "Segment", "End", "Type", "Value", "Resolved Stage", "Remarks"], start=11):
         set_cell(grid, 4, col_idx, title)
@@ -711,7 +713,7 @@ def build_sheet():
         set_cell(grid, row_idx, 17, spec["remarks"])
 
     set_cell(grid, 26, 1, "Junction Internal Boundary Conditions")
-    set_cell(grid, 27, 1, "Junction top cells iterate directly from the adjacent reach-table sections: branch subcritical stages come from the reach rows next to the junction, supercritical control comes from the upstream/main reach row, and the selected target relaxes into the junction WSE.")
+    set_cell(grid, 27, 1, "Junction WSE cells iterate directly from the reach passes: forward-pass junction stage from the upstream reach and backward-pass junction stages from the connected downstream reaches are compared each recalculation, the junction error is relaxed in small increments, and the updated node stage is fed back into the reach passes.")
 
     summary_headers = [
         "Segment", "From", "To", "Pts", "Length",
@@ -776,19 +778,7 @@ def build_sheet():
     for seg_name, formula in qin_formulas.items():
         set_cell(grid, summary_rows[seg_name], SUM_QIN, formula)
 
-    solver_headers = [
-        "Iter", "alpha1", "alpha2", "J1_ws", "J2_ws",
-        "Q_UsProject", "Q_waterway", "Q_UsExit", "Q_forebay", "Q_sidechannel",
-        "WS_inlet", "WS_UsExit", "WS_forebay", "WS_sidechannel",
-        "J1 from UsProject", "J1 from waterway", "J1 from UsExit",
-        "J2 from waterway", "J2 from forebay", "J2 from sidechannel",
-        "Mom J1", "Mom J2", "Err J1", "Err J2",
-        "alpha1 next", "alpha2 next", "J1 next sub", "J2 next sub",
-        "J1 sub stage", "J2 sub stage", "J1 super stage", "J2 super stage",
-        "SF J1 sub", "SF J1 super", "SF J2 sub", "SF J2 super",
-        "J1 control", "J2 control", "J1 next mixed", "J2 next mixed",
-        "J1 mixed residual", "J2 mixed residual",
-    ]
+    solver_headers = []
     for col_idx, title in enumerate(solver_headers, start=1):
         set_cell(grid, SOLVER_HEADER_ROW, col_idx, title)
 
@@ -862,12 +852,6 @@ def build_sheet():
         j1_super_terms = summary_section_terms(usproject_row, False, f"AE{row}", f"F{row}")
         j2_sub_terms = summary_section_terms(waterway_row, False, f"AD{row}", f"G{row}")
         j2_super_terms = summary_section_terms(waterway_row, False, f"AF{row}", f"G{row}")
-        j1_momentum_up = summary_section_terms(usproject_row, False, f"AE{row}", f"F{row}")
-        j1_momentum_ww = summary_section_terms(waterway_row, True, f"AE{row}", f"G{row}")
-        j1_momentum_ue = summary_section_terms(usexit_row, True, f"AE{row}", f"H{row}")
-        j2_momentum_up = summary_section_terms(waterway_row, False, f"AF{row}", f"G{row}")
-        j2_momentum_fb = summary_section_terms(forebay_row, True, f"AF{row}", f"I{row}")
-        j2_momentum_sc = summary_section_terms(side_row, True, f"AF{row}", f"J{row}")
         j1_sub_target = f'MAX(P{row},Q{row})'
         j2_sub_target = f'MAX(S{row},T{row})'
         j1_bed_ref = a1(usproject_row, SUM_BED1)
@@ -880,32 +864,17 @@ def build_sheet():
         set_cell(grid, row, 19, f"=M{row}+{fb_sub_terms['dn']['vh']}+{fb_sub_terms['hl']}-{fb_sub_terms['up']['vh']}")
         set_cell(grid, row, 20, f"=N{row}+{sc_sub_terms['dn']['vh']}+{sc_sub_terms['hl']}-{sc_sub_terms['up']['vh']}")
 
-        cos_ww = math.cos(math.radians(segments_by_name["waterway"]["junction_delta"]))
-        cos_ue = math.cos(math.radians(segments_by_name["UsExit"]["junction_delta"]))
-        cos_fb = math.cos(math.radians(segments_by_name["forebay"]["junction_delta"]))
-        cos_sc = math.cos(math.radians(segments_by_name["sidechannel"]["junction_delta"]))
         set_cell(
             grid,
             row,
             21,
-            f"=(({j1_momentum_up['force']})-"
-            f"(IF({usexit_type_ref}=\"None\","
-            f"(({j1_momentum_ww['force']})*{cos_ww:.8f}),"
-            f"((({j1_momentum_ww['force']})*{cos_ww:.8f})+(({j1_momentum_ue['force']})*{cos_ue:.8f}))))"
-            f")/MAX({j1_momentum_up['force']},1E-6)",
+            f"=IFERROR(((O{row})-({j1_sub_target}))/MAX(ABS(D{row}),1),0)",
         )
         set_cell(
             grid,
             row,
             22,
-            f"=(({j2_momentum_up['force']})-"
-            f"(IF(AND({forebay_type_ref}=\"None\",{side_type_ref}=\"None\"),0,"
-            f"IF({side_type_ref}=\"None\","
-            f"(({j2_momentum_fb['force']})*{cos_fb:.8f}),"
-            f"IF({forebay_type_ref}=\"None\","
-            f"(({j2_momentum_sc['force']})*{cos_sc:.8f}),"
-            f"((({j2_momentum_fb['force']})*{cos_fb:.8f})+(({j2_momentum_sc['force']})*{cos_sc:.8f}))))))"
-            f")/MAX({j2_momentum_up['force']},1E-6)",
+            f"=IFERROR(((R{row})-({j2_sub_target}))/MAX(ABS(E{row}),1),0)",
         )
         set_cell(
             grid,
@@ -951,7 +920,7 @@ def build_sheet():
             f"IF(AE{row}=0,O{row},"
             f"IF(ABS(U{row})<{PROFILE_TOL_REF},AE{row},"
             f"MAX(({j1_bed_ref})+{MIN_DEPTH_REF},"
-            f"AE{row}+({STAGE_RELAX_REF}*(((O{row})-AE{row})+(U{row}*MAX(ABS(AE{row}-({j1_bed_ref})),1))))))))",
+            f"AE{row}+({STAGE_RELAX_REF}*(((O{row})-AE{row})+({JUNCTION_ENERGY_WT_REF}*U{row}*MAX(ABS(AE{row}-({j1_bed_ref})),1))))))))",
         )
         set_cell(
             grid,
@@ -961,7 +930,7 @@ def build_sheet():
             f"IF(AF{row}=0,R{row},"
             f"IF(ABS(V{row})<{PROFILE_TOL_REF},AF{row},"
             f"MAX(({j2_bed_ref})+{MIN_DEPTH_REF},"
-            f"AF{row}+({STAGE_RELAX_REF}*(((R{row})-AF{row})+(V{row}*MAX(ABS(AF{row}-({j2_bed_ref})),1))))))))",
+            f"AF{row}+({STAGE_RELAX_REF}*(((R{row})-AF{row})+({JUNCTION_ENERGY_WT_REF}*V{row}*MAX(ABS(AF{row}-({j2_bed_ref})),1))))))))",
         )
         set_cell(grid, row, 33, f"={j1_sub_terms['force']}")
         set_cell(grid, row, 34, f"={j1_super_terms['force']}")
@@ -1416,7 +1385,8 @@ def apply_excel_layout(ws, total_cols):
     apply_fill(ws, 4, 25, 2, 4, panel_fill)
     apply_fill(ws, 4, 20, 11, 17, boundary_fill, bold=True)
     apply_fill(ws, SUMMARY_HEADER_ROW, SUMMARY_HEADER_ROW, 1, 24, summary_fill, bold=True)
-    apply_fill(ws, SOLVER_HEADER_ROW, SOLVER_HEADER_ROW, 1, 42, solver_fill, bold=True)
+    if SOLVER_STEPS > 0:
+        apply_fill(ws, SOLVER_HEADER_ROW, SOLVER_HEADER_ROW, 1, 42, solver_fill, bold=True)
 
 
 def configure_excel_calculation(workbook):

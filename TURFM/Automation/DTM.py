@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
@@ -9,7 +10,7 @@ from rasterio.transform import Affine
 from rasterio.features import geometry_mask, rasterize
 from scipy.ndimage import distance_transform_edt
 from shapely.geometry import Polygon, LineString, Point, MultiLineString
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, unary_union
 
 
 class DTMChannelModifier:
@@ -372,7 +373,17 @@ class DTMChannelModifier:
         return cx.reshape(x_in.shape), cy.reshape(y_in.shape), width_interp.reshape(x_in.shape)
 
     @staticmethod
-    def process_dtm_cells(dtm_path, cross_section_csv, bank_shp_path, target_res=0.1, buffer_m=20.0, break_after_first=False, blend_type='linear', return_dicts=True):
+    def process_dtm_cells(
+        dtm_path,
+        cross_section_csv,
+        bank_shp_path,
+        target_res=0.1,
+        buffer_m=20.0,
+        break_after_first=False,
+        blend_type='linear',
+        return_dicts=True,
+        bounds=None,
+    ):
         """
         Iterates through every cell in the DTM, checks if it lies inside the
         bank polygon mask, and if so determines the nearest centerline point
@@ -381,11 +392,15 @@ class DTMChannelModifier:
         Args:
             dtm_path: Path to the DTM raster file.
             cross_section_csv: Path to the cross-section CSV.
-            bank_shp_path: Path to the bank lines shapefile.
+            bank_shp_path: Path to the bank lines shapefile, or a GeoDataFrame
+                           containing the bank lines to use for this pass.
             target_res: Target resolution for resampling (m).
             buffer_m: Buffer around the survey extent (m).
             break_after_first: If True, stops after finding the first cell
                                inside the polygon (for testing).
+            bounds: Optional shared raster bounds `(minx, miny, maxx, maxy)`.
+                    Supplying this lets several channels be interpolated onto
+                    exactly the same cropped terrain grid before merging.
 
         Returns:
             A list of dicts with keys: row, col, x, y, dtm_z, cx, cy, bank_width
@@ -400,6 +415,8 @@ class DTMChannelModifier:
         modifier.buffer_m = buffer_m
 
         modifier._read_survey_and_get_bounds()
+        if bounds is not None:
+            modifier.bounds = tuple(bounds)
         modifier._resample_dtm_window()
 
         # Load banks and generate polygon mask explicitly from sequence of shapefile lines
@@ -456,6 +473,10 @@ class DTMChannelModifier:
             })
             
         stations_list.sort(key=lambda s: s["d_xs"])
+        if len(stations_list) < 2:
+            raise ValueError(
+                f"At least two cross sections are required for DTM interpolation: {cross_section_csv}"
+            )
         d_xs_array = np.array([s["d_xs"] for s in stations_list])
 
         # Create the polygon mask raster
@@ -469,7 +490,7 @@ class DTMChannelModifier:
             dtype="uint8",
         )
 
-        xs_poly = DTMChannelModifier.create_cross_section_mask(cross_section_csv, bank_shp_path, interval=1.0)
+        xs_poly = DTMChannelModifier.create_cross_section_mask(cross_section_csv, modifier.banks_gdf, interval=1.0)
         xs_mask = rasterize(
             [xs_poly],
             out_shape=(height, width),
@@ -648,6 +669,457 @@ class DTMChannelModifier:
 
         return results, modifier
 
+    @staticmethod
+    def process_channel_network_dtm(
+        dtm_path,
+        channel_inputs,
+        output_tif_path,
+        target_res=0.1,
+        buffer_m=20.0,
+        blend_type="linear",
+        junction_tolerance=50.0,
+        write_intermediate=True,
+        centerline_output_path=None,
+        merged_banks_output_path=None,
+        perimeter_output_path=None,
+        perimeter_offset_m=500.0,
+    ):
+        """
+        Builds a junction-aware channel terrain for one river system.
+
+        Each sub-project is interpolated onto the same cropped DTM window, then
+        the final raster keeps the minimum elevation per cell. That makes the
+        tributary/main overlap at junctions hydraulically smooth while preserving
+        the existing single-channel interpolation logic.
+        """
+        if not channel_inputs:
+            raise ValueError("At least one channel input is required.")
+
+        output_tif_path = Path(output_tif_path)
+        output_tif_path.parent.mkdir(parents=True, exist_ok=True)
+
+        network = DTMChannelModifier.build_channel_network(
+            channel_inputs=channel_inputs,
+            junction_tolerance=junction_tolerance,
+        )
+        shared_bounds = DTMChannelModifier._combined_channel_bounds(
+            network["channels"],
+            buffer_m=buffer_m,
+        )
+
+        intermediate_dir = output_tif_path.parent / "intermediate_channel_tifs"
+        if write_intermediate:
+            intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+        modifiers = []
+        intermediate_tifs = []
+        for channel in network["channels"]:
+            print(f"\nProcessing channel on shared DTM window: {channel['name']}")
+            _, modifier = DTMChannelModifier.process_dtm_cells(
+                dtm_path=dtm_path,
+                cross_section_csv=channel["cross_section_csv"],
+                bank_shp_path=channel["processing_banks_gdf"],
+                target_res=target_res,
+                buffer_m=buffer_m,
+                break_after_first=False,
+                blend_type=blend_type,
+                return_dicts=False,
+                bounds=shared_bounds,
+            )
+            modifiers.append(modifier)
+
+            if write_intermediate:
+                channel_tif = intermediate_dir / f"{DTMChannelModifier._safe_name(channel['name'])}_channel.tif"
+                DTMChannelModifier._write_modifier_geotiff(modifier, channel_tif)
+                intermediate_tifs.append(str(channel_tif))
+
+        final_data = DTMChannelModifier._minimum_raster_stack(modifiers)
+        final_modifier = modifiers[0]
+        final_modifier.dtm_data = final_data
+        DTMChannelModifier._write_modifier_geotiff(final_modifier, output_tif_path)
+
+        centerline_output_path = (
+            Path(centerline_output_path)
+            if centerline_output_path is not None
+            else output_tif_path.with_name(f"{output_tif_path.stem}_centerlines.shp")
+        )
+        DTMChannelModifier._export_network_centerlines(
+            network["channels"],
+            centerline_output_path,
+        )
+
+        merged_banks_path = None
+        if merged_banks_output_path is not None:
+            merged_banks_path = Path(merged_banks_output_path)
+            merged_banks_path.parent.mkdir(parents=True, exist_ok=True)
+            network["merged_banks_gdf"].to_file(merged_banks_path)
+
+        perimeter_path = None
+        if perimeter_output_path is not None:
+            perimeter_path = Path(perimeter_output_path)
+            DTMChannelModifier._export_network_perimeter(
+                network["channels"],
+                perimeter_path,
+                offset_m=perimeter_offset_m,
+            )
+
+        return {
+            "output_tif": str(output_tif_path),
+            "centerline_shp": str(centerline_output_path),
+            "merged_banks_shp": str(merged_banks_path) if merged_banks_path else None,
+            "perimeter_shp": str(perimeter_path) if perimeter_path else None,
+            "intermediate_tifs": intermediate_tifs,
+            "shared_bounds": [float(value) for value in shared_bounds],
+            "channels": [
+                {
+                    "name": channel["name"],
+                    "cross_section_csv": str(channel["cross_section_csv"]),
+                    "bank_shp_path": str(channel["bank_shp_path"]),
+                }
+                for channel in network["channels"]
+            ],
+            "junctions": network["junctions"],
+        }
+
+    @staticmethod
+    def build_channel_network(channel_inputs, junction_tolerance=50.0):
+        channels = []
+        for index, channel_input in enumerate(channel_inputs):
+            channel = dict(channel_input)
+            name = channel.get("name") or Path(channel["cross_section_csv"]).stem
+            banks_gdf = DTMChannelModifier.clean_and_merge_banklines(
+                channel["bank_shp_path"],
+                bridge_junctions=True,
+            )
+            centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks_gdf)
+            centerline = centerline_gdf.geometry.iloc[0]
+            channels.append(
+                {
+                    "index": index,
+                    "name": str(name),
+                    "cross_section_csv": Path(channel["cross_section_csv"]),
+                    "bank_shp_path": Path(channel["bank_shp_path"]),
+                    "banks_gdf": banks_gdf,
+                    "centerline": centerline,
+                    "processing_banks_gdf": banks_gdf.copy(),
+                    "processing_centerline": centerline,
+                }
+            )
+
+        junctions = DTMChannelModifier._detect_junctions(
+            channels,
+            junction_tolerance=junction_tolerance,
+        )
+
+        for junction in junctions:
+            tributary = channels[junction["tributary_index"]]
+            main = channels[junction["main_index"]]
+            junction_point = Point(junction["x"], junction["y"])
+            tributary["processing_banks_gdf"] = DTMChannelModifier._extend_tributary_banks_to_main(
+                tributary["processing_banks_gdf"],
+                main["processing_banks_gdf"],
+                junction_point=junction_point,
+            )
+            tributary["processing_centerline"] = DTMChannelModifier.generate_centerline_from_banks(
+                tributary["processing_banks_gdf"]
+            ).geometry.iloc[0]
+
+        merged_banks_gdf = DTMChannelModifier.merge_junction_bank_polylines(channels)
+        return {
+            "channels": channels,
+            "junctions": junctions,
+            "merged_banks_gdf": merged_banks_gdf,
+        }
+
+    @staticmethod
+    def merge_junction_bank_polylines(channels):
+        rows = []
+        crs = None
+        for channel in channels:
+            banks_gdf = channel["processing_banks_gdf"]
+            if crs is None:
+                crs = banks_gdf.crs
+            for line_index, line in enumerate(DTMChannelModifier._line_strings(banks_gdf)):
+                rows.append(
+                    {
+                        "Channel": channel["name"],
+                        "BankId": line_index + 1,
+                        "geometry": line,
+                    }
+                )
+
+        combined = gpd.GeoDataFrame(rows, crs=crs)
+        if combined.empty:
+            return combined
+
+        try:
+            merged = DTMChannelModifier.clean_and_merge_banklines(
+                combined,
+                bridge_junctions=True,
+            )
+            merged["BankId"] = range(1, len(merged) + 1)
+            return merged
+        except Exception as exc:
+            print(f"Warning: bank merge failed, exporting unmerged bank lines: {exc}")
+            return combined
+
+    @staticmethod
+    def _detect_junctions(channels, junction_tolerance=50.0):
+        junctions = []
+        seen_pairs = set()
+
+        for i in range(len(channels)):
+            for j in range(i + 1, len(channels)):
+                candidate_a = DTMChannelModifier._endpoint_to_centerline_candidate(
+                    tributary=channels[i],
+                    main=channels[j],
+                )
+                candidate_b = DTMChannelModifier._endpoint_to_centerline_candidate(
+                    tributary=channels[j],
+                    main=channels[i],
+                )
+                candidates = [
+                    candidate
+                    for candidate in [candidate_a, candidate_b]
+                    if candidate is not None and candidate["is_mid_reach"]
+                ]
+                if not candidates:
+                    continue
+
+                best = min(candidates, key=lambda value: value["distance"])
+                if best["distance"] > junction_tolerance:
+                    continue
+
+                pair_key = tuple(sorted([best["tributary_index"], best["main_index"]]))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+
+                junctions.append(
+                    {
+                        "main": best["main_name"],
+                        "tributary": best["tributary_name"],
+                        "main_index": best["main_index"],
+                        "tributary_index": best["tributary_index"],
+                        "tributary_endpoint": best["tributary_endpoint"],
+                        "distance": round(float(best["distance"]), 3),
+                        "x": float(best["junction_point"].x),
+                        "y": float(best["junction_point"].y),
+                        "main_fraction": round(float(best["main_fraction"]), 4),
+                    }
+                )
+
+        return junctions
+
+    @staticmethod
+    def _endpoint_to_centerline_candidate(tributary, main):
+        tributary_line = tributary["centerline"]
+        main_line = main["centerline"]
+        if tributary_line.length <= 0 or main_line.length <= 0:
+            return None
+
+        best = None
+        endpoints = [("start", tributary_line.coords[0]), ("end", tributary_line.coords[-1])]
+        for endpoint_name, endpoint_coord in endpoints:
+            endpoint = Point(endpoint_coord[:2])
+            main_distance = main_line.project(endpoint)
+            main_fraction = main_distance / main_line.length if main_line.length else 0.0
+            junction_point = main_line.interpolate(main_distance)
+            distance = endpoint.distance(junction_point)
+            is_mid_reach = 0.05 <= main_fraction <= 0.95
+            candidate = {
+                "tributary_index": tributary["index"],
+                "main_index": main["index"],
+                "tributary_name": tributary["name"],
+                "main_name": main["name"],
+                "tributary_endpoint": endpoint_name,
+                "junction_point": junction_point,
+                "main_fraction": main_fraction,
+                "distance": distance,
+                "is_mid_reach": is_mid_reach,
+            }
+            if best is None or candidate["distance"] < best["distance"]:
+                best = candidate
+
+        return best
+
+    @staticmethod
+    def _extend_tributary_banks_to_main(tributary_banks_gdf, main_banks_gdf, junction_point):
+        tributary_lines = DTMChannelModifier._line_strings(tributary_banks_gdf)[:2]
+        main_lines = DTMChannelModifier._line_strings(main_banks_gdf)[:2]
+        if len(tributary_lines) < 2 or len(main_lines) < 2:
+            return tributary_banks_gdf
+
+        tributary_endpoints = []
+        for line in tributary_lines:
+            coords = list(line.coords)
+            start_distance = Point(coords[0][:2]).distance(junction_point)
+            end_distance = Point(coords[-1][:2]).distance(junction_point)
+            endpoint_index = 0 if start_distance < end_distance else -1
+            tributary_endpoints.append((line, endpoint_index, Point(coords[endpoint_index][:2])))
+
+        assignments = [(0, 1), (1, 0)]
+        best_assignment = min(
+            assignments,
+            key=lambda assignment: sum(
+                tributary_endpoints[idx][2].distance(
+                    nearest_points(tributary_endpoints[idx][2], main_lines[assignment[idx]])[1]
+                )
+                for idx in range(2)
+            ),
+        )
+
+        extended_lines = []
+        for index, (line, endpoint_index, endpoint) in enumerate(tributary_endpoints):
+            target_line = main_lines[best_assignment[index]]
+            _, target_point = nearest_points(endpoint, target_line)
+            extended_lines.append(
+                DTMChannelModifier._line_extended_at_endpoint(
+                    line,
+                    endpoint_index=endpoint_index,
+                    target_point=target_point,
+                )
+            )
+
+        return gpd.GeoDataFrame(
+            {
+                "Name": ["Tributary Bank 1 Extended", "Tributary Bank 2 Extended"],
+            },
+            geometry=extended_lines,
+            crs=tributary_banks_gdf.crs,
+        )
+
+    @staticmethod
+    def _line_extended_at_endpoint(line, endpoint_index, target_point):
+        coords = list(line.coords)
+        sample = coords[endpoint_index]
+        target_coord = DTMChannelModifier._coord_like_point(target_point, sample)
+        if Point(sample[:2]).distance(Point(target_coord[:2])) <= 1e-6:
+            return line
+
+        if endpoint_index == 0:
+            coords = [target_coord] + coords
+        else:
+            coords = coords + [target_coord]
+        return LineString(coords)
+
+    @staticmethod
+    def _coord_like_point(point, sample_coord):
+        if len(sample_coord) >= 3:
+            return (float(point.x), float(point.y), float(sample_coord[2]))
+        return (float(point.x), float(point.y))
+
+    @staticmethod
+    def _combined_channel_bounds(channels, buffer_m=20.0):
+        minx_values, miny_values, maxx_values, maxy_values = [], [], [], []
+
+        for channel in channels:
+            df = pd.read_csv(channel["cross_section_csv"])
+            minx_values.append(float(df["X"].min()))
+            maxx_values.append(float(df["X"].max()))
+            miny_values.append(float(df["Y"].min()))
+            maxy_values.append(float(df["Y"].max()))
+
+            bounds = channel["processing_banks_gdf"].total_bounds
+            minx_values.append(float(bounds[0]))
+            miny_values.append(float(bounds[1]))
+            maxx_values.append(float(bounds[2]))
+            maxy_values.append(float(bounds[3]))
+
+        return (
+            min(minx_values) - buffer_m,
+            min(miny_values) - buffer_m,
+            max(maxx_values) + buffer_m,
+            max(maxy_values) + buffer_m,
+        )
+
+    @staticmethod
+    def _minimum_raster_stack(modifiers):
+        if not modifiers:
+            raise ValueError("No channel rasters were produced.")
+
+        stack = np.stack([modifier.dtm_data.astype("float32") for modifier in modifiers])
+        nodata = modifiers[0].dtm_meta.get("nodata")
+        if nodata is not None:
+            stack = np.where(np.isclose(stack, nodata), np.nan, stack)
+
+        with np.errstate(all="ignore"):
+            final = np.nanmin(stack, axis=0)
+
+        if nodata is not None:
+            final = np.where(np.isnan(final), nodata, final)
+        else:
+            final = np.where(np.isnan(final), modifiers[0].dtm_data, final)
+
+        return final.astype("float32")
+
+    @staticmethod
+    def _write_modifier_geotiff(modifier, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        meta = modifier.dtm_meta.copy()
+        meta.update(
+            {
+                "driver": "GTiff",
+                "height": modifier.dtm_data.shape[0],
+                "width": modifier.dtm_data.shape[1],
+                "count": 1,
+                "dtype": "float32",
+                "crs": modifier.dtm_crs,
+                "transform": modifier.dtm_transform,
+            }
+        )
+        with rasterio.open(output_path, "w", **meta) as dest:
+            dest.write(modifier.dtm_data.astype("float32"), 1)
+
+    @staticmethod
+    def _export_network_centerlines(channels, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "Channel": channel["name"],
+                "geometry": channel["processing_centerline"],
+            }
+            for channel in channels
+        ]
+        crs = channels[0]["processing_banks_gdf"].crs if channels else None
+        gpd.GeoDataFrame(rows, crs=crs).to_file(output_path)
+
+    @staticmethod
+    def _export_network_perimeter(channels, output_path, offset_m=500.0):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        centerlines = [channel["processing_centerline"] for channel in channels]
+        perimeter = unary_union(centerlines).buffer(offset_m)
+        crs = channels[0]["processing_banks_gdf"].crs if channels else None
+        gpd.GeoDataFrame(
+            [{"Name": f"Network Study Perimeter {offset_m}m", "geometry": perimeter}],
+            crs=crs,
+        ).to_file(output_path)
+
+    @staticmethod
+    def _line_strings(geometry_input):
+        if isinstance(geometry_input, gpd.GeoDataFrame):
+            geometries = geometry_input.geometry
+        else:
+            geometries = [geometry_input]
+
+        lines = []
+        for geom in geometries:
+            if geom is None or geom.is_empty:
+                continue
+            if geom.geom_type == "LineString":
+                lines.append(geom)
+            elif geom.geom_type == "MultiLineString":
+                lines.extend(list(geom.geoms))
+        return sorted(lines, key=lambda item: item.length, reverse=True)
+
+    @staticmethod
+    def _safe_name(value):
+        safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in str(value))
+        return safe.strip("_") or "channel"
+
     # =========================================================
     # STATIC METHOD TOOLS
     # =========================================================
@@ -658,7 +1130,7 @@ class DTMChannelModifier:
         import numpy as np
         import math
         
-        if isinstance(banks_input, str):
+        if isinstance(banks_input, (str, os.PathLike)):
             gdf = gpd.read_file(banks_input)
         else:
             gdf = banks_input.copy()
@@ -1300,7 +1772,7 @@ class DTMChannelModifier:
     def generate_centerline_from_banks(
         banks_input, output_shp_path: str = None, step_m: float = 1.0
     ):
-        if isinstance(banks_input, str):
+        if isinstance(banks_input, (str, os.PathLike)):
             print(
                 f"\nGenerating mathematically equidistant centerline from: {banks_input}..."
             )
@@ -1425,7 +1897,7 @@ class DTMChannelModifier:
     def offset_bank_lines_outwards(
         banks_input, output_shp_path: str = None, offset_m: float = 0.2
     ):
-        if isinstance(banks_input, str):
+        if isinstance(banks_input, (str, os.PathLike)):
             print(
                 f"\nOffsetting bank lines outwards by {offset_m}m from: {banks_input}..."
             )
@@ -1472,7 +1944,7 @@ class DTMChannelModifier:
         Creates a closed polygon mask spanning between the two bank lines.
         Automatically offsets the lines outwards by offset_m before creating the polygon.
         """
-        if isinstance(banks_input, str):
+        if isinstance(banks_input, (str, os.PathLike)):
             print(
                 f"\nCreating polygon mask from banks (offset by {offset_m}m) from: {banks_input}..."
             )

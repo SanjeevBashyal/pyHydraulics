@@ -1,55 +1,21 @@
-import sys
-import os
-
-# Ensure local module directory is mapped to the python environment
-PWD = os.path.dirname(os.path.abspath(__file__))
-if PWD not in sys.path:
-    sys.path.insert(0, PWD)
-
 from configProject import Config
 from Automation.callDTM import DTM
 
-print("===========================================")
-print("   TURFM DTM Processing Implementation")
-print("===========================================\n")
 
-# 1. Initialize Configuration
-print("Loading Configuration and ensuring directories exist...")
-app_config = Config()
+PROJECTS_TO_RUN = None
+TARGET_RES = 0.1
+BUFFER_M = 20.0
+JUNCTION_TOLERANCE = 50.0
+PERIMETER_OFFSET_M = 500.0
+WRITE_INTERMEDIATE_TIFS = True
 
-# Example: select the project/sub-project to model.
-# File paths are resolved with wildcard/version-aware matching from the master project.
-app_config.set_active_sub_project(project_name="SULTAN", sub_project_name="SULTAN-DERE")
 
-app_config.setup_directories()
-
-# 2. Instantiate DTM Processing logic
-dtm_processor = DTM(app_config)
-print("\nStarting DTM extractions:\n")
-
-# 3. Implement the three methods cleanly
-try:
-    # A. Get Interpolated TIF File
-    tif_file = dtm_processor.get_interpolated_tif(target_res=0.1, buffer_m=20.0)
-    print(f"-> Successfully generated Interpolated TIF: {tif_file}\n")
-    
-    # B. Get River Centerline Shapefile
-    centerline_file = dtm_processor.get_river_centerline()
-    print(f"-> Successfully generated River Centerline: {centerline_file}\n")
-    
-    # C. Get Bank Lines Shapefile (offset 0.2m)
-    bank_lines_file = dtm_processor.get_bank_lines(offset_m=0.2)
-    print(f"-> Successfully generated Offset Bank Lines: {bank_lines_file}\n")
-    
-    # D. Get Study Perimeter Shapefile (offset 500m)
-    perimeter_file = dtm_processor.get_study_perimeter(offset_m=500.0)
-    print(f"-> Successfully generated Study Perimeter: {perimeter_file}\n")
-    
-    
-except Exception as e:
-    print(f"\n[ERROR] Processing failed: {e}")
-    sys.exit(1)
-
-print("===========================================")
-print("   Processing Completed Successfully!")
-print("===========================================")
+if __name__ == "__main__":
+    DTM(Config()).process_structure_projects(
+        projects=PROJECTS_TO_RUN,
+        target_res=TARGET_RES,
+        buffer_m=BUFFER_M,
+        junction_tolerance=JUNCTION_TOLERANCE,
+        perimeter_offset_m=PERIMETER_OFFSET_M,
+        write_intermediate=WRITE_INTERMEDIATE_TIFS,
+    )

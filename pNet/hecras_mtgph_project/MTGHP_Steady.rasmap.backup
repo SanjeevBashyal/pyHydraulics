@@ -9,7 +9,7 @@
       <Layer Type="RASJunction" Checked="True" />
       <Layer Type="RASBankLines" Checked="True" />
       <Layer Type="FlowPaths" Checked="True" />
-      <Layer Type="RASXS" Checked="True" Expanded="True" UnitsRiverStation="Feet" RiverStationDecimalPlaces="0" />
+      <Layer Type="RASXS" Checked="True" UnitsRiverStation="Feet" RiverStationDecimalPlaces="0" />
       <Layer Type="MeshPerimeterLayer">
         <DataColumnGroupVisibilities>
           <DataColumnGroupVisibility DisplayName="Feature Parameters" IsVisible="True" />
@@ -150,10 +150,10 @@
   <MapLayers />
   <Terrains />
   <CurrentView>
-    <MaxX>616514.360075307</MaxX>
-    <MinX>616214.735210935</MinX>
-    <MaxY>3097792.90005727</MaxY>
-    <MinY>3097569.83468711</MinY>
+    <MaxX>616666.036580319</MaxX>
+    <MinX>616158.619241525</MinX>
+    <MaxY>3097796.67549706</MaxY>
+    <MinY>3097418.91233397</MinY>
   </CurrentView>
   <VelocitySettings>
     <Density>1.5</Density>
