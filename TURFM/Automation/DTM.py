@@ -373,6 +373,118 @@ class DTMChannelModifier:
         return cx.reshape(x_in.shape), cy.reshape(y_in.shape), width_interp.reshape(x_in.shape)
 
     @staticmethod
+    def _centerline_unit_tangent(centerline, centerline_distance, sample_distance=0.5):
+        cl_length = centerline.length
+        if cl_length <= 0:
+            return np.array([1.0, 0.0], dtype=float)
+
+        d1 = max(0.0, float(centerline_distance) - sample_distance)
+        d2 = min(cl_length, float(centerline_distance) + sample_distance)
+        if d2 <= d1:
+            d1 = max(0.0, float(centerline_distance) - 1e-3)
+            d2 = min(cl_length, float(centerline_distance) + 1e-3)
+
+        p1 = centerline.interpolate(d1)
+        p2 = centerline.interpolate(d2)
+        tangent = np.array([p2.x - p1.x, p2.y - p1.y], dtype=float)
+        tangent_norm = np.linalg.norm(tangent)
+        if tangent_norm > 0:
+            return tangent / tangent_norm
+
+        coords = np.asarray(centerline.coords)[:, :2]
+        for idx in range(len(coords) - 1):
+            segment = coords[idx + 1] - coords[idx]
+            segment_norm = np.linalg.norm(segment)
+            if segment_norm > 0:
+                return segment / segment_norm
+
+        return np.array([1.0, 0.0], dtype=float)
+
+    @staticmethod
+    def _compute_cross_section_skewness(line, centerline, centerline_distance):
+        coords = np.asarray(line.coords)[:, :2]
+        if len(coords) < 2:
+            return 0.0, 0.0, 1.0
+
+        xs_vector = coords[-1] - coords[0]
+        xs_norm = np.linalg.norm(xs_vector)
+        if xs_norm == 0:
+            return 0.0, 0.0, 1.0
+        xs_unit = xs_vector / xs_norm
+
+        tangent = DTMChannelModifier._centerline_unit_tangent(
+            centerline,
+            centerline_distance,
+        )
+        normal = np.array([-tangent[1], tangent[0]], dtype=float)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm == 0:
+            return 0.0, 0.0, 1.0
+        normal /= normal_norm
+
+        cosine_raw = float(np.clip(abs(np.dot(xs_unit, normal)), 0.0, 1.0))
+        angle_radians = float(np.arccos(cosine_raw))
+        angle_degrees = float(np.degrees(angle_radians))
+        cosine_safe = max(cosine_raw, 1e-6)
+        return angle_radians, angle_degrees, cosine_safe
+
+    @staticmethod
+    def _build_corrected_section_profile(line, centerline, centerline_distance, center_point):
+        coords = np.asarray(line.coords)
+        if coords.shape[0] < 2:
+            raise ValueError("Each cross section must contain at least two coordinates.")
+
+        distances = np.zeros(coords.shape[0], dtype=float)
+        for idx in range(1, coords.shape[0]):
+            distances[idx] = distances[idx - 1] + np.linalg.norm(coords[idx, :2] - coords[idx - 1, :2])
+
+        if coords.shape[1] < 3:
+            z_values = np.zeros(coords.shape[0], dtype=float)
+        else:
+            z_values = coords[:, 2].astype(float)
+
+        raw_center_distance = float(line.project(center_point))
+        angle_radians, angle_degrees, cosine_safe = DTMChannelModifier._compute_cross_section_skewness(
+            line,
+            centerline,
+            centerline_distance,
+        )
+
+        corrected_distances = distances * cosine_safe
+        corrected_center_distance = raw_center_distance * cosine_safe
+
+        unique_distances, unique_indices = np.unique(corrected_distances, return_index=True)
+        unique_z_values = z_values[unique_indices]
+        max_distance = float(unique_distances[-1])
+
+        if len(unique_distances) == 1:
+            constant_z = float(unique_z_values[0])
+
+            def z_func(distance):
+                distance_arr = np.asarray(distance, dtype=float)
+                return np.full_like(distance_arr, constant_z, dtype=float)
+        else:
+            def z_func(distance):
+                distance_arr = np.asarray(distance, dtype=float)
+                return np.interp(
+                    np.clip(distance_arr, 0.0, max_distance),
+                    unique_distances,
+                    unique_z_values,
+                )
+
+        return {
+            "raw_center_distance": raw_center_distance,
+            "corrected_center_distance": corrected_center_distance,
+            "corrected_total_length": max_distance,
+            "corrected_left_width": corrected_center_distance,
+            "corrected_right_width": max(0.0, max_distance - corrected_center_distance),
+            "skewness_angle_radians": angle_radians,
+            "skewness_angle_degrees": angle_degrees,
+            "skewness_cosine": cosine_safe,
+            "z_func": z_func,
+        }
+
+    @staticmethod
     def process_dtm_cells(
         dtm_path,
         cross_section_csv,
@@ -383,6 +495,9 @@ class DTMChannelModifier:
         blend_type='linear',
         return_dicts=True,
         bounds=None,
+        bank_offset_m=0.2,
+        full_cross_section_weight_distance_m=1.5,
+        transition_to_dtm_distance_m=5.0,
     ):
         """
         Iterates through every cell in the DTM, checks if it lies inside the
@@ -401,6 +516,12 @@ class DTMChannelModifier:
             bounds: Optional shared raster bounds `(minx, miny, maxx, maxy)`.
                     Supplying this lets several channels be interpolated onto
                     exactly the same cropped terrain grid before merging.
+            bank_offset_m: Outward bank offset used to define the in-channel
+                    polygon where the interpolated bed fully applies.
+            full_cross_section_weight_distance_m: Distance outside the bank
+                    polygon that still uses full cross-section elevation.
+            transition_to_dtm_distance_m: Additional distance over which the
+                    terrain eases from cross-section elevation back to the DTM.
 
         Returns:
             A list of dicts with keys: row, col, x, y, dtm_z, cx, cy, bank_width
@@ -422,7 +543,10 @@ class DTMChannelModifier:
         # Load banks and generate polygon mask explicitly from sequence of shapefile lines
         import geopandas as gpd
         modifier.banks_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
-        poly_gdf = DTMChannelModifier.create_polygon_mask_from_banks(modifier.banks_gdf)
+        poly_gdf = DTMChannelModifier.create_polygon_mask_from_banks(
+            modifier.banks_gdf,
+            offset_m=bank_offset_m,
+        )
         modifier.channel_polygon = poly_gdf.geometry.iloc[0]
 
         # Generate centerline from banks
@@ -441,17 +565,6 @@ class DTMChannelModifier:
         group_cols = [col for col in ['River', 'Reach', 'Station'] if col in df.columns]
         if not group_cols: group_cols = ['Station']
 
-        def make_z_interp(line):
-            coords = np.array(line.coords)
-            if coords.shape[1] < 3: return lambda d: np.zeros_like(d)
-            dists = [0.0]
-            for i in range(1, len(coords)):
-                d = np.linalg.norm(coords[i, :2] - coords[i-1, :2])
-                dists.append(dists[-1] + d)
-            dists_np = np.array(dists)
-            z_np = coords[:, 2]
-            return lambda d: np.interp(np.clip(d, 0, dists_np[-1]), dists_np, z_np)
-
         stations_list = []
         for name, group in df.groupby(group_cols):
             coords_3d = group[['X', 'Y', 'Z']].values
@@ -461,15 +574,23 @@ class DTMChannelModifier:
             pt_C, _ = nearest_points(centerline, line)
             d_xs = centerline.project(pt_C)
             _, _, bw_xs = modifier.get_cell_centerline_metrics(pt_C.x, pt_C.y)
-            d_C_xs = line.project(pt_C)
+            section_profile = DTMChannelModifier._build_corrected_section_profile(
+                line=line,
+                centerline=centerline,
+                centerline_distance=d_xs,
+                center_point=pt_C,
+            )
             
             stations_list.append({
                 "Station": stat_name, 
                 "d_xs": d_xs, 
                 "line": line,
                 "bw_xs": bw_xs,
-                "d_C_xs": d_C_xs,
-                "z_func": make_z_interp(line)
+                "d_C_xs": section_profile["raw_center_distance"],
+                "d_C_xs_corrected": section_profile["corrected_center_distance"],
+                "skewness_angle_degrees": section_profile["skewness_angle_degrees"],
+                "skewness_cosine": section_profile["skewness_cosine"],
+                "z_func": section_profile["z_func"],
             })
             
         stations_list.sort(key=lambda s: s["d_xs"])
@@ -490,7 +611,11 @@ class DTMChannelModifier:
             dtype="uint8",
         )
 
-        xs_poly = DTMChannelModifier.create_cross_section_mask(cross_section_csv, modifier.banks_gdf, interval=1.0)
+        xs_poly = DTMChannelModifier.create_cross_section_mask(
+            cross_section_csv,
+            modifier.banks_gdf,
+            interval=1.0,
+        )
         xs_mask = rasterize(
             [xs_poly],
             out_shape=(height, width),
@@ -505,21 +630,37 @@ class DTMChannelModifier:
         if len(valid_rows) == 0:
             return [], modifier
 
-        from scipy.ndimage import distance_transform_edt
         d_bank_grid = distance_transform_edt(bank_mask == 0) * modifier.target_res
-        d_bound_grid = distance_transform_edt(xs_mask == 1) * modifier.target_res
-        
         d_bank_arr = d_bank_grid[valid_rows, valid_cols]
-        d_bound_arr = d_bound_grid[valid_rows, valid_cols]
 
-        tot_d = d_bank_arr + d_bound_arr
-        tot_d_safe = np.maximum(tot_d, 1e-6)
-        
-        w1_terrain = d_bank_arr / tot_d_safe
-        if blend_type == 'exponential':
-            w1_terrain = (np.exp(w1_terrain) - 1.0) / (np.e - 1.0)
-            
-        w2_cs = 1.0 - w1_terrain
+        hold_distance = max(float(full_cross_section_weight_distance_m), 0.0)
+        transition_distance = max(float(transition_to_dtm_distance_m), 0.0)
+        transition_end = hold_distance + transition_distance
+
+        w1_terrain = np.zeros_like(d_bank_arr, dtype=float)
+        w2_cs = np.ones_like(d_bank_arr, dtype=float)
+
+        if transition_distance == 0.0:
+            outside_hold_mask = d_bank_arr > hold_distance
+            w1_terrain[outside_hold_mask] = 1.0
+            w2_cs[outside_hold_mask] = 0.0
+        else:
+            transition_mask = (d_bank_arr > hold_distance) & (d_bank_arr < transition_end)
+            if np.any(transition_mask):
+                x = (d_bank_arr[transition_mask] - hold_distance) / transition_distance
+                if blend_type == 'linear':
+                    terrain_weight = x
+                elif blend_type == 'exponential':
+                    terrain_weight = (np.exp(x) - 1.0) / (np.e - 1.0)
+                else:
+                    terrain_weight = x ** 3
+
+                w1_terrain[transition_mask] = terrain_weight
+                w2_cs[transition_mask] = 1.0 - terrain_weight
+
+            dtm_mask = d_bank_arr >= transition_end
+            w1_terrain[dtm_mask] = 1.0
+            w2_cs[dtm_mask] = 0.0
 
         xs, ys = modifier.dtm_transform * (valid_cols + 0.5, valid_rows + 0.5)
         dtm_zs = modifier.dtm_data[valid_rows, valid_cols].astype(float)
@@ -609,13 +750,13 @@ class DTMChannelModifier:
             # Up Z
             mapped_up = dist_cl_m * (st_up['bw_xs'] / bw_m)
             dir_up = np.where(d_cell_up_m >= st_up['d_C_xs'], 1, -1)
-            offset_up = st_up['d_C_xs'] + dir_up * mapped_up
+            offset_up = st_up['d_C_xs_corrected'] + dir_up * mapped_up
             z_up = st_up['z_func'](offset_up)
 
             # Dn Z
             mapped_dn = dist_cl_m * (st_dn['bw_xs'] / bw_m)
             dir_dn = np.where(d_cell_dn_m >= st_dn['d_C_xs'], 1, -1)
-            offset_dn = st_dn['d_C_xs'] + dir_dn * mapped_dn
+            offset_dn = st_dn['d_C_xs_corrected'] + dir_dn * mapped_dn
             z_dn = st_dn['z_func'](offset_dn)
             
             tot = dist_up_m + dist_dn_m
@@ -635,8 +776,10 @@ class DTMChannelModifier:
                 "cx": round(cxs[0], 3), "cy": round(cys[0], 3),
                 "dist_to_centerline": round(dists_cl[0], 3), "bank_width": round(bws[0], 3),
                 "up_station": stations_list[idx_up[0]]["Station"],
+                "up_skewness_angle_deg": round(stations_list[idx_up[0]]["skewness_angle_degrees"], 3),
                 "min_dist_up": round(dist_up_array[0], 3),
                 "down_station": stations_list[idx_dn[0]]["Station"],
+                "down_skewness_angle_deg": round(stations_list[idx_dn[0]]["skewness_angle_degrees"], 3),
                 "min_dist_down": round(dist_dn_array[0], 3),
                 "new_interpolated_z": round(new_zs[0], 3),
                 "final_blended_z": round(final_zs[0], 3)
@@ -660,8 +803,10 @@ class DTMChannelModifier:
                 "cx": round(cxs[i], 3), "cy": round(cys[i], 3),
                 "dist_to_centerline": round(dists_cl[i], 3), "bank_width": round(bws[i], 3),
                 "up_station": stations_list[idx_up[i]]["Station"],
+                "up_skewness_angle_deg": round(stations_list[idx_up[i]]["skewness_angle_degrees"], 3),
                 "min_dist_up": round(dist_up_array[i], 3),
                 "down_station": stations_list[idx_dn[i]]["Station"],
+                "down_skewness_angle_deg": round(stations_list[idx_dn[i]]["skewness_angle_degrees"], 3),
                 "min_dist_down": round(dist_dn_array[i], 3),
                 "new_interpolated_z": round(new_zs[i], 3),
                 "final_blended_z": round(final_zs[i], 3)
@@ -677,6 +822,9 @@ class DTMChannelModifier:
         target_res=0.1,
         buffer_m=20.0,
         blend_type="linear",
+        bank_offset_m=0.2,
+        full_cross_section_weight_distance_m=1.5,
+        transition_to_dtm_distance_m=5.0,
         junction_tolerance=50.0,
         write_intermediate=True,
         centerline_output_path=None,
@@ -725,6 +873,9 @@ class DTMChannelModifier:
                 blend_type=blend_type,
                 return_dicts=False,
                 bounds=shared_bounds,
+                bank_offset_m=bank_offset_m,
+                full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
+                transition_to_dtm_distance_m=transition_to_dtm_distance_m,
             )
             modifiers.append(modifier)
 
@@ -770,6 +921,10 @@ class DTMChannelModifier:
             "perimeter_shp": str(perimeter_path) if perimeter_path else None,
             "intermediate_tifs": intermediate_tifs,
             "shared_bounds": [float(value) for value in shared_bounds],
+            "blend_type": blend_type,
+            "bank_offset_m": float(bank_offset_m),
+            "full_cross_section_weight_distance_m": float(full_cross_section_weight_distance_m),
+            "transition_to_dtm_distance_m": float(transition_to_dtm_distance_m),
             "channels": [
                 {
                     "name": channel["name"],
@@ -1381,10 +1536,14 @@ class DTMChannelModifier:
             
             pt_C, _ = nearest_points(centerline, line)
             d_xs = centerline.project(pt_C)
-            
-            d_C_xs = line.project(pt_C)
-            left_width = d_C_xs
-            right_width = line.length - d_C_xs
+            section_profile = DTMChannelModifier._build_corrected_section_profile(
+                line=line,
+                centerline=centerline,
+                centerline_distance=d_xs,
+                center_point=pt_C,
+            )
+            left_width = section_profile['corrected_left_width']
+            right_width = section_profile['corrected_right_width']
             
             stations.append({'d_xs': d_xs, 'lw': left_width, 'rw': right_width})
             

@@ -13,26 +13,14 @@ class DTM:
 
     Legacy methods still process the active config sub-project. The project-level
     helpers use configProject.Config to resolve every sub-project from the
-    Structure sheet and run a shared-window, junction-aware DTM build.
+    active structure source and run a shared-window, junction-aware DTM build.
     """
 
     def __init__(self, config):
         self.config = config
 
     def discover_project_subprojects(self):
-        project_subprojects = {}
-        for entry in self.config.FOLDER_ENTRIES:
-            parts = entry.relative_parts
-            if len(parts) == 2 and parts[0] == "1 Bur-Bur":
-                project_subprojects.setdefault(parts[1], [])
-            elif len(parts) == 3 and parts[0] == "1 Bur-Bur":
-                project_subprojects.setdefault(parts[1], []).append(parts[2])
-
-        return {
-            project: sub_projects
-            for project, sub_projects in project_subprojects.items()
-            if sub_projects
-        }
+        return self.config.discover_project_subprojects()
 
     def get_project_channel_inputs(self, project_name, sub_project_names=None):
         if sub_project_names is None:
@@ -60,6 +48,10 @@ class DTM:
         sub_project_names=None,
         target_res=0.1,
         buffer_m=20.0,
+        blend_type=None,
+        bank_offset_m=0.2,
+        full_cross_section_weight_distance_m=1.5,
+        transition_to_dtm_distance_m=5.0,
         junction_tolerance=50.0,
         perimeter_offset_m=500.0,
         write_intermediate=True,
@@ -67,6 +59,7 @@ class DTM:
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
         output_dir = Path(self.config.get_hecras_project_path(project_name)) / "DTM"
         output_dir.mkdir(parents=True, exist_ok=True)
+        resolved_blend_type = blend_type or self.config.BLEND_TYPE
 
         terrain_stem = (
             f"{project_name}_channel_terrain"
@@ -81,7 +74,10 @@ class DTM:
             output_tif_path=output_dir / f"{terrain_stem}.tif",
             target_res=target_res,
             buffer_m=buffer_m,
-            blend_type=self.config.BLEND_TYPE,
+            blend_type=resolved_blend_type,
+            bank_offset_m=bank_offset_m,
+            full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
+            transition_to_dtm_distance_m=transition_to_dtm_distance_m,
             junction_tolerance=junction_tolerance,
             write_intermediate=write_intermediate,
             centerline_output_path=output_dir / f"{project_name}_Centerlines.shp",
@@ -95,6 +91,10 @@ class DTM:
         projects=None,
         target_res=0.1,
         buffer_m=20.0,
+        blend_type=None,
+        bank_offset_m=0.2,
+        full_cross_section_weight_distance_m=1.5,
+        transition_to_dtm_distance_m=5.0,
         junction_tolerance=50.0,
         perimeter_offset_m=500.0,
         write_intermediate=True,
@@ -121,6 +121,10 @@ class DTM:
                     sub_project_names=sub_project_names,
                     target_res=target_res,
                     buffer_m=buffer_m,
+                    blend_type=blend_type,
+                    bank_offset_m=bank_offset_m,
+                    full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
+                    transition_to_dtm_distance_m=transition_to_dtm_distance_m,
                     junction_tolerance=junction_tolerance,
                     perimeter_offset_m=perimeter_offset_m,
                     write_intermediate=write_intermediate,
@@ -133,15 +137,24 @@ class DTM:
         print(f"\nDTM summary written to: {summary_path}")
         return results
 
-    def get_interpolated_tif(self, target_res=0.1, buffer_m=20.0):
+    def get_interpolated_tif(
+        self,
+        target_res=0.1,
+        buffer_m=20.0,
+        blend_type=None,
+        bank_offset_m=0.2,
+        full_cross_section_weight_distance_m=1.5,
+        transition_to_dtm_distance_m=5.0,
+    ):
         """
         Generates the interpolated DTM channel terrain for the active sub-project.
         """
-        print(f"--- STEP 1: Generating Interpolated DTM Channel Terrain ('{self.config.BLEND_TYPE}' fade) ---")
+        resolved_blend_type = blend_type or self.config.BLEND_TYPE
+        print(f"--- STEP 1: Generating Interpolated DTM Channel Terrain ('{resolved_blend_type}' fade) ---")
 
         output_dir = Path(self.config.OUTPUT_PATH)
         output_dir.mkdir(parents=True, exist_ok=True)
-        blended_tif_path = output_dir / f"terrain_blended_window_{self.config.BLEND_TYPE}.tif"
+        blended_tif_path = output_dir / f"terrain_blended_window_{resolved_blend_type}.tif"
 
         _, modifier = DTMChannelModifier.process_dtm_cells(
             dtm_path=self.config.DEM_PATH,
@@ -150,8 +163,11 @@ class DTM:
             target_res=target_res,
             buffer_m=buffer_m,
             break_after_first=False,
-            blend_type=self.config.BLEND_TYPE,
+            blend_type=resolved_blend_type,
             return_dicts=False,
+            bank_offset_m=bank_offset_m,
+            full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
+            transition_to_dtm_distance_m=transition_to_dtm_distance_m,
         )
 
         if modifier is None:

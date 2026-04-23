@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from sheets import GoogleSheetsClient, sheet_id
+
+
+DIRECT_RUN_SOURCE = "folder"
+DIRECT_RUN_MASTER_PROJECT_PATH: str | None = None
+DIRECT_RUN_SHEET_NAME: str | None = None
+DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
 
 
 @dataclass(frozen=True)
@@ -40,17 +47,23 @@ class SubProjectPaths:
 @dataclass
 class Config:
     """
-    Reads the Google Sheet Structure tab and builds the project folder tree.
+    Builds the project folder tree from either:
 
-    Similar to configProject.py, this class exposes the legacy path attributes
-    required by callDTM.py/implementation.py while still using the Structure
-    worksheet as the source of truth for the base folder layout.
+    1. the Google Sheet Structure tab, or
+    2. a master project folder with the same directory layout.
+
+    This class still exposes the legacy path attributes required by the
+    implementation scripts and automation helpers.
     """
 
     credentials_file: str = "master_credentials.json"
     workbook_id: str = sheet_id
     worksheet_name: str = "Structure"
+    sheet_name: str | None = None
+    structure_source: str = "sheet"
+    master_project_path: str | None = None
     project_folder: str | None = None
+    create_master_folder_if_missing: bool = False
     PROJECT_NAME: str = "ATATURK"
     SUB_PROJECT_NAME: str = "ATATURK-T"
     PROJECT_SHORT_NAME: str = "ATATURK-T"
@@ -89,19 +102,74 @@ class Config:
     BANK_LINE_PATH: str = field(init=False)
     BANK_LINE_FILE_PATH: str = field(init=False)
 
+    @classmethod
+    def from_sheet(
+        cls,
+        *,
+        sheet_name: str | None = None,
+        project_folder: str | None = None,
+        **kwargs,
+    ) -> "Config":
+        return cls(
+            structure_source="sheet",
+            sheet_name=sheet_name,
+            project_folder=project_folder,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_master_folder(
+        cls,
+        master_project_path: str,
+        *,
+        sheet_name: str | None = None,
+        create_if_missing: bool = False,
+        **kwargs,
+    ) -> "Config":
+        return cls(
+            structure_source="folder",
+            master_project_path=master_project_path,
+            project_folder=master_project_path,
+            sheet_name=sheet_name,
+            create_master_folder_if_missing=create_if_missing,
+            **kwargs,
+        )
+
     def __post_init__(self):
-        rows = self._read_structure_sheet()
-        master_path, sheet_project_path, structure_rows = self._parse_sheet(rows)
+        self.worksheet_name = self._clean_cell(self.sheet_name or self.worksheet_name or "Structure") or "Structure"
+        self.structure_source = self._normalize_structure_source(self.structure_source)
+        explicit_master_path = self._clean_cell(self.master_project_path or self.project_folder or "")
 
-        self.MASTER_PATH = master_path
-        self.PROJECT_FOLDER = self._clean_cell(self.project_folder or sheet_project_path)
+        if self.structure_source in {"sheet", "auto"}:
+            try:
+                rows = self._read_structure_sheet()
+                master_path, sheet_project_path, structure_rows = self._parse_sheet(rows)
+                self.MASTER_PATH = self._clean_cell(master_path)
+                self.PROJECT_FOLDER = self._clean_cell(explicit_master_path or sheet_project_path)
 
-        if not self.PROJECT_FOLDER:
-            raise ValueError("Project folder path could not be resolved from the sheet.")
+                if not self.PROJECT_FOLDER:
+                    raise ValueError("Project folder path could not be resolved from the sheet.")
 
-        self._build_folder_entries(structure_rows)
-        self._rebuild_paths()
-        self._refresh_compatibility_paths()
+                self._build_folder_entries(structure_rows)
+                self._ensure_top_level_entries()
+                self._rebuild_paths()
+                self._refresh_compatibility_paths()
+                return
+            except Exception:
+                if self.structure_source == "sheet":
+                    raise
+                if not explicit_master_path:
+                    raise
+
+        if self.structure_source in {"folder", "auto"}:
+            if not explicit_master_path:
+                raise ValueError(
+                    "master_project_path or project_folder must be provided when reading structure from a folder."
+                )
+            self._initialize_from_master_folder(explicit_master_path)
+            return
+
+        raise ValueError(f"Unsupported structure_source: {self.structure_source!r}")
 
     def _read_structure_sheet(self) -> list[list[str]]:
         client = GoogleSheetsClient(credentials_file=self.credentials_file)
@@ -157,6 +225,96 @@ class Config:
                     level=level,
                     relative_parts=tuple(folder_stack),
                     contents=contents,
+                )
+            )
+
+    def _initialize_from_master_folder(self, folder_path: str):
+        resolved_root = Path(self._clean_cell(folder_path)).expanduser()
+        if not resolved_root.exists():
+            if not self.create_master_folder_if_missing:
+                raise FileNotFoundError(f"Master project folder does not exist: {resolved_root}")
+            resolved_root.mkdir(parents=True, exist_ok=True)
+        if not resolved_root.is_dir():
+            raise NotADirectoryError(f"Master project path is not a directory: {resolved_root}")
+
+        self.MASTER_PATH = str(resolved_root)
+        self.PROJECT_FOLDER = str(resolved_root)
+        self._build_folder_entries_from_master_folder(resolved_root)
+        self._ensure_top_level_entries()
+        self._rebuild_paths()
+        self._refresh_compatibility_paths()
+
+    def _build_folder_entries_from_master_folder(self, root: Path):
+        self.FOLDER_ENTRIES = []
+        added: set[tuple[str, ...]] = set()
+
+        def add_entry(relative_parts: tuple[str, ...]):
+            if not relative_parts or relative_parts in added:
+                return
+            added.add(relative_parts)
+            self.FOLDER_ENTRIES.append(
+                FolderEntry(
+                    name=relative_parts[-1],
+                    level=len(relative_parts) - 1,
+                    relative_parts=relative_parts,
+                    contents="",
+                )
+            )
+
+        default_top_levels = list(self._default_top_level_names())
+        existing_top_levels = sorted(
+            [path.name for path in root.iterdir() if path.is_dir()],
+            key=self._top_level_sort_key,
+        )
+        for top_level_name in default_top_levels:
+            add_entry((top_level_name,))
+        for top_level_name in existing_top_levels:
+            add_entry((top_level_name,))
+
+        bur_bur_path = root / "1 Bur-Bur"
+        if bur_bur_path.is_dir():
+            for project_dir in sorted(
+                [path for path in bur_bur_path.iterdir() if path.is_dir()],
+                key=lambda item: item.name.upper(),
+            ):
+                sub_project_dirs = [
+                    path
+                    for path in project_dir.iterdir()
+                    if path.is_dir() and self._looks_like_sub_project_directory(path)
+                ]
+                if not sub_project_dirs:
+                    continue
+                add_entry(("1 Bur-Bur", project_dir.name))
+                for sub_project_dir in sorted(
+                    sub_project_dirs,
+                    key=lambda item: (self._version_number(item.name), item.name.upper()),
+                    reverse=True,
+                ):
+                    add_entry(("1 Bur-Bur", project_dir.name, sub_project_dir.name))
+
+        hec_path = root / "2 Hecras"
+        if hec_path.is_dir():
+            for project_dir in sorted(
+                [path for path in hec_path.iterdir() if path.is_dir()],
+                key=lambda item: item.name.upper(),
+            ):
+                add_entry(("2 Hecras", project_dir.name))
+
+    def _ensure_top_level_entries(self):
+        if not self.FOLDER_ENTRIES:
+            return
+
+        added = {entry.relative_parts for entry in self.FOLDER_ENTRIES}
+        for top_level_name in self._default_top_level_names():
+            relative_parts = (top_level_name,)
+            if relative_parts in added:
+                continue
+            self.FOLDER_ENTRIES.append(
+                FolderEntry(
+                    name=top_level_name,
+                    level=0,
+                    relative_parts=relative_parts,
+                    contents="",
                 )
             )
 
@@ -374,11 +532,52 @@ class Config:
         relative_key = Path(*parts).as_posix()
         return self.PATHS[relative_key]
 
+    def discover_project_subprojects(self) -> dict[str, list[str]]:
+        """Returns the project/sub-project mapping discovered from the active structure source."""
+        project_subprojects: dict[str, list[str]] = {}
+
+        for entry in self.FOLDER_ENTRIES:
+            parts = entry.relative_parts
+            if len(parts) == 2 and parts[0] == "1 Bur-Bur":
+                project_subprojects.setdefault(parts[1], [])
+            elif len(parts) == 3 and parts[0] == "1 Bur-Bur":
+                project_subprojects.setdefault(parts[1], []).append(parts[2])
+
+        return {
+            project: sub_projects
+            for project, sub_projects in project_subprojects.items()
+            if sub_projects
+        }
+
+    def get_essential_directories(self) -> list[Path]:
+        """Returns the master folder plus the top-level essential project folders."""
+        directories = {Path(self.PROJECT_FOLDER)}
+        top_level_names = set(self._default_top_level_names())
+
+        for entry in self.FOLDER_ENTRIES:
+            if len(entry.relative_parts) != 1:
+                continue
+            if entry.relative_parts[0] not in top_level_names:
+                continue
+            directories.add(Path(self.PATHS[entry.relative_path.as_posix()]))
+
+        return sorted(directories, key=lambda item: (len(item.parts), str(item)))
+
+    def setup_essential_directories(self):
+        """Creates only the master folder and top-level essential folders."""
+        for directory in self.get_essential_directories():
+            directory.mkdir(parents=True, exist_ok=True)
+            print(f"Ensured essential directory exists: {directory}")
+
     def setup_directories(self):
         """Creates the folder structure defined in the Structure sheet."""
         directories = {
-            Path(self.PROJECT_FOLDER),
-            *[Path(self.PATHS[entry.relative_path.as_posix()]) for entry in self.FOLDER_ENTRIES],
+            *self.get_essential_directories(),
+            *[
+                Path(self.PATHS[entry.relative_path.as_posix()])
+                for entry in self.FOLDER_ENTRIES
+                if len(entry.relative_parts) > 1
+            ],
             Path(self.PROJECT_DATA_PATH),
             Path(self.HEC_PROJECT_PATH),
             Path(self.HEC_SUB_PROJECT_PATH),
@@ -403,6 +602,58 @@ class Config:
         if 0 <= index < len(row):
             return cls._clean_cell(row[index])
         return ""
+
+    @classmethod
+    def _normalize_structure_source(cls, value: str | None) -> str:
+        normalized = cls._clean_cell(value or "sheet").lower()
+        aliases = {
+            "sheet": "sheet",
+            "sheets": "sheet",
+            "google_sheet": "sheet",
+            "google_sheets": "sheet",
+            "folder": "folder",
+            "filesystem": "folder",
+            "path": "folder",
+            "auto": "auto",
+        }
+        if normalized not in aliases:
+            raise ValueError(
+                f"Unsupported structure_source {value!r}. Use 'sheet', 'folder', or 'auto'."
+            )
+        return aliases[normalized]
+
+    @staticmethod
+    def _default_top_level_names() -> tuple[str, ...]:
+        return (
+            "0 Essentials",
+            "1 Bur-Bur",
+            "2 Hecras",
+            "3 GIS",
+            "4 Outputs",
+            "5 Temp",
+        )
+
+    @classmethod
+    def _top_level_sort_key(cls, name: str) -> tuple[int, str]:
+        clean_name = cls._clean_cell(name)
+        try:
+            index = cls._default_top_level_names().index(clean_name)
+        except ValueError:
+            index = len(cls._default_top_level_names())
+        return index, clean_name.upper()
+
+    def _looks_like_sub_project_directory(self, path: Path) -> bool:
+        if not path.is_dir():
+            return False
+
+        if self._normalize_name(path.name).startswith(self._normalize_name("BUR-BUR-MER-")):
+            return False
+
+        child_names = {self._normalize_name(child.name) for child in path.iterdir() if child.is_dir()}
+        return (
+            self._normalize_name(self.CROSS_SECTION_DIRNAME) in child_names
+            or self._normalize_name(self.BANK_LINE_DIRNAME) in child_names
+        )
 
     @staticmethod
     def _to_attr_name(parts: tuple[str, ...]) -> str:
@@ -584,7 +835,68 @@ class Config:
         return project_long_name
 
 
+def parse_direct_run_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prepare the master project folder layout. By default this creates the "
+            "essential top-level folders under the supplied master path."
+        )
+    )
+    parser.add_argument(
+        "master_project_path",
+        nargs="?",
+        help=(
+            "Master project folder path. If omitted, DIRECT_RUN_MASTER_PROJECT_PATH "
+            "from configProject.py is used."
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        choices=["sheet", "folder", "auto"],
+        help="Structure source to use while building the config. Defaults to folder for direct runs.",
+    )
+    parser.add_argument(
+        "--sheet-name",
+        help="Optional Google Sheet tab name. Defaults to 'Structure'.",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Create the full resolved directory set, including the active project/sub-project paths.",
+    )
+    return parser.parse_args()
+
+
+def build_direct_run_config(args: argparse.Namespace) -> Config:
+    master_project_path = args.master_project_path or DIRECT_RUN_MASTER_PROJECT_PATH
+    source = args.source or DIRECT_RUN_SOURCE or ("folder" if master_project_path else "sheet")
+    sheet_name = args.sheet_name or DIRECT_RUN_SHEET_NAME
+
+    if not master_project_path and source == "folder":
+        source = "sheet"
+
+    if master_project_path:
+        return Config(
+            structure_source=source,
+            master_project_path=master_project_path,
+            project_folder=master_project_path,
+            sheet_name=sheet_name,
+            create_master_folder_if_missing=True,
+        )
+
+    return Config(
+        structure_source=source,
+        sheet_name=sheet_name,
+    )
+
+
 if __name__ == "__main__":
-    config = Config()
+    args = parse_direct_run_args()
+    config = build_direct_run_config(args)
     print(f"Loaded project structure for: {config.PROJECT_FOLDER}")
-    config.setup_directories()
+
+    prepare_full_structure = args.full or DIRECT_RUN_PREPARE_FULL_STRUCTURE
+    if prepare_full_structure:
+        config.setup_directories()
+    else:
+        config.setup_essential_directories()

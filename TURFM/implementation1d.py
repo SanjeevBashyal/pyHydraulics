@@ -27,7 +27,19 @@ if TYPE_CHECKING:
 # User configuration
 # =============================================================================
 
-# None means "run every project listed in the Structure sheet".
+# Choose how the project structure is loaded:
+# - "sheet": always read the Google Sheet
+# - "folder": read directly from MASTER_PROJECT_PATH
+# - "auto": try the sheet first, then fall back to MASTER_PROJECT_PATH
+# CONFIG_SOURCE = "sheet"
+# MASTER_PROJECT_PATH: str | None = None
+# SHEET_NAME: str | None = None
+
+CONFIG_SOURCE = "folder"
+MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-0"
+SHEET_NAME = None
+
+# None means "run every project listed in the active structure source".
 PROJECTS_TO_RUN: list[str] | None = None
 
 # Optional manual pairing. If omitted, the first sub-project listed in the sheet
@@ -51,7 +63,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("implementation1d")
 
-
 @dataclass(frozen=True)
 class ModelInput:
     project_name: str
@@ -74,21 +85,8 @@ class WorkflowResult:
 
 
 def discover_project_subprojects(config: Config) -> dict[str, list[str]]:
-    """Read project/sub-project ordering from the Structure sheet entries."""
-    project_subprojects: dict[str, list[str]] = {}
-
-    for entry in config.FOLDER_ENTRIES:
-        parts = entry.relative_parts
-        if len(parts) == 2 and parts[0] == "1 Bur-Bur":
-            project_subprojects.setdefault(parts[1], [])
-        elif len(parts) == 3 and parts[0] == "1 Bur-Bur":
-            project_subprojects.setdefault(parts[1], []).append(parts[2])
-
-    return {
-        project: sub_projects
-        for project, sub_projects in project_subprojects.items()
-        if sub_projects
-    }
+    """Read project/sub-project ordering from the active structure source."""
+    return config.discover_project_subprojects()
 
 
 def filtered_projects(
@@ -467,15 +465,46 @@ def build_hecras(ras_exe_path: Path) -> HECRAS:
     return HECRAS(ras_exe_path=ras_exe_path)
 
 
+def build_config(args: argparse.Namespace) -> Config:
+    source = args.source or CONFIG_SOURCE
+    master_project_path = args.master_project_path or MASTER_PROJECT_PATH
+    sheet_name = args.sheet_name or SHEET_NAME
+    config = Config(
+        structure_source=source,
+        master_project_path=master_project_path,
+        project_folder=master_project_path,
+        sheet_name=sheet_name,
+    )
+    logger.info(
+        "Loaded structure from %s using root %s",
+        config.structure_source,
+        config.PROJECT_FOLDER,
+    )
+    return config
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run 1D HEC-RAS modeling for every project/sub-project in the Structure sheet."
+        description="Run 1D HEC-RAS modeling using either the Structure sheet or a master project folder."
     )
     parser.add_argument("--dry-run", action="store_true", help="Resolve inputs and print calls without running HEC-RAS.")
     parser.add_argument("--project", action="append", help="Project name to run. Repeat for multiple projects.")
     parser.add_argument("--continue-on-error", action="store_true", default=True, help="Continue running remaining projects after an error.")
     parser.add_argument("--stop-on-error", action="store_true", help="Stop immediately if one project fails.")
     parser.add_argument("--no-structures", action="store_true", help="Disable optional structure CSV discovery.")
+    parser.add_argument(
+        "--source",
+        choices=["sheet", "folder", "auto"],
+        help="Load project structure from the Google Sheet, a master folder path, or auto-fallback.",
+    )
+    parser.add_argument(
+        "--master-project-path",
+        help="Master project folder to use when --source folder is selected or auto falls back to the filesystem.",
+    )
+    parser.add_argument(
+        "--sheet-name",
+        help="Optional Google Sheet tab name. Defaults to 'Structure'.",
+    )
     return parser.parse_args()
 
 
@@ -485,7 +514,7 @@ def main() -> list[WorkflowResult]:
         global USE_STRUCTURES
         USE_STRUCTURES = False
 
-    config = Config()
+    config = build_config(args)
     project_filter = args.project if args.project else PROJECTS_TO_RUN
     project_subprojects = filtered_projects(
         discover_project_subprojects(config),

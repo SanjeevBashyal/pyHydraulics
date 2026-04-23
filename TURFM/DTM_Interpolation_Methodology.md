@@ -1,43 +1,188 @@
 # DTM Interpolation Methodology for 2D HEC-RAS Terrain Preparation
 
-## Purpose
+The main goal is to modify the base terrain model so that the surveyed river geometry is better represented inside the channel corridor while still preserving a smooth transition back to the original terrain outside the river. For projects containing tributaries and junctions, the same idea is extended to a full river system so that all channels are handled consistently on one shared terrain window.
 
-This note summarizes the computational procedure used in the DTM preprocessing workflow implemented in `DTM.py` and called through `callDTM.py`.
 
-The objective is to modify the raw terrain model so that:
-
-1. surveyed channel cross-sections are honored inside the river corridor,
-2. the modified channel transitions smoothly back to the original terrain near the banks,
-3. tributaries and junctions can be handled consistently on a common terrain window, and
-4. the final terrain is suitable for 2D hydraulic modeling in HEC-RAS.
+![Workflow Overview](dtm_workflow_images/dtm_workflow_overview.png)
 
 ---
 
-## Notation
+## 1. General Workflow
 
-| Symbol | Meaning |
-| --- | --- |
-| $Z_{\text{DTM}}(x,y)$ | original terrain elevation at location $(x,y)$ |
-| $Z_{\text{final}}(x,y)$ | modified terrain elevation written to output raster |
-| $B_L,\ B_R$ | left and right bank polylines |
-| $C(s)$ | centerline parameterized by chainage $s$ |
-| $S_k$ | surveyed cross-section at station $k$ |
-| $L_k$ | total length of surveyed cross-section $S_k$ |
-| $d(\cdot,\cdot)$ | Euclidean distance between geometries |
-| $\operatorname{proj}_{\Gamma}(p)$ | distance along geometry $\Gamma$ to the orthogonal projection of point $p$ |
-| $b$ | processing buffer around surveyed data |
-| $\Delta$ | target raster resolution |
-| $w(s)$ | channel width at centerline chainage $s$ |
-| $r(p)$ | transverse distance of cell $p$ from the centerline |
-| $\tau_J$ | junction detection tolerance |
+The workflow begins with three main data sources:
+
+1. the base DTM raster,
+2. the surveyed cross-section points for each channel,
+3. the bank line polylines that define the river edges.
+
+For a single channel, the procedure is:
+
+1. extract and resample a local terrain window around the survey,
+2. derive a mathematical centerline from the two banks,
+3. construct a dynamic interpolation corridor from the surveyed cross-sections,
+4. compute a new channel elevation for each raster cell inside that corridor,
+5. blend the new channel elevation with the original terrain.
+
+For a river network with tributaries:
+
+1. repeat the centerline construction for each sub-project,
+2. detect possible junctions from the geometry of those centerlines,
+3. extend tributary banks toward the main channel at the junction,
+4. interpolate each channel on the same raster extent,
+5. merge the resulting channel terrains into one final DTM.
+
+The important design choice is that the method remains cross-section driven. The terrain is not arbitrarily carved; it is reshaped so that the final raster follows the surveyed cross-sectional geometry as closely as possible while keeping the surrounding floodplain terrain smooth and stable.
 
 ---
 
-## 1. Terrain Window Extraction and Resampling
+## 2. Terrain Window Extraction and Resampling
 
-For a channel, the surveyed cross-section coordinates define the processing window.
+The first step is to determine the part of the terrain raster that needs to be modified. This is done by reading the full set of surveyed cross-section points for a channel and computing their overall spatial extent. A buffer is then added around that extent so that the processing window includes both the channel and a surrounding transition zone.
 
-If the set of all surveyed points is $\{(x_i,y_i,z_i)\}_{i=1}^N$, then the terrain window is:
+The raw DTM is then cropped to this local window and resampled to the target computational resolution. This step is important because the survey data often represent the channel geometry in much more detail than the original terrain raster. By resampling the local raster to a finer resolution, the later interpolation steps can fit the surveyed geometry into the terrain more smoothly.
+
+In practice, this means the workflow does not modify the entire terrain model at once. It works on a focused raster window that is just large enough to contain the channel geometry and the blending zone around it.
+
+---
+
+## 3. Centerline Generation from the Bank Lines
+
+The method does not require a predefined river centerline. Instead, the centerline is generated mathematically from the two bank lines. The idea is simple: at many locations along one bank, the method finds the corresponding location on the opposite bank and then computes the point that lies equally between them. Repeating this along the channel produces a centerline that stays centered between the two banks even where the channel bends.
+
+This is important because the centerline acts as the backbone of the whole interpolation system. Once the centerline is defined, every raster cell in the river corridor can be described by:
+
+1. its position along the river, and
+2. its offset away from the centerline.
+
+That converts the DTM modification problem into a river-based coordinate system rather than a purely Cartesian one.
+
+![Single Channel Geometry](dtm_workflow_images/dtm_single_channel_geometry.png)
+
+The same centerline is also used to estimate the local river width. At each centerline location, the width is taken as the sum of the distances from the centerline to the left and right banks. This makes the method responsive to changes in channel width along the river.
+
+---
+
+## 4. How the Surveyed Cross-Sections Are Used
+
+Each surveyed cross-section is treated as a 3D line. The cross-section is first connected to the centerline by identifying the point on the section that lies closest to the centerline. That point acts as the local channel reference point for the section.
+
+Once this reference is known, the section is split conceptually into a left side and a right side. The elevation along the section is then represented as a continuously interpolated function of distance along the section. In other words, the discrete surveyed points are converted into a smooth profile that can be sampled at any intermediate location.
+
+This is a key part of the workflow: the terrain is not simply forced to match one surveyed point at a time. Instead, each cross-section becomes a continuous elevation profile that can be sampled wherever a raster cell maps onto it.
+
+The method also stores where each cross-section lies along the centerline. That allows the workflow to identify, for any raster cell, which two surveyed sections lie immediately upstream and downstream of it.
+
+---
+
+## 5. Construction of the Interpolation Corridor
+
+The river corridor used for interpolation is not taken directly from the bank polygon alone. Instead, a wider and more flexible interpolation envelope is built from the surveyed cross-sections themselves.
+
+At every location along the centerline, the left and right extents of the channel are estimated by interpolating the left and right half-widths of the surveyed cross-sections. These interpolated widths are then traced outward from the centerline using the local normal direction of the river. Connecting those left and right traces creates a dynamic polygon around the river.
+
+This polygon plays two roles:
+
+1. it limits the area over which cross-section-based terrain modification is allowed,
+2. it defines the outer boundary of the blending zone.
+
+Because this polygon follows the cross-section widths, it adapts much better to natural widening, narrowing, and curvature than a fixed-distance buffer would.
+
+---
+
+## 6. Cellwise Interpolation Inside a Single Channel
+
+After the terrain window, centerline, and interpolation corridor are defined, the workflow evaluates the raster cell by cell inside the corridor.
+
+For each raster cell, the following logic is used.
+
+First, the cell is projected onto the centerline. This gives the local river chainage and the nearest point on the centerline. The perpendicular distance from the cell to that projected centerline point is then computed. That distance represents how far the cell lies away from the centerline.
+
+Second, the workflow identifies the two surveyed cross-sections that bracket the cell in the longitudinal direction. One is the nearest section upstream, and the other is the nearest section downstream. These two sections provide the local geometric control for the cell.
+
+Third, the transverse offset of the cell from the centerline is mapped onto each of the two bracketing sections. This mapping is scaled by the ratio between the local channel width at the cell and the width represented by each section. That scaling is important because it allows a cell to be mapped consistently even when the channel width changes between two surveyed sections.
+
+Fourth, the mapped positions on the upstream and downstream sections are used to sample elevations from those sections. Those two elevations are then blended together using inverse-distance weighting, so the section that is geometrically closer to the cell has greater influence.
+
+The result of this stage is a cross-section-derived channel elevation for the raster cell.
+
+![Interpolation and Blending Logic](dtm_workflow_images/dtm_blending_logic.png)
+
+This is the heart of the method: every cell is assigned a new river-consistent elevation by combining the geometry of the nearest upstream and downstream surveyed sections.
+
+---
+
+## 7. Blending with the Original Terrain
+
+The channel elevation computed from the cross-sections is not written directly into the terrain everywhere. Instead, it is blended with the original DTM so that the modified terrain transitions smoothly into the natural surrounding ground.
+
+Two geometric masks are used:
+
+1. the bank polygon, which represents the core channel zone,
+2. the larger interpolation envelope, which represents the outer transition zone.
+
+The implementation treats the bank polygon as the zone where the channel geometry is already fully trusted. For raster cells that fall inside this bank region, the written elevation is the same as the cross-section-derived bed elevation. Once a cell lies outside the bank polygon but still inside the larger interpolation envelope, the workflow starts blending gradually back toward the original DTM. Near the outer edge of the interpolation envelope, the original terrain becomes dominant. This creates a gradual rather than abrupt transition.
+
+An optional exponential version of the terrain weight is also available. This changes the shape of the fade curve and can make the transition softer where needed.
+
+From a hydraulic perspective, this is very useful: the channel interior follows the surveyed geometry, but the floodplain outside the river is not distorted unnecessarily.
+
+---
+
+## 8. Extension to Tributaries and Junctions
+
+For river systems with multiple sub-projects, the workflow treats each sub-project as a channel candidate. A centerline is built for each one. The method then checks whether an endpoint of one centerline falls close to the middle portion of another centerline. If this happens within the specified tolerance, the geometry is treated as a potential tributary-to-main-channel junction.
+
+The test is directional in the sense that it looks for a tributary endpoint meeting the middle of another river rather than simply any two lines coming close together. This helps distinguish true junctions from cases where channels merely start or end near each other.
+
+Once a junction is identified, the tributary bank lines are extended toward the corresponding main-channel banks. The extension is not arbitrary. The method evaluates the possible ways of pairing the two tributary banks to the two main banks and chooses the pairing that gives the smallest total connection distance. Each tributary bank is then extended to the nearest point on its assigned main bank.
+
+This step improves the geometry in the junction area before any raster interpolation is carried out. The result is a smoother bank topology and a cleaner flow transition when the terrain is later modified.
+
+![Junction and Network Workflow](dtm_workflow_images/dtm_junction_workflow.png)
+
+---
+
+## 9. Shared Raster Processing for the Full River System
+
+When multiple channels belong to one project, the workflow does not process them on separate raster windows and then try to stitch them together afterward. Instead, it first computes one common raster extent that covers all channel survey data and all processed bank geometries.
+
+Each channel is then interpolated on this same raster grid. This is an important implementation choice because it guarantees:
+
+1. identical raster alignment for all channels,
+2. direct cell-by-cell comparison between channels,
+3. consistent handling of overlap zones near junctions.
+
+This shared-grid approach makes the later merge mathematically clean and avoids mismatch caused by different raster origins, extents, or resolutions.
+
+---
+
+## 10. Final Channel Merge for Junction Areas
+
+After each channel has been interpolated on the common raster window, the workflow combines all of the channel rasters into one final terrain. In overlap regions, the final value at each raster cell is taken as the minimum of the elevations computed from the participating channels.
+
+This minimum-elevation merge is used because the hydraulically controlling channel bed in a junction region is the deepest locally plausible one. In other words, if two interpolated channel surfaces overlap, the method keeps the lower bed elevation rather than averaging the two beds together.
+
+That produces a more physically meaningful final terrain in confluence areas and helps avoid raised or blocked junction geometry.
+
+---
+
+## 11. Summary
+
+In practical terms, the workflow can be summarized as follows:
+
+The surveyed cross-sections provide the most reliable information about the interior of the channel, so they are used to reconstruct the river bed and inner channel shape. The original DTM provides the best representation of the surrounding ground, so it is preserved outside the river corridor. A distance-based blending procedure then connects those two surfaces smoothly.
+
+For tributary systems, the same logic is extended by first making the channel geometries consistent at the junction, then interpolating all channels on one raster, and finally merging them in a way that preserves the deepest valid channel representation.
+
+---
+
+## 12. Supplementary Mathematics
+
+The equations below summarize the key computational relationships used in the implementation.
+
+### 12.1 Terrain Window
+
+If the surveyed points are $\{(x_i,y_i,z_i)\}_{i=1}^N$ and the processing buffer is $b$, then the cropped terrain window is:
 
 $$
 \Omega
@@ -50,9 +195,7 @@ $$
 \right]
 $$
 
-The corresponding raster subset is cropped from the master DTM and resampled to the target resolution $\Delta$.
-
-If the physical window dimensions are $W$ and $H$, then:
+If the resampled terrain resolution is $\Delta$, then the working raster dimensions are:
 
 $$
 n_x = \left\lfloor \frac{W}{\Delta} \right\rfloor,
@@ -60,33 +203,15 @@ n_x = \left\lfloor \frac{W}{\Delta} \right\rfloor,
 n_y = \left\lfloor \frac{H}{\Delta} \right\rfloor
 $$
 
-and bilinear resampling is used to generate the working terrain grid.
+### 12.2 Centerline Between the Banks
 
----
-
-## 2. Centerline Generation from the Bank Lines
-
-The workflow does not assume a predefined centerline. Instead, the centerline is constructed geometrically from the two banks.
-
-Let the two bank lines be $B_1$ and $B_2$. A point is sampled along the first bank:
-
-$$
-p_A(s) \in B_1
-$$
-
-and the nearest point on the opposite bank is found:
-
-$$
-p_B(s) = \operatorname{nearest}\!\left(p_A(s), B_2\right)
-$$
-
-The centerline point is then solved as the point on the segment joining $p_A$ and $p_B$ that is equidistant from both banks:
+For two bank lines $B_1$ and $B_2$, a point along one bank is $p_A(s)$ and the nearest point on the opposite bank is $p_B(s)$. The centerline point is found on the segment joining them:
 
 $$
 c(s,t) = p_A(s) + t\left(p_B(s)-p_A(s)\right), \qquad t \in [0,1]
 $$
 
-with
+with:
 
 $$
 t^\ast
@@ -97,268 +222,63 @@ d\!\left(c(s,t), B_1\right) - d\!\left(c(s,t), B_2\right)
 \right|
 $$
 
-Therefore, the centerline point is:
+so that:
 
 $$
-C(s) = c(s,t^\ast)
+C(s)=c(s,t^\ast)
 $$
 
-In implementation, $t^\ast$ is solved by binary search.
+### 12.3 Local Channel Width
 
-If bank lines carry $z$ values, the centerline elevation is taken as the average of the two bank elevations at the projected location:
-
-$$
-z_C(s)
-=
-\frac{
-z_{B_1}\!\left(\operatorname{proj}_{B_1}(C(s))\right)
-+
-z_{B_2}\!\left(\operatorname{proj}_{B_2}(C(s))\right)
-}{2}
-$$
-
----
-
-## 3. Channel Width Along the Centerline
-
-At each centerline vertex $C_j$, the local bank-to-bank width is computed as:
+At centerline chainage $s$, the local channel width is interpolated from the centerline-to-bank distances:
 
 $$
-w_j = d(C_j, B_L) + d(C_j, B_R)
+w(s) = d(C(s), B_L) + d(C(s), B_R)
 $$
 
-These widths are then interpolated along centerline chainage.
+### 12.4 Cellwise Cross-Section Interpolation
 
-For any cell $p$, let
-
-$$
-s(p) = \operatorname{proj}_{C}(p)
-$$
-
-Then the nearest centerline point is:
+For a raster cell $p$, let its projected centerline chainage be:
 
 $$
-C_p = C\!\left(s(p)\right)
+s(p)=\operatorname{proj}_{C}(p)
 $$
 
-and the local channel width is:
+and let its transverse offset from the centerline be:
 
 $$
-w(p) = \operatorname{interp}\!\left(s(p);\; \{(s_j,w_j)\}\right)
+r(p)=\|p-C(s(p))\|
 $$
 
-The transverse distance from the cell to the centerline is:
+If the cell lies between bracketing sections $S_k$ and $S_{k+1}$, then the offset is mapped to each section as:
 
 $$
-r(p) = \|p - C_p\|
-$$
-
----
-
-## 4. Cross-Section Descriptors
-
-Each surveyed cross-section $S_k$ is represented as a 3D polyline with chainage-dependent elevation:
-
-$$
-S_k(\xi) = \left(x_k(\xi), y_k(\xi), z_k(\xi)\right),
+m_k(p)=r(p)\,\frac{w_k^\ast}{w(p)},
 \qquad
-\xi \in [0,L_k]
+m_{k+1}(p)=r(p)\,\frac{w_{k+1}^\ast}{w(p)}
 $$
 
-The cross-section is anchored to the centerline by the closest point between the section and the centerline:
+The corresponding sampled elevations are:
 
 $$
-q_k = \operatorname{nearest}(S_k, C)
+\hat z_k(p)=z_k\!\left(d_k^C+\sigma_k(p)\,m_k(p)\right)
 $$
 
-The centerline chainage of that section is:
-
 $$
-s_k = \operatorname{proj}_{C}(q_k)
+\hat z_{k+1}(p)=z_{k+1}\!\left(d_{k+1}^C+\sigma_{k+1}(p)\,m_{k+1}(p)\right)
 $$
 
-The corresponding distance along the section is:
+where $\sigma_k(p)$ and $\sigma_{k+1}(p)$ indicate whether the mapped point falls to the left or right of the centerline crossing on each section.
+
+The longitudinal interpolation weights are:
 
 $$
-d_k^C = \operatorname{proj}_{S_k}(q_k)
-$$
-
-This splits the cross-section into left and right half-widths:
-
-$$
-\ell_k = d_k^C,
+\alpha_k(p)=\frac{\delta_{k+1}(p)}{\delta_k(p)+\delta_{k+1}(p)},
 \qquad
-r_k = L_k - d_k^C
+\alpha_{k+1}(p)=\frac{\delta_k(p)}{\delta_k(p)+\delta_{k+1}(p)}
 $$
 
-The elevation along the section is interpolated linearly from the surveyed points:
-
-$$
-z_k(\xi) = \operatorname{interp}\!\left(\xi;\; \text{surveyed vertices of }S_k\right)
-$$
-
-The bank-to-bank width of the section, evaluated at its centerline intersection, is:
-
-$$
-w_k^\ast = w(s_k)
-$$
-
----
-
-## 5. Dynamic Cross-Section Envelope Polygon
-
-The outer interpolation envelope is not taken as the bank polygon itself. Instead, a dynamic polygon is created from interpolated cross-section widths.
-
-For any centerline chainage $s$:
-
-$$
-\ell(s) = \operatorname{interp}\!\left(s;\{(s_k,\ell_k)\}\right),
-\qquad
-r(s) = \operatorname{interp}\!\left(s;\{(s_k,r_k)\}\right)
-$$
-
-Let $\mathbf{t}(s)$ be the local unit tangent and $\mathbf{n}(s)$ the corresponding unit normal:
-
-$$
-\mathbf{n}(s)
-=
-\frac{1}{\|\mathbf{t}(s)\|}
-\begin{bmatrix}
--t_y(s) \\
-t_x(s)
-\end{bmatrix}
-$$
-
-Then the left and right envelope boundaries are:
-
-$$
-P_L(s) = C(s) + \ell(s)\,\mathbf{n}(s)
-$$
-
-$$
-P_R(s) = C(s) - r(s)\,\mathbf{n}(s)
-$$
-
-The interpolation polygon is the closed boundary formed by:
-
-$$
-\partial \Omega_{\text{XS}}
-=
-\left\{P_L(s)\right\}_{s=0}^{L_C}
-\cup
-\left\{P_R(s)\right\}_{s=L_C}^{0}
-$$
-
-where $L_C$ is total centerline length.
-
-This polygon defines the outer zone over which terrain blending is allowed.
-
----
-
-## 6. Core Cellwise Interpolation for a Single Channel
-
-For each raster cell $p=(x,y)$ inside the interpolation envelope:
-
-1. project the cell to the centerline,
-2. identify the two surrounding surveyed sections,
-3. interpolate the channel elevation from those sections,
-4. blend that interpolated elevation with the original terrain.
-
-### 6.1 Bracketing Cross-Sections
-
-For each cell, compute centerline chainage:
-
-$$
-s(p) = \operatorname{proj}_{C}(p)
-$$
-
-Then select the upstream and downstream surveyed sections such that:
-
-$$
-s_k \le s(p) < s_{k+1}
-$$
-
-### 6.2 Distance from the Cell to the Bracketing Sections
-
-For the bracketing sections $S_k$ and $S_{k+1}$:
-
-$$
-\delta_k(p) = d\!\left(p, S_k\right),
-\qquad
-\delta_{k+1}(p) = d\!\left(p, S_{k+1}\right)
-$$
-
-These distances control the longitudinal interpolation weight.
-
-### 6.3 Mapping the Cell Offset onto Each Cross-Section
-
-The cell is first measured relative to the centerline:
-
-$$
-r(p) = \|p - C_p\|
-$$
-
-Because the local channel width may vary, this transverse offset is scaled to each section:
-
-$$
-m_k(p) = r(p)\,\frac{w_k^\ast}{w(p)}
-$$
-
-$$
-m_{k+1}(p) = r(p)\,\frac{w_{k+1}^\ast}{w(p)}
-$$
-
-The side of the section is determined from the projected cell location on the section:
-
-$$
-\sigma_k(p)
-=
-\begin{cases}
-+1, & \operatorname{proj}_{S_k}(p) \ge d_k^C \\
--1, & \operatorname{proj}_{S_k}(p) < d_k^C
-\end{cases}
-$$
-
-$$
-\sigma_{k+1}(p)
-=
-\begin{cases}
-+1, & \operatorname{proj}_{S_{k+1}}(p) \ge d_{k+1}^C \\
--1, & \operatorname{proj}_{S_{k+1}}(p) < d_{k+1}^C
-\end{cases}
-$$
-
-Therefore, the sampled elevations from the two sections are:
-
-$$
-\hat z_k(p)
-=
-z_k\!\left(d_k^C + \sigma_k(p)\,m_k(p)\right)
-$$
-
-$$
-\hat z_{k+1}(p)
-=
-z_{k+1}\!\left(d_{k+1}^C + \sigma_{k+1}(p)\,m_{k+1}(p)\right)
-$$
-
-### 6.4 Longitudinal Blending Between the Two Sections
-
-The longitudinal interpolation weights are inverse-distance based:
-
-$$
-\alpha_k(p)
-=
-\frac{\delta_{k+1}(p)}{\delta_k(p)+\delta_{k+1}(p)}
-$$
-
-$$
-\alpha_{k+1}(p)
-=
-\frac{\delta_k(p)}{\delta_k(p)+\delta_{k+1}(p)}
-$$
-
-Hence the cross-section-derived elevation is:
+so the cross-section-derived channel elevation becomes:
 
 $$
 Z_{\text{XS}}(p)
@@ -368,42 +288,50 @@ Z_{\text{XS}}(p)
 \alpha_{k+1}(p)\,\hat z_{k+1}(p)
 $$
 
-This means the cell is pulled more strongly toward whichever surveyed section is closer.
+### 12.5 Terrain Blending
 
----
+Let $\widetilde d_B(p)$ be a bank-core distance term that is zero inside the bank polygon and increases only after the cell moves outside that bank region but remains within the interpolation envelope. Let $d_X(p)$ be the distance to the outer interpolation envelope boundary:
 
-## 7. Blending the Interpolated Channel with the Original Terrain
+$$
+\widetilde d_B(p)
+=
+\begin{cases}
+0, & p \in \Omega_B \\
+d(p,\Omega_B), & p \in \Omega_{\text{XS}} \setminus \Omega_B
+\end{cases}
+$$
 
-Two raster masks are used:
-
-1. the **bank polygon mask**, which represents the core channel region,
-2. the **cross-section envelope mask**, which represents the outer blending zone.
-
-Let:
-
-- $d_B(p)$ be the distance from cell $p$ to the bank polygon boundary,
-- $d_X(p)$ be the distance from cell $p$ to the outer cross-section envelope boundary.
-
-The terrain weight is:
+Then:
 
 $$
 \beta_{\text{terrain}}(p)
 =
-\frac{d_B(p)}{d_B(p)+d_X(p)}
+\frac{\widetilde d_B(p)}{\widetilde d_B(p)+d_X(p)}
 $$
 
-and the channel-interpolation weight is:
-
 $$
-\beta_{\text{XS}}(p) = 1 - \beta_{\text{terrain}}(p)
+\beta_{\text{XS}}(p)=1-\beta_{\text{terrain}}(p)
 $$
 
-Hence:
+Therefore, inside the bank polygon:
 
-- inside the bank polygon core, $d_B(p)=0$ and the surveyed channel surface dominates,
-- near the outer cross-section envelope boundary, $d_X(p)\to 0$ and the raw terrain dominates.
+$$
+p \in \Omega_B
+\;\Rightarrow\;
+\beta_{\text{terrain}}(p)=0
+\;\Rightarrow\;
+Z_{\text{final}}(p)=Z_{\text{XS}}(p)
+$$
 
-So the final modified elevation for a single channel is:
+Outside the interpolation envelope, the original terrain is retained:
+
+$$
+p \notin \Omega_{\text{XS}}
+\;\Rightarrow\;
+Z_{\text{final}}(p)=Z_{\text{DTM}}(p)
+$$
+
+The final modified elevation for a single channel is:
 
 $$
 Z_{\text{final}}(p)
@@ -413,202 +341,49 @@ Z_{\text{final}}(p)
 \beta_{\text{XS}}(p)\,Z_{\text{XS}}(p)
 $$
 
-### Exponential Blend Option
-
-If exponential blending is selected, the terrain weight is transformed as:
+If exponential blending is used, the terrain weight is transformed as:
 
 $$
 \beta_{\text{terrain}}^{(\exp)}(p)
 =
-\frac{e^{\beta_{\text{terrain}}(p)} - 1}{e - 1}
+\frac{e^{\beta_{\text{terrain}}(p)}-1}{e-1}
 $$
 
-Then:
+### 12.6 Junction Detection
+
+For a tributary endpoint $e$ and a main-channel centerline $C_m$:
 
 $$
-Z_{\text{final}}(p)
-=
-\beta_{\text{terrain}}^{(\exp)}(p)\,Z_{\text{DTM}}(p)
-+
-\left(1-\beta_{\text{terrain}}^{(\exp)}(p)\right)\,Z_{\text{XS}}(p)
-$$
-
-This produces a softer fade from the channel back into the original terrain.
-
----
-
-## 8. Junction Detection for River Networks
-
-For a project with multiple sub-projects, each sub-project is treated as one channel candidate.
-
-For a tributary centerline endpoint $e$ and a main centerline $C_m$:
-
-$$
-s_m(e) = \operatorname{proj}_{C_m}(e)
+s_m(e)=\operatorname{proj}_{C_m}(e)
 $$
 
 $$
-j(e) = C_m\!\left(s_m(e)\right)
+j(e)=C_m\!\left(s_m(e)\right)
 $$
 
 $$
-\eta(e) = \frac{s_m(e)}{L_m}
+\eta(e)=\frac{s_m(e)}{L_m},
+\qquad
+d_J(e)=\|e-j(e)\|
 $$
-
-$$
-d_J(e) = \|e - j(e)\|
-$$
-
-where $L_m$ is the main channel centerline length.
 
 A valid junction candidate must satisfy:
 
 $$
-0.05 \le \eta(e) \le 0.95
+0.05 \le \eta(e) \le 0.95,
+\qquad
+d_J(e)\le\tau_J
 $$
 
-and
+### 12.7 Network Merge
+
+If $Q$ channels are interpolated on the same raster grid, then the final river-system terrain is:
 
 $$
-d_J(e) \le \tau_J
+Z_{\text{net}}(p)=\min_{q=1,\dots,Q} Z_q(p)
 $$
 
-This ensures the tributary connects to the **middle reach** of another river, not simply near its upstream or downstream end.
-
-Among all pairwise candidates, the smallest valid endpoint-to-centerline distance is selected.
+This minimum operation is applied cellwise after ignoring `nodata` cells.
 
 ---
 
-## 9. Tributary Bank Extension at the Junction
-
-Once a junction point is detected, the tributary bank lines are extended to meet the main channel banks.
-
-Let the tributary bank endpoints nearest the junction be $e_1$ and $e_2$, and let the two main channel banks be $B_1^m$ and $B_2^m$.
-
-Two possible assignments exist:
-
-$$
-A_1 = (e_1 \rightarrow B_1^m,\; e_2 \rightarrow B_2^m)
-$$
-
-$$
-A_2 = (e_1 \rightarrow B_2^m,\; e_2 \rightarrow B_1^m)
-$$
-
-The chosen assignment is:
-
-$$
-A^\ast
-=
-\arg\min_{A \in \{A_1,A_2\}}
-\sum_{i=1}^{2}
-d\!\left(e_i,\; B_{A(i)}^m\right)
-$$
-
-After selecting the best assignment, each tributary bank is extended to the nearest point on its assigned main bank.
-
-This creates a more continuous bank geometry through the junction before interpolation is applied.
-
----
-
-## 10. Shared Raster Window for Multi-Channel Processing
-
-For a project containing multiple channels, all channels are processed on the same cropped terrain window.
-
-If channel $q$ has surveyed coordinate bounds:
-
-$$
-\left[x_{\min}^{(q)}, y_{\min}^{(q)}, x_{\max}^{(q)}, y_{\max}^{(q)}\right]
-$$
-
-then the shared network window is:
-
-$$
-\Omega_{\text{net}}
-=
-\left[
-\min_q x_{\min}^{(q)} - b,\;
-\min_q y_{\min}^{(q)} - b,\;
-\max_q x_{\max}^{(q)} + b,\;
-\max_q y_{\max}^{(q)} + b
-\right]
-$$
-
-This guarantees that:
-
-1. all channels are interpolated on identical raster alignment,
-2. cellwise merging is mathematically valid,
-3. junction regions are represented without raster mismatch.
-
----
-
-## 11. Final Multi-Channel Merge
-
-After each channel $q$ is interpolated independently on the shared raster window, the final channel terrain is obtained by taking the minimum elevation per cell:
-
-$$
-Z_{\text{net}}(p)
-=
-\min_{q=1,\dots,Q} Z_q(p)
-$$
-
-where:
-
-- $Q$ is the number of channels in the project,
-- $Z_q(p)$ is the single-channel interpolated terrain for channel $q$.
-
-This minimum-elevation merge is physically useful because, in overlap regions near junctions, the hydraulically controlling surface is the deepest locally valid channel representation.
-
-In implementation, `nodata` cells are ignored during the minimum operation.
-
----
-
-## 12. Final Outputs
-
-For each project, the workflow produces:
-
-1. a final terrain GeoTIFF for the full river system,
-2. optional intermediate channel-specific GeoTIFFs,
-3. centerline shapefiles,
-4. merged bank shapefiles,
-5. a study perimeter polygon.
-
-These outputs are written under the project-specific DTM folder inside the HEC-RAS project directory.
-
----
-
-## 13. Compact Algorithm Summary
-
-### Single Channel
-
-1. Read surveyed cross-sections and bank lines.
-2. Crop and resample the base DTM.
-3. Generate an equidistant centerline from the banks.
-4. Build a dynamic interpolation envelope from cross-section widths.
-5. For each raster cell in the envelope:
-   1. project to centerline,
-   2. identify the two bracketing sections,
-   3. map the transverse offset to each section,
-   4. interpolate section elevation,
-   5. blend with original terrain.
-
-### Multi-Channel / Junction Case
-
-1. Build centerlines for all sub-projects.
-2. Detect tributary-to-main junction candidates.
-3. Extend tributary banks to the main banks.
-4. Compute one shared raster window covering the full river system.
-5. Run single-channel interpolation on that shared grid for each sub-project.
-6. Merge the resulting rasters by cellwise minimum elevation.
-
----
-
-## 14. Summary
-
-The method can be summarized conceptually as:
-
-> **Surveyed cross-sections control the channel interior, the original terrain controls the outer floodplain, and a distance-based blending scheme creates a smooth transition between them.**  
->  
-> For river systems with tributaries, all channels are first brought into a shared geometric and raster framework, then combined in the junction area using the minimum physically admissible bed elevation.
-
----
