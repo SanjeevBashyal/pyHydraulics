@@ -8,10 +8,15 @@ from pathlib import Path
 from sheets import GoogleSheetsClient, sheet_id
 
 
+# DIRECT_RUN_SOURCE = "folder"
+# DIRECT_RUN_MASTER_PROJECT_PATH: str | None = None
+# DIRECT_RUN_SHEET_NAME: str | None = None
+# DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
+
 DIRECT_RUN_SOURCE = "folder"
-DIRECT_RUN_MASTER_PROJECT_PATH: str | None = None
-DIRECT_RUN_SHEET_NAME: str | None = None
-DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
+DIRECT_RUN_MASTER_PROJECT_PATH = Path(r"C:\Users\Ripple\Downloads\Group-4")
+DIRECT_RUN_SHEET_NAME = None
+DIRECT_RUN_PREPARE_FULL_STRUCTURE = True
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,12 @@ class SubProjectPaths:
     sub_project_path: str
     hecras_project_path: str
     hecras_sub_project_path: str
+    gis_project_path: str
+    gis_sub_project_path: str
+    output_project_path: str
+    output_sub_project_path: str
+    temp_project_path: str
+    temp_sub_project_path: str
     cross_section_path: str
     cross_section_file_path: str
     bank_line_path: str
@@ -75,6 +86,7 @@ class Config:
     DEM_FILENAME: str = "SET4_27_DTM_070226_R1.tif"
     CROSS_SECTION_DIRNAME: str = "KESIT_TESLIM"
     BANK_LINE_DIRNAME: str = "SEV_USTU"
+    IGNORED_PROJECT_FOLDER_NAMES: tuple[str, ...] = ("Z Received",)
 
     MASTER_PATH: str = field(init=False)
     PROJECT_FOLDER: str = field(init=False)
@@ -94,6 +106,12 @@ class Config:
     PROJECT_DATA_PATH: str = field(init=False)
     HEC_PROJECT_PATH: str = field(init=False)
     HEC_SUB_PROJECT_PATH: str = field(init=False)
+    GIS_PROJECT_PATH: str = field(init=False)
+    GIS_SUB_PROJECT_PATH: str = field(init=False)
+    OUTPUT_PROJECT_PATH: str = field(init=False)
+    OUTPUT_SUB_PROJECT_PATH: str = field(init=False)
+    TEMP_PROJECT_PATH: str = field(init=False)
+    TEMP_SUB_PROJECT_PATH: str = field(init=False)
     PROJECT_GROUP: str = field(init=False, default="")
 
     DEM_PATH: str = field(init=False)
@@ -273,14 +291,21 @@ class Config:
 
         bur_bur_path = root / "1 Bur-Bur"
         if bur_bur_path.is_dir():
+            # Folder mode contract:
+            # 1 Bur-Bur/<Project> is a project, and each immediate child
+            # 1 Bur-Bur/<Project>/<Sub-Project> is a sub-project.
             for project_dir in sorted(
-                [path for path in bur_bur_path.iterdir() if path.is_dir()],
+                [
+                    path
+                    for path in bur_bur_path.iterdir()
+                    if self._looks_like_project_directory(path)
+                ],
                 key=lambda item: item.name.upper(),
             ):
                 sub_project_dirs = [
                     path
                     for path in project_dir.iterdir()
-                    if path.is_dir() and self._looks_like_sub_project_directory(path)
+                    if path.is_dir()
                 ]
                 if not sub_project_dirs:
                     continue
@@ -357,6 +382,13 @@ class Config:
         self.PROJECT_DATA_PATH = self._absolute_from_relative_path(project_relative_path)
         self.HEC_PROJECT_PATH = self._resolve_hec_project_path()
         self.HEC_SUB_PROJECT_PATH = str(Path(self.HEC_PROJECT_PATH) / self.SUB_PROJECT_NAME)
+        active_project_name = self.PROJECT_GROUP or self.PROJECT_NAME
+        self.GIS_PROJECT_PATH = str(Path(self.GIS_PATH) / active_project_name)
+        self.GIS_SUB_PROJECT_PATH = str(Path(self.GIS_PROJECT_PATH) / self.SUB_PROJECT_NAME)
+        self.OUTPUT_PROJECT_PATH = str(Path(self.OUTPUT_ROOT_PATH) / active_project_name)
+        self.OUTPUT_SUB_PROJECT_PATH = str(Path(self.OUTPUT_PROJECT_PATH) / self.SUB_PROJECT_NAME)
+        self.TEMP_PROJECT_PATH = str(Path(self.TEMP_PATH) / active_project_name)
+        self.TEMP_SUB_PROJECT_PATH = str(Path(self.TEMP_PROJECT_PATH) / self.SUB_PROJECT_NAME)
 
         self.DEM_PATH = str(Path(self.ESSENTIALS_PATH) / self.DEM_FILENAME)
         self.CROSS_SECTION_PATH = str(
@@ -400,29 +432,31 @@ class Config:
         """
         Resolves all important paths for one project/sub-project.
 
-        File lookup is intentionally wildcard-based. Passing
-        cross_section_stem="abc" searches for "abc*.csv"; leaving it blank
-        searches for "*KESIT_TESLIM*.csv". Bank lines behave the same way
-        with ".shp" files.
+        A sub-project is the direct folder at
+        ``1 Bur-Bur/<Project>/<Sub-Project>``. Data files are resolved by
+        recursively searching inside that sub-project folder for
+        ``*KESIT_TESLIM*.csv`` and ``*SEV_USTU*.shp``.
         """
         project_path = self.get_project_path(project_name)
         sub_project_path = self.get_sub_project_path(project_name, sub_project_name)
         hecras_project_path = self.get_hecras_project_path(project_name)
         hecras_sub_project_path = str(Path(hecras_project_path) / Path(sub_project_path).name)
-
-        cross_section_path = self.get_cross_section_folder_path(project_name, sub_project_name)
         cross_section_file_path = self.find_cross_section_file(
             project_name,
             sub_project_name,
             file_stem=cross_section_stem,
         )
+        cross_section_path = str(Path(cross_section_file_path).parent)
 
-        bank_line_path = self.get_bank_line_folder_path(project_name, sub_project_name)
         bank_line_file_path = self.find_bank_line_file(
             project_name,
             sub_project_name,
             file_stem=bank_line_stem,
         )
+        bank_line_path = str(Path(bank_line_file_path).parent)
+        gis_project_path = self.get_gis_project_path(project_name)
+        output_project_path = self.get_output_project_path(project_name)
+        temp_project_path = self.get_temp_project_path(project_name)
 
         return SubProjectPaths(
             project_name=Path(project_path).name,
@@ -431,6 +465,12 @@ class Config:
             sub_project_path=sub_project_path,
             hecras_project_path=hecras_project_path,
             hecras_sub_project_path=hecras_sub_project_path,
+            gis_project_path=gis_project_path,
+            gis_sub_project_path=str(Path(gis_project_path) / Path(sub_project_path).name),
+            output_project_path=output_project_path,
+            output_sub_project_path=str(Path(output_project_path) / Path(sub_project_path).name),
+            temp_project_path=temp_project_path,
+            temp_sub_project_path=str(Path(temp_project_path) / Path(sub_project_path).name),
             cross_section_path=cross_section_path,
             cross_section_file_path=cross_section_file_path,
             bank_line_path=bank_line_path,
@@ -465,6 +505,12 @@ class Config:
         self.PROJECT_DATA_PATH = paths.sub_project_path
         self.HEC_PROJECT_PATH = paths.hecras_project_path
         self.HEC_SUB_PROJECT_PATH = paths.hecras_sub_project_path
+        self.GIS_PROJECT_PATH = paths.gis_project_path
+        self.GIS_SUB_PROJECT_PATH = paths.gis_sub_project_path
+        self.OUTPUT_PROJECT_PATH = paths.output_project_path
+        self.OUTPUT_SUB_PROJECT_PATH = paths.output_sub_project_path
+        self.TEMP_PROJECT_PATH = paths.temp_project_path
+        self.TEMP_SUB_PROJECT_PATH = paths.temp_sub_project_path
 
         self.CROSS_SECTION_PATH = paths.cross_section_path
         self.CROSS_SECTION_FILE_PATH = paths.cross_section_file_path
@@ -473,7 +519,7 @@ class Config:
 
         self.PROJECT_LONG_NAME = self._project_long_name_from_file(paths.cross_section_file_path)
         self.PROJECT_SHORT_NAME = self._project_short_name_from_long_name(self.PROJECT_LONG_NAME)
-        self.OUTPUT_PATH = paths.hecras_sub_project_path if output_to_hecras else self.OUTPUT_ROOT_PATH
+        self.OUTPUT_PATH = paths.output_sub_project_path if output_to_hecras else paths.gis_sub_project_path
 
         return paths
 
@@ -487,13 +533,32 @@ class Config:
     def get_hecras_project_path(self, project_name: str) -> str:
         return str(self._resolve_child_directory(Path(self.HEC_PATH), project_name, create_fallback=True))
 
-    def get_cross_section_folder_path(self, project_name: str, sub_project_name: str) -> str:
+    def get_gis_project_path(self, project_name: str) -> str:
+        return str(self._resolve_child_directory(Path(self.GIS_PATH), project_name, create_fallback=True))
+
+    def get_gis_sub_project_path(self, project_name: str, sub_project_name: str) -> str:
         sub_project_path = Path(self.get_sub_project_path(project_name, sub_project_name))
-        return str(self._resolve_child_directory(sub_project_path, self.CROSS_SECTION_DIRNAME))
+        return str(Path(self.get_gis_project_path(project_name)) / sub_project_path.name)
+
+    def get_output_project_path(self, project_name: str) -> str:
+        return str(self._resolve_child_directory(Path(self.OUTPUT_ROOT_PATH), project_name, create_fallback=True))
+
+    def get_output_sub_project_path(self, project_name: str, sub_project_name: str) -> str:
+        sub_project_path = Path(self.get_sub_project_path(project_name, sub_project_name))
+        return str(Path(self.get_output_project_path(project_name)) / sub_project_path.name)
+
+    def get_temp_project_path(self, project_name: str) -> str:
+        return str(self._resolve_child_directory(Path(self.TEMP_PATH), project_name, create_fallback=True))
+
+    def get_temp_sub_project_path(self, project_name: str, sub_project_name: str) -> str:
+        sub_project_path = Path(self.get_sub_project_path(project_name, sub_project_name))
+        return str(Path(self.get_temp_project_path(project_name)) / sub_project_path.name)
+
+    def get_cross_section_folder_path(self, project_name: str, sub_project_name: str) -> str:
+        return str(Path(self.find_cross_section_file(project_name, sub_project_name)).parent)
 
     def get_bank_line_folder_path(self, project_name: str, sub_project_name: str) -> str:
-        sub_project_path = Path(self.get_sub_project_path(project_name, sub_project_name))
-        return str(self._resolve_child_directory(sub_project_path, self.BANK_LINE_DIRNAME))
+        return str(Path(self.find_bank_line_file(project_name, sub_project_name)).parent)
 
     def find_cross_section_file(
         self,
@@ -501,7 +566,7 @@ class Config:
         sub_project_name: str,
         file_stem: str | None = None,
     ) -> str:
-        folder = Path(self.get_cross_section_folder_path(project_name, sub_project_name))
+        folder = Path(self.get_sub_project_path(project_name, sub_project_name))
         return str(
             self._resolve_versioned_file(
                 folder=folder,
@@ -517,7 +582,7 @@ class Config:
         sub_project_name: str,
         file_stem: str | None = None,
     ) -> str:
-        folder = Path(self.get_bank_line_folder_path(project_name, sub_project_name))
+        folder = Path(self.get_sub_project_path(project_name, sub_project_name))
         return str(
             self._resolve_versioned_file(
                 folder=folder,
@@ -581,6 +646,12 @@ class Config:
             Path(self.PROJECT_DATA_PATH),
             Path(self.HEC_PROJECT_PATH),
             Path(self.HEC_SUB_PROJECT_PATH),
+            Path(self.GIS_PROJECT_PATH),
+            Path(self.GIS_SUB_PROJECT_PATH),
+            Path(self.OUTPUT_PROJECT_PATH),
+            Path(self.OUTPUT_SUB_PROJECT_PATH),
+            Path(self.TEMP_PROJECT_PATH),
+            Path(self.TEMP_SUB_PROJECT_PATH),
             Path(self.OUTPUT_PATH),
             Path(self.CROSS_SECTION_PATH),
             Path(self.BANK_LINE_PATH),
@@ -642,6 +713,16 @@ class Config:
             index = len(cls._default_top_level_names())
         return index, clean_name.upper()
 
+    def _looks_like_project_directory(self, path: Path) -> bool:
+        if not path.is_dir():
+            return False
+
+        ignored_names = {
+            self._normalize_name(name)
+            for name in self.IGNORED_PROJECT_FOLDER_NAMES
+        }
+        return self._normalize_name(path.name) not in ignored_names
+
     def _looks_like_sub_project_directory(self, path: Path) -> bool:
         if not path.is_dir():
             return False
@@ -649,11 +730,21 @@ class Config:
         if self._normalize_name(path.name).startswith(self._normalize_name("BUR-BUR-MER-")):
             return False
 
-        child_names = {self._normalize_name(child.name) for child in path.iterdir() if child.is_dir()}
         return (
-            self._normalize_name(self.CROSS_SECTION_DIRNAME) in child_names
-            or self._normalize_name(self.BANK_LINE_DIRNAME) in child_names
+            self._contains_recursive_file(path, self.CROSS_SECTION_DIRNAME, ".csv")
+            or self._contains_recursive_file(path, self.BANK_LINE_DIRNAME, ".shp")
         )
+
+    def _contains_recursive_file(self, root: Path, token: str, extension: str) -> bool:
+        clean_extension = extension if extension.startswith(".") else f".{extension}"
+        normalized_token = self._normalize_name(token)
+
+        for path in root.rglob("*"):
+            if path.is_file() and normalized_token in self._normalize_name(path.stem):
+                if path.suffix.lower() != clean_extension.lower():
+                    continue
+                return True
+        return False
 
     @staticmethod
     def _to_attr_name(parts: tuple[str, ...]) -> str:
@@ -766,40 +857,48 @@ class Config:
         clean_extension = extension if extension.startswith(".") else f".{extension}"
         clean_stem = self._clean_cell(file_stem or "")
 
+        pattern = f"*{default_contains}*{clean_extension}"
         if clean_stem:
             pattern = clean_stem if any(char in clean_stem for char in "*?") else f"{clean_stem}*"
             if Path(pattern).suffix == "":
                 pattern = f"{pattern}{clean_extension}"
-        else:
-            pattern = f"*{default_contains}*{clean_extension}"
 
         candidates = [
             path
-            for path in folder.glob(pattern)
+            for path in folder.rglob(pattern)
             if path.is_file() and path.suffix.lower() == clean_extension.lower()
         ]
 
+        normalized_stem = self._normalize_name(clean_stem)
+        normalized_contains = self._normalize_name(default_contains)
         if not candidates:
-            normalized_stem = self._normalize_name(clean_stem)
-            normalized_contains = self._normalize_name(default_contains)
             candidates = [
                 path
-                for path in folder.iterdir()
+                for path in folder.rglob("*")
                 if path.is_file()
                 and path.suffix.lower() == clean_extension.lower()
                 and (
-                    not clean_stem
-                    and normalized_contains in self._normalize_name(path.stem)
-                    or clean_stem
-                    and self._normalize_name(path.stem).startswith(normalized_stem)
+                    (
+                        not clean_stem
+                        and normalized_contains in self._normalize_name(path.stem)
+                    )
+                    or (
+                        clean_stem
+                        and self._normalize_name(path.stem).startswith(normalized_stem)
+                    )
                 )
             ]
 
         if candidates:
             return self._select_best_path(candidates)
 
+        expected = (
+            f"a {clean_extension} file containing {default_contains!r}"
+            if not clean_stem
+            else f"a {clean_extension} file matching {clean_stem!r}"
+        )
         raise FileNotFoundError(
-            f"Could not find a {clean_extension} file matching {pattern!r} inside {folder}"
+            f"Could not find {expected} anywhere inside sub-project folder: {folder}"
         )
 
     def _select_best_path(self, paths: list[Path]) -> Path:

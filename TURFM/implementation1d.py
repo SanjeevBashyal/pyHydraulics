@@ -170,7 +170,9 @@ def find_combined_bank_lines_shp(
 ) -> Path | None:
     project_root = Path(config.PROJECT_FOLDER)
     search_roots = [
+        Path(config.get_gis_project_path(main_model.project_name)),
         project_root / "working" / "fixed_shp",
+        Path(config.get_temp_project_path(main_model.project_name)),
         Path(config.TEMP_PATH),
         Path(main_model.paths.project_path),
     ]
@@ -202,14 +204,17 @@ def find_combined_bank_lines_shp(
 
 def find_reference_geometry(config: Config, project_name: str, preferred_stem: str) -> Path | None:
     hecras_project_path = Path(config.get_hecras_project_path(project_name))
+    output_project_path = Path(config.get_output_project_path(project_name))
     if USE_EXISTING_PROJECT_GEOMETRY_AS_REFERENCE:
-        preferred = hecras_project_path / f"{preferred_stem}.g01"
-        if preferred.exists():
-            return preferred
+        for root in (output_project_path, hecras_project_path):
+            preferred = root / f"{preferred_stem}.g01"
+            if preferred.exists():
+                return preferred
 
     for root in [
+        output_project_path / "self_example",
         hecras_project_path / "self_example",
-        Path(config.PROJECT_FOLDER) / "3 Hecras" / "self_example",
+        Path(config.PROJECT_FOLDER) / "2 Hecras" / "self_example",
     ]:
         if not root.is_dir():
             continue
@@ -231,7 +236,7 @@ def run_single_model(
     projection_file: Path,
     dry_run: bool,
 ) -> WorkflowResult:
-    output_folder = Path(model.paths.hecras_project_path)
+    output_folder = Path(model.paths.output_sub_project_path)
     kwargs = {
         "project_folder": output_folder,
         "project_stem": model.project_stem,
@@ -282,7 +287,7 @@ def run_junction_model(
     dry_run: bool,
     project_stem: str | None = None,
 ) -> WorkflowResult:
-    output_folder = Path(config.get_hecras_project_path(main_model.project_name))
+    output_folder = Path(config.get_output_project_path(main_model.project_name))
     output_stem = project_stem or main_model.project_name
     reference_geometry = find_reference_geometry(config, main_model.project_name, output_stem)
     if reference_geometry is not None:
@@ -436,7 +441,7 @@ def serializable_kwargs(kwargs: dict) -> dict:
 
 def write_summary(config: Config, results: list[WorkflowResult], dry_run: bool) -> Path:
     summary_name = "implementation1d_dry_run_summary.json" if dry_run else "implementation1d_summary.json"
-    summary_path = Path(config.HEC_PATH) / summary_name
+    summary_path = Path(config.TEMP_PATH) / summary_name
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(
         json.dumps([asdict(result) for result in results], indent=2, default=str),
@@ -480,6 +485,7 @@ def build_config(args: argparse.Namespace) -> Config:
         config.structure_source,
         config.PROJECT_FOLDER,
     )
+    config.setup_essential_directories()
     return config
 
 
@@ -522,7 +528,10 @@ def main() -> list[WorkflowResult]:
     )
 
     if not project_subprojects:
-        raise ValueError("No projects were selected from the Structure sheet.")
+        raise ValueError(
+            f"No projects were selected from the active structure source ({config.structure_source}). "
+            f"In folder mode, check that {Path(config.BUR_BUR_PATH)} contains project folders with sub-project folders."
+        )
 
     hydrology_kmz = find_essential_file(config, "Burdur Points.kmz", "*.kmz")
     projection_file = find_essential_file(config, "TUREF_CM30_projection.prj", "*.prj")

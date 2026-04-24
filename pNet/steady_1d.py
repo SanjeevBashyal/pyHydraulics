@@ -22,7 +22,7 @@ SOLVER_START_ROW = 43
 SOLVER_STEPS = 0
 TABLE_START_ROW = 42
 WRITE_CHUNK_ROWS = 160
-BOUNDARY_OPTIONS = ["Known WSE", "Known Depth", "Normal Depth", "Critical Depth", "None", "Spill End", "Spill Zero"]
+BOUNDARY_OPTIONS = ["Known WSE", "Known Depth", "Normal Depth", "Critical Depth", "Dead End", "Spill End", "Spill Zero"]
 
 TOTAL_Q_REF = "$D$5"
 N_REF = "$D$6"
@@ -177,7 +177,8 @@ def canonical_bc_type(value):
         "known depth": "Known Depth",
         "normal depth": "Normal Depth",
         "critical depth": "Critical Depth",
-        "none": "None",
+        "none": "Dead End",
+        "dead end": "Dead End",
         "spill end": "Spill End",
         "spill zero": "Spill Zero",
     }
@@ -496,7 +497,8 @@ def boundary_stage_formula(summary_row, end_label, type_ref, value_ref, q_ref):
         f'IF({type_ref}="Known Depth",({bed_ref})+({value_ref}),'
         f'IF({type_ref}="Normal Depth",({bed_ref})+({norm_depth}),'
         f'IF({type_ref}="Critical Depth",({bed_ref})+({crit_depth}),'
-        f'IF(OR({type_ref}="None",{type_ref}="Spill End",{type_ref}="Spill Zero"),({bed_ref})+{MIN_DEPTH_REF},'
+        f'IF(OR({type_ref}="Dead End",{type_ref}="None",{type_ref}="Spill End"),IF({value_ref}="",({bed_ref})+{MIN_DEPTH_REF},{value_ref}),'
+        f'IF({type_ref}="Spill Zero",({bed_ref})+{MIN_DEPTH_REF},'
         f'({bed_ref})+({norm_depth}))))))'
     )
 
@@ -536,6 +538,9 @@ def build_sheet():
     usexit_type_ref = a1(boundary_rows[boundary_label("UsExit", "end")], 14)
     forebay_type_ref = a1(boundary_rows[boundary_label("forebay", "end")], 14)
     side_type_ref = a1(boundary_rows[boundary_label("sidechannel", "end")], 14)
+    usexit_dead_end_cond = f'OR({usexit_type_ref}="Dead End",{usexit_type_ref}="None")'
+    forebay_dead_end_cond = f'OR({forebay_type_ref}="Dead End",{forebay_type_ref}="None")'
+    side_dead_end_cond = f'OR({side_type_ref}="Dead End",{side_type_ref}="None")'
 
     current_alpha1 = f"IFERROR({FINAL_ALPHA1_REF},{INIT_A1_REF})"
     current_alpha2 = f"IFERROR({FINAL_ALPHA2_REF},{INIT_A2_REF})"
@@ -565,13 +570,16 @@ def build_sheet():
     sc_start_ws_sub_ref = a1(side_start_row, TABLE_WSB)
     sc_start_m_sub_ref = a1(side_start_row, TABLE_MB)
     sc_start_ws_final_ref = a1(side_start_row, TABLE_WS)
+    usproject_done_ref = "$I$20"
+    waterway_done_ref = "$I$21"
+    usexit_done_ref = "$I$22"
+    forebay_done_ref = "$I$23"
+    side_done_ref = "$I$24"
+    j1_ready_ref = "$I$25"
+    j2_ready_ref = "$I$26"
 
-    j1_sub_stage_actual = (
-        f"IF(IFERROR({ue_start_m_sub_ref},-1E99)>=IFERROR({ww_start_m_sub_ref},-1E99),"
-        f"IFERROR({ue_start_ws_sub_ref},IFERROR({ww_start_ws_sub_ref},{INIT_J1_REF})),"
-        f"IFERROR({ww_start_ws_sub_ref},IFERROR({ue_start_ws_sub_ref},{INIT_J1_REF})))"
-    )
-    j1_sub_force_actual = f"MAX(IFERROR({ww_start_m_sub_ref},-1E99),IFERROR({ue_start_m_sub_ref},-1E99))"
+    j1_sub_stage_actual = f"IFERROR({ww_start_ws_sub_ref},{INIT_J1_REF})"
+    j1_sub_force_actual = f"IFERROR({ww_start_m_sub_ref},-1E99)"
     j1_super_stage_actual = f"IFERROR({us_end_ws_super_ref},{INIT_J1_REF})"
     j1_super_force_actual = f"IFERROR({us_end_m_super_ref},-1E99)"
     j1_target_actual = f"IF(({j1_super_force_actual})>=({j1_sub_force_actual}),({j1_super_stage_actual}),({j1_sub_stage_actual}))"
@@ -639,14 +647,14 @@ def build_sheet():
     set_cell(grid, 6, 9, 998.2)
     set_cell(grid, 7, 7, "Allowed BC types")
     set_cell(grid, 7, 8, "-")
-    set_cell(grid, 7, 9, "Known WSE / Known Depth / Normal Depth / Critical Depth / None / Spill End / Spill Zero")
+    set_cell(grid, 7, 9, "Known WSE / Known Depth / Normal Depth / Critical Depth / Dead End / Spill End / Spill Zero")
     set_cell(grid, 11, 7, "Final alpha J1")
     set_cell(grid, 11, 8, "-")
     set_cell(
         grid,
         11,
         9,
-        f'=IF({RESET_REF}=0,{current_alpha1},IF({usexit_type_ref}="None",'
+        f'=IF({RESET_REF}=0,{current_alpha1},IF({usexit_dead_end_cond},'
         f'MIN(0.98,MAX(0.02,MAX(0,1-({usexit_summary_q_ref}/MAX({TOTAL_Q_REF},1E-6))))),'
         f'MIN(0.98,MAX(0.02,{current_alpha1}+({SPLIT_RELAX_REF}*(({j1_branch_stage_delta})/MAX(ABS({FINAL_J1_REF}),1)))))))',
     )
@@ -657,10 +665,10 @@ def build_sheet():
         12,
         9,
         f'=IF({RESET_REF}=0,{current_alpha2},'
-        f'IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),'
+        f'IF(AND({forebay_dead_end_cond},{side_dead_end_cond}),'
         f'MIN(0.98,MAX(0.02,IFERROR({forebay_summary_q_ref}/MAX({waterway_summary_q_ref},1E-6),{current_alpha2}))),'
-        f'IF({side_type_ref}="None",1,'
-        f'IF({forebay_type_ref}="None",0,'
+        f'IF({side_dead_end_cond},1,'
+        f'IF({forebay_dead_end_cond},0,'
         f'MIN(0.98,MAX(0.02,{current_alpha2}+({SPLIT_RELAX_REF}*(({j2_branch_stage_delta})/MAX(ABS({FINAL_J2_REF}),1)))))))))',
     )
     set_cell(grid, 13, 7, "Final J1 WSE")
@@ -670,8 +678,8 @@ def build_sheet():
         13,
         9,
         f'=IF({RESET_REF}=0,{current_j1},'
-        f'IF(ABS({j1_error_actual})<{PROFILE_TOL_REF},({current_j1}),'
-        f'MAX(({j1_bed_ref})+{MIN_DEPTH_REF},({current_j1})+({STAGE_RELAX_REF}*({j1_error_actual}))))))',
+        f'IF(ABS($I$16)<{PROFILE_TOL_REF},({current_j1}),'
+        f'MAX(({j1_bed_ref})+{MIN_DEPTH_REF},({current_j1})+({STAGE_RELAX_REF}*$I$16))))',
     )
     set_cell(grid, 14, 7, "Final J2 WSE")
     set_cell(grid, 14, 8, "m")
@@ -680,18 +688,45 @@ def build_sheet():
         14,
         9,
         f'=IF({RESET_REF}=0,{current_j2},'
-        f'IF(ABS({j2_error_actual})<{PROFILE_TOL_REF},({current_j2}),'
-        f'MAX(({j2_bed_ref})+{MIN_DEPTH_REF},({current_j2})+({STAGE_RELAX_REF}*({j2_error_actual}))))))',
+        f'IF(ABS($I$17)<{PROFILE_TOL_REF},({current_j2}),'
+        f'MAX(({j2_bed_ref})+{MIN_DEPTH_REF},({current_j2})+({STAGE_RELAX_REF}*$I$17))))',
     )
     set_cell(grid, 15, 7, "Total spill to drain")
     set_cell(grid, 15, 8, "m3/s")
     set_cell(grid, 15, 9, f"=IFERROR(N{summary_rows['drain']},0)")
     set_cell(grid, 16, 7, "J1 junction error")
     set_cell(grid, 16, 8, "m")
-    set_cell(grid, 16, 9, f"=IFERROR({j1_error_actual},0)")
+    set_cell(grid, 16, 9, f"=IFERROR($I$18-IFERROR($I$13,$D$21),0)")
     set_cell(grid, 17, 7, "J2 junction error")
     set_cell(grid, 17, 8, "m")
-    set_cell(grid, 17, 9, f"=IFERROR({j2_error_actual},0)")
+    set_cell(grid, 17, 9, f"=IFERROR($I$19-IFERROR($I$14,$D$22),0)")
+    set_cell(grid, 18, 7, "J1 target WSE")
+    set_cell(grid, 18, 8, "m")
+    set_cell(grid, 18, 9, f"=IF({j1_ready_ref}=0,{current_j1},IFERROR({j1_target_actual},{INIT_J1_REF}))")
+    set_cell(grid, 19, 7, "J2 target WSE")
+    set_cell(grid, 19, 8, "m")
+    set_cell(grid, 19, 9, f"=IF({j2_ready_ref}=0,{current_j2},IFERROR({j2_target_actual},{INIT_J2_REF}))")
+    set_cell(grid, 20, 7, "UsProject done")
+    set_cell(grid, 20, 8, "-")
+    set_cell(grid, 20, 9, f"=IFERROR(MIN(V{segment_table_rows['UsProject']['data_start']}:V{segment_table_rows['UsProject']['data_end']},AG{segment_table_rows['UsProject']['data_start']}:AG{segment_table_rows['UsProject']['data_end']}),0)")
+    set_cell(grid, 21, 7, "waterway done")
+    set_cell(grid, 21, 8, "-")
+    set_cell(grid, 21, 9, f"=IFERROR(MIN(V{segment_table_rows['waterway']['data_start']}:V{segment_table_rows['waterway']['data_end']},AG{segment_table_rows['waterway']['data_start']}:AG{segment_table_rows['waterway']['data_end']}),0)")
+    set_cell(grid, 22, 7, "UsExit done")
+    set_cell(grid, 22, 8, "-")
+    set_cell(grid, 22, 9, f"=IFERROR(MIN(V{segment_table_rows['UsExit']['data_start']}:V{segment_table_rows['UsExit']['data_end']},AG{segment_table_rows['UsExit']['data_start']}:AG{segment_table_rows['UsExit']['data_end']}),0)")
+    set_cell(grid, 23, 7, "forebay done")
+    set_cell(grid, 23, 8, "-")
+    set_cell(grid, 23, 9, f"=IFERROR(MIN(V{segment_table_rows['forebay']['data_start']}:V{segment_table_rows['forebay']['data_end']},AG{segment_table_rows['forebay']['data_start']}:AG{segment_table_rows['forebay']['data_end']}),0)")
+    set_cell(grid, 24, 7, "sidechannel done")
+    set_cell(grid, 24, 8, "-")
+    set_cell(grid, 24, 9, f"=IFERROR(MIN(V{segment_table_rows['sidechannel']['data_start']}:V{segment_table_rows['sidechannel']['data_end']},AG{segment_table_rows['sidechannel']['data_start']}:AG{segment_table_rows['sidechannel']['data_end']}),0)")
+    set_cell(grid, 25, 7, "J1 ready")
+    set_cell(grid, 25, 8, "-")
+    set_cell(grid, 25, 9, f"=IFERROR(MIN({usproject_done_ref},{waterway_done_ref},{usexit_done_ref}),0)")
+    set_cell(grid, 26, 7, "J2 ready")
+    set_cell(grid, 26, 8, "-")
+    set_cell(grid, 26, 9, f"=IFERROR(MIN({waterway_done_ref},{forebay_done_ref},{side_done_ref}),0)")
 
     for col_idx, title in enumerate(["Boundary", "Segment", "End", "Type", "Value", "Resolved Stage", "Remarks"], start=11):
         set_cell(grid, 4, col_idx, title)
@@ -761,17 +796,17 @@ def build_sheet():
 
     qin_formulas = {
         "UsProject": f"={TOTAL_Q_REF}",
-        "waterway": f'=IF({usexit_type_ref}="None",MAX(0,{TOTAL_Q_REF}-N{usexit_row}),{TOTAL_Q_REF}*{FINAL_ALPHA1_REF})',
-        "UsExit": f'=IF({usexit_type_ref}="None",{usexit_closed_q_expr},MAX(0,{TOTAL_Q_REF}-N{waterway_row}))',
+        "waterway": f'=IF({usexit_dead_end_cond},MAX(0,{TOTAL_Q_REF}-N{usexit_row}),{TOTAL_Q_REF}*{FINAL_ALPHA1_REF})',
+        "UsExit": f'=IF({usexit_dead_end_cond},{usexit_closed_q_expr},MAX(0,{TOTAL_Q_REF}-N{waterway_row}))',
         "forebay": (
-            f'=IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),MAX(0,N{waterway_row}*{FINAL_ALPHA2_REF}),'
-            f'IF({forebay_type_ref}="None",{forebay_closed_q_expr},'
-            f'IF({side_type_ref}="None",MAX(0,N{waterway_row}-N{side_row}),N{waterway_row}*{FINAL_ALPHA2_REF})))'
+            f'=IF(AND({forebay_dead_end_cond},{side_dead_end_cond}),MAX(0,N{waterway_row}*{FINAL_ALPHA2_REF}),'
+            f'IF({forebay_dead_end_cond},{forebay_closed_q_expr},'
+            f'IF({side_dead_end_cond},MAX(0,N{waterway_row}-N{side_row}),N{waterway_row}*{FINAL_ALPHA2_REF})))'
         ),
         "sidechannel": (
-            f'=IF(AND({forebay_type_ref}="None",{side_type_ref}="None"),MAX(0,N{waterway_row}-N{forebay_row}),'
-            f'IF({side_type_ref}="None",{side_closed_q_expr},'
-            f'IF({forebay_type_ref}="None",MAX(0,N{waterway_row}-N{forebay_row}),MAX(0,N{waterway_row}-N{forebay_row}))))'
+            f'=IF(AND({forebay_dead_end_cond},{side_dead_end_cond}),MAX(0,N{waterway_row}-N{forebay_row}),'
+            f'IF({side_dead_end_cond},{side_closed_q_expr},'
+            f'IF({forebay_dead_end_cond},MAX(0,N{waterway_row}-N{forebay_row}),MAX(0,N{waterway_row}-N{forebay_row}))))'
         ),
         "drain": f"=O{forebay_row}+O{side_row}",
     }
@@ -958,21 +993,48 @@ def build_sheet():
         if seg["to_node"].lower() != "outlet":
             continue
         end_bc_type = default_boundary_type(seg, "end")
-        if end_bc_type not in {"None", "Spill End"}:
+        if end_bc_type not in {"Dead End", "None", "Spill End"}:
             continue
         boundary_row = boundary_rows[boundary_label(seg["name"], "end")]
         start_stage = stage_inputs[seg["name"]]["start"]
-        has_branch_spill = bool(seg["df"]["SpillLeftOn"].any() or seg["df"]["SpillRightOn"].any())
-        if end_bc_type == "None":
-            if has_branch_spill:
-                set_cell(grid, boundary_row, 16, f"=IFERROR({a1(summary_rows[seg['name']], SUM_WS1)},{start_stage})")
-                set_cell(grid, boundary_row, 17, "Closed outlet with lateral spill; resolved stage follows the computed branch profile")
-            else:
-                set_cell(grid, boundary_row, 16, f"={start_stage}")
-                set_cell(grid, boundary_row, 17, "Closed outlet; resolved stage pools to the connected junction water surface")
+        seed_stage = f'IF({a1(boundary_row,15)}="",{start_stage},{a1(boundary_row,15)})'
+        if seg["name"] == "UsExit":
+            branch_start_ws_sub_ref = ue_start_ws_sub_ref
+            junction_stage_ref = FINAL_J1_REF
+            ready_ref = j1_ready_ref
+        elif seg["name"] == "forebay":
+            branch_start_ws_sub_ref = fb_start_ws_sub_ref
+            junction_stage_ref = FINAL_J2_REF
+            ready_ref = j2_ready_ref
         else:
-            set_cell(grid, boundary_row, 16, f"=IFERROR({a1(summary_rows[seg['name']], SUM_WS1)},{start_stage})")
-            set_cell(grid, boundary_row, 17, "Spill End outlet; resolved stage follows the computed branch profile while the outlet pilot flow is held at 0.05")
+            branch_start_ws_sub_ref = sc_start_ws_sub_ref
+            junction_stage_ref = FINAL_J2_REF
+            ready_ref = j2_ready_ref
+        branch_mismatch = f"(({junction_stage_ref})-IFERROR({branch_start_ws_sub_ref},{junction_stage_ref}))"
+        if end_bc_type in {"Dead End", "None"}:
+            set_cell(
+                grid,
+                boundary_row,
+                16,
+                f"=IF({RESET_REF}=0,IFERROR(P{boundary_row},{seed_stage}),"
+                f"IF({ready_ref}=0,IFERROR(P{boundary_row},{seed_stage}),"
+                f"IF(({branch_mismatch})>{PROFILE_TOL_REF},"
+                f"MAX(({seed_stage}),IFERROR(P{boundary_row},{seed_stage})+({STAGE_RELAX_REF}*({branch_mismatch}))),"
+                f"IFERROR(P{boundary_row},{seed_stage}))))",
+            )
+            set_cell(grid, boundary_row, 17, "Dead End outlet; start from the master WSE and only raise the downstream stage until the branch backwater meets the solved junction stage.")
+        else:
+            bed_ref = a1(summary_rows[seg["name"]], SUM_BED1)
+            set_cell(
+                grid,
+                boundary_row,
+                16,
+                f"=IF({RESET_REF}=0,IFERROR(P{boundary_row},{seed_stage}),"
+                f"IF({ready_ref}=0,IFERROR(P{boundary_row},{seed_stage}),"
+                f"IF(ABS({branch_mismatch})<{PROFILE_TOL_REF},IFERROR(P{boundary_row},{seed_stage}),"
+                f"MAX(({bed_ref})+{MIN_DEPTH_REF},IFERROR(P{boundary_row},{seed_stage})+({STAGE_RELAX_REF}*({branch_mismatch}))))))",
+            )
+            set_cell(grid, boundary_row, 17, "Spill End outlet; start from the master WSE, relax spill from zero, then adjust the downstream stage up or down until the branch backwater matches the solved junction stage.")
 
     table_headers = [
         "SN", "Dist", "Easting", "Northing", "Bed Z", "Width", "Side z", "Type", "Def Ang", "dx",
@@ -1000,7 +1062,7 @@ def build_sheet():
         end_bc_type = default_boundary_type(seg, "end")
         start_bc_type = default_boundary_type(seg, "start")
         is_spill_end_bc = end_bc_type == "Spill End"
-        is_closed_bc = end_bc_type == "None" and seg["to_node"].lower() == "outlet"
+        is_closed_bc = end_bc_type in {"Dead End", "None"} and seg["to_node"].lower() == "outlet"
         is_spill_zero_bc = start_bc_type == "Spill Zero" and seg["from_node"].lower() == "inlet"
         has_lateral_spill = bool(
             seg["df"]["SpillLeftOn"].any()
@@ -1010,8 +1072,6 @@ def build_sheet():
             (has_lateral_spill or is_spill_end_bc)
             and not is_closed_bc
         )
-        if is_closed_bc and not has_lateral_spill:
-            end_stage_expr = start_stage_expr
         q_floor_expr = dead_end_pilot_q if (is_closed_bc or is_spill_end_bc) else ("0.001" if uses_spill_pilot_flow else "0")
 
         set_cell(grid, rows["title"], 1, f"Segment: {seg['name']}")
@@ -1306,13 +1366,13 @@ def build_sheet():
             terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J1_REF, FINAL_J2_REF, seg["junction_delta"], a1(usexit_row, SUM_QIN), TOTAL_Q_REF)
             set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
         elif seg["name"] == "UsExit":
-            terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J1_REF, f'IF({usexit_type_ref}="None",{FINAL_J1_REF},{usexit_stage_ref})', seg["junction_delta"], a1(waterway_row, SUM_QIN), TOTAL_Q_REF)
+            terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J1_REF, f'IF({usexit_dead_end_cond},{usexit_stage_ref},{usexit_stage_ref})', seg["junction_delta"], a1(waterway_row, SUM_QIN), TOTAL_Q_REF)
             set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
         elif seg["name"] == "forebay":
-            terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J2_REF, f'IF({forebay_type_ref}="None",{FINAL_J2_REF},{forebay_stage_ref})', seg["junction_delta"], a1(side_row, SUM_QIN), a1(waterway_row, SUM_QIN))
+            terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J2_REF, forebay_stage_ref, seg["junction_delta"], a1(side_row, SUM_QIN), a1(waterway_row, SUM_QIN))
             set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
         elif seg["name"] == "sidechannel":
-            terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J2_REF, f'IF({side_type_ref}="None",{FINAL_J2_REF},{side_stage_ref})', seg["junction_delta"], a1(forebay_row, SUM_QIN), a1(waterway_row, SUM_QIN))
+            terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J2_REF, side_stage_ref, seg["junction_delta"], a1(forebay_row, SUM_QIN), a1(waterway_row, SUM_QIN))
             set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
         else:
             set_cell(grid, row, SUM_HJ, 0)
@@ -1382,7 +1442,7 @@ def apply_excel_layout(ws, total_cols):
     solver_fill = fill_rgb(0.93, 0.96, 0.99)
 
     apply_fill(ws, 1, 1, 1, 9, title_fill, bold=True, font_size=14)
-    apply_fill(ws, 4, 25, 2, 4, panel_fill)
+    apply_fill(ws, 4, 26, 2, 4, panel_fill)
     apply_fill(ws, 4, 20, 11, 17, boundary_fill, bold=True)
     apply_fill(ws, SUMMARY_HEADER_ROW, SUMMARY_HEADER_ROW, 1, 24, summary_fill, bold=True)
     if SOLVER_STEPS > 0:

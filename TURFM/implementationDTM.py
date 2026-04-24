@@ -54,6 +54,7 @@ def build_config(args: argparse.Namespace) -> Config:
         sheet_name=sheet_name,
     )
     config.BLEND_TYPE = BLEND_TYPE
+    config.setup_essential_directories()
     return config
 
 

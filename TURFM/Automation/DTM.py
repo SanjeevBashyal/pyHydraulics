@@ -831,6 +831,7 @@ class DTMChannelModifier:
         merged_banks_output_path=None,
         perimeter_output_path=None,
         perimeter_offset_m=500.0,
+        intermediate_output_dir=None,
     ):
         """
         Builds a junction-aware channel terrain for one river system.
@@ -855,7 +856,11 @@ class DTMChannelModifier:
             buffer_m=buffer_m,
         )
 
-        intermediate_dir = output_tif_path.parent / "intermediate_channel_tifs"
+        intermediate_dir = (
+            Path(intermediate_output_dir)
+            if intermediate_output_dir is not None
+            else output_tif_path.parent / "intermediate_channel_tifs"
+        )
         if write_intermediate:
             intermediate_dir.mkdir(parents=True, exist_ok=True)
 

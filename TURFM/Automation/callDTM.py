@@ -57,8 +57,10 @@ class DTM:
         write_intermediate=True,
     ):
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
-        output_dir = Path(self.config.get_hecras_project_path(project_name)) / "DTM"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        gis_output_dir = Path(self.config.get_gis_project_path(project_name)) / "DTM"
+        temp_output_dir = Path(self.config.get_temp_project_path(project_name)) / "DTM"
+        gis_output_dir.mkdir(parents=True, exist_ok=True)
+        temp_output_dir.mkdir(parents=True, exist_ok=True)
         resolved_blend_type = blend_type or self.config.BLEND_TYPE
 
         terrain_stem = (
@@ -71,7 +73,7 @@ class DTM:
         return DTMChannelModifier.process_channel_network_dtm(
             dtm_path=self.config.DEM_PATH,
             channel_inputs=channel_inputs,
-            output_tif_path=output_dir / f"{terrain_stem}.tif",
+            output_tif_path=gis_output_dir / f"{terrain_stem}.tif",
             target_res=target_res,
             buffer_m=buffer_m,
             blend_type=resolved_blend_type,
@@ -80,10 +82,11 @@ class DTM:
             transition_to_dtm_distance_m=transition_to_dtm_distance_m,
             junction_tolerance=junction_tolerance,
             write_intermediate=write_intermediate,
-            centerline_output_path=output_dir / f"{project_name}_Centerlines.shp",
-            merged_banks_output_path=output_dir / f"{project_name}_Merged_Banks.shp",
-            perimeter_output_path=output_dir / f"{project_name}_Study_Perimeter.shp",
+            centerline_output_path=gis_output_dir / f"{project_name}_Centerlines.shp",
+            merged_banks_output_path=gis_output_dir / f"{project_name}_Merged_Banks.shp",
+            perimeter_output_path=gis_output_dir / f"{project_name}_Study_Perimeter.shp",
             perimeter_offset_m=perimeter_offset_m,
+            intermediate_output_dir=temp_output_dir / "intermediate_channel_tifs",
         )
 
     def process_structure_projects(
@@ -111,7 +114,10 @@ class DTM:
             }
 
         if not project_subprojects:
-            raise ValueError("No projects were selected from the Structure sheet.")
+            raise ValueError(
+                f"No projects were selected from the active structure source ({self.config.structure_source}). "
+                f"In folder mode, check that {Path(self.config.BUR_BUR_PATH)} contains project folders with sub-project folders."
+            )
 
         results = []
         for project_name, sub_project_names in project_subprojects.items():
@@ -131,7 +137,7 @@ class DTM:
                 )
             )
 
-        summary_path = Path(self.config.HEC_PATH) / "implementationDTM_summary.json"
+        summary_path = Path(self.config.TEMP_PATH) / "implementationDTM_summary.json"
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
         print(f"\nDTM summary written to: {summary_path}")
@@ -152,7 +158,7 @@ class DTM:
         resolved_blend_type = blend_type or self.config.BLEND_TYPE
         print(f"--- STEP 1: Generating Interpolated DTM Channel Terrain ('{resolved_blend_type}' fade) ---")
 
-        output_dir = Path(self.config.OUTPUT_PATH)
+        output_dir = Path(getattr(self.config, "GIS_SUB_PROJECT_PATH", self.config.OUTPUT_PATH)) / "DTM"
         output_dir.mkdir(parents=True, exist_ok=True)
         blended_tif_path = output_dir / f"terrain_blended_window_{resolved_blend_type}.tif"
 
@@ -199,7 +205,7 @@ class DTM:
         Generates and exports the river centerline shapefile for the active sub-project.
         """
         print("--- STEP 2: Generating River Centerline ---")
-        centerline_shp = Path(self.config.OUTPUT_PATH) / output_filename
+        centerline_shp = Path(getattr(self.config, "GIS_SUB_PROJECT_PATH", self.config.OUTPUT_PATH)) / output_filename
         centerline_shp.parent.mkdir(parents=True, exist_ok=True)
         DTMChannelModifier.export_centerline_shapefile(self.config.BANK_LINE_FILE_PATH, str(centerline_shp))
         return str(centerline_shp)
@@ -209,7 +215,7 @@ class DTM:
         Generates active sub-project bank lines with outward offset.
         """
         print(f"--- STEP 3: Generating Bank Lines (Offset: {offset_m}m) ---")
-        offset_bank_shp = Path(self.config.OUTPUT_PATH) / output_filename
+        offset_bank_shp = Path(getattr(self.config, "GIS_SUB_PROJECT_PATH", self.config.OUTPUT_PATH)) / output_filename
         offset_bank_shp.parent.mkdir(parents=True, exist_ok=True)
         DTMChannelModifier.export_offset_bank_shapefile(self.config.BANK_LINE_FILE_PATH, offset_m, str(offset_bank_shp))
         return str(offset_bank_shp)
@@ -219,7 +225,7 @@ class DTM:
         Generates the active sub-project study perimeter polygon.
         """
         print(f"--- STEP 4: Generating Study Perimeter (Offset: {offset_m}m) ---")
-        perimeter_shp = Path(self.config.OUTPUT_PATH) / output_filename
+        perimeter_shp = Path(getattr(self.config, "GIS_SUB_PROJECT_PATH", self.config.OUTPUT_PATH)) / output_filename
         perimeter_shp.parent.mkdir(parents=True, exist_ok=True)
         DTMChannelModifier.export_study_perimeter(self.config.BANK_LINE_FILE_PATH, str(perimeter_shp), offset_m)
         return str(perimeter_shp)
