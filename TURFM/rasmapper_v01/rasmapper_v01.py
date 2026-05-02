@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, fields
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -59,6 +61,7 @@ from ras_commander.gui.workflows.mesh_regeneration import MeshRegenerationWorkfl
 
 
 DEFAULT_WORKING_ROOT = WORKSPACE_ROOT / "projects"
+DEFAULT_RESULTS_ROOT = WORKSPACE_ROOT / "results"
 DEFAULT_FILES_ROOT = WORKSPACE_ROOT / "inputs"
 DEFAULT_RAS_EXE = Path(
     r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\Ras.exe"
@@ -92,18 +95,28 @@ class CrossSectionInfo:
 
 
 @dataclass(frozen=True)
+class CrossSectionGroup:
+    name: str
+    source_path: Path
+    copy_path: Path
+    sections: List[CrossSectionInfo]
+
+
+@dataclass(frozen=True)
 class RasMapperConfig:
     files_root: Path
     working_root: Path
     project_name: str
     ras_exe: Path
     gdal_grid_exe: Path
+    results_root: Path = DEFAULT_RESULTS_ROOT
     projection_name: str = "projection.prj"
     dtm_name: str = "terrain.tif"
     perimeter_name: str = "perimeter.shp"
     breakline_name: str = "breaklines.shp"
     dss_name: str = "boundary.dss"
-    cross_section_name: str = "cross_sections.csv"
+    cross_section_name: Any = "cross_sections.csv"
+    junction_bc_csv_name: Optional[str] = None
     landcover_name: str = "landcover.shp"
     existing_landcover_tif_name: Optional[str] = None
     existing_landcover_hdf_name: Optional[str] = None
@@ -126,6 +139,53 @@ class RasMapperConfig:
     preferred_dss_a_part: str = "A_PART"
     preferred_dss_f_part: str = "Q100"
     downstream_bc_method: str = "Normal Depth"
+    junction_bc_name: str = "junction BC"
+    junction_snap_tolerance: float = 100.0
+    branch_connectivity_threshold: float = 0.25
+    unsteady_number: str = "01"
+    plan_number: str = "01"
+    template_unsteady_name: Optional[str] = None
+    template_unsteady_hdf_name: Optional[str] = None
+    template_plan_name: Optional[str] = None
+    unsteady_title: str = "Unsteady Flow"
+    plan_title: str = "2D Unsteady Plan"
+    plan_short_identifier: str = "2D_Unsteady"
+    plan_flow_regime: str = "Mixed Flow"
+    plan_simulation_date: str = ",,,"
+    auto_plan_simulation_date: bool = True
+    simulation_start_time: str = "0000"
+    simulation_duration_hours: float = 24.0
+    simulation_start_offset_hours: float = 0.0
+    simulation_end_offset_hours: float = 0.0
+    plan_computation_interval: str = "6SEC"
+    plan_hydrograph_output_interval: Optional[str] = "5MIN"
+    plan_output_interval: str = "5MIN"
+    plan_detailed_output_interval: Optional[str] = "5MIN"
+    plan_instantaneous_interval: str = "5MIN"
+    plan_mapping_interval: str = "5MIN"
+    plan_use_courant_timestep: bool = True
+    plan_use_time_series_timestep: bool = False
+    plan_max_courant: float = 1.0
+    plan_min_courant: float = 0.45
+    plan_steps_below_min_before_doubling: int = 4
+    plan_max_doubling_base_timestep: int = 2
+    plan_max_halving_base_timestep: int = 2
+    plan_residence_courant: float = 0.0
+    plan_run_htab: bool = True
+    plan_run_unet: bool = True
+    plan_run_postprocess: bool = False
+    plan_run_rasmapper: bool = True
+    plan_num_cores: int = 0
+    upstream_bc_name: str = "upstream BC"
+    downstream_bc_name: str = "downstream BC"
+    upstream_flow_interval: str = "1HOUR"
+    upstream_flow_hydrograph_slope: float = 0.05
+    downstream_friction_slope: Optional[float] = None
+    unsteady_dss_file_relative: Optional[str] = None
+    compute_timeout_seconds: int = 7200
+    auto_confirm_geometry_preprocessor: bool = True
+    auto_adjust_simulation_window_from_dss: bool = True
+    copy_compute_results_to_project: bool = True
 
     @property
     def project_root(self) -> Path:
@@ -134,6 +194,13 @@ class RasMapperConfig:
     @property
     def project_file(self) -> Path:
         return self.project_root / f"{self.project_name}.prj"
+
+    @property
+    def default_compute_output_dir(self) -> Path:
+        return (
+            self.results_root
+            / f"{self.project_name}_plan{self.plan_id}_run"
+        ).resolve()
 
     @property
     def rasmap_path(self) -> Path:
@@ -173,7 +240,7 @@ class RasMapperConfig:
 
     @property
     def projection_copy(self) -> Path:
-        return self.terrain_dir / self.projection_name
+        return self.terrain_dir / Path(self.projection_name).name
 
     @property
     def dtm_src(self) -> Path:
@@ -197,7 +264,20 @@ class RasMapperConfig:
 
     @property
     def cross_section_src(self) -> Path:
-        return self.files_root / self.cross_section_name
+        return self.cross_section_srcs[0]
+
+    @property
+    def cross_section_srcs(self) -> List[Path]:
+        return [
+            _source_path(self.files_root, name)
+            for name in _as_config_list(self.cross_section_name)
+        ]
+
+    @property
+    def junction_bc_csv_src(self) -> Optional[Path]:
+        if not self.junction_bc_csv_name:
+            return None
+        return _source_path(self.files_root, self.junction_bc_csv_name)
 
     @property
     def landcover_src(self) -> Path:
@@ -212,20 +292,38 @@ class RasMapperConfig:
         return self.files_root / self.reference_geom_hdf_name
 
     @property
+    def template_unsteady_src(self) -> Optional[Path]:
+        if not self.template_unsteady_name:
+            return None
+        return _source_path(self.files_root, self.template_unsteady_name)
+
+    @property
+    def template_unsteady_hdf_src(self) -> Optional[Path]:
+        if not self.template_unsteady_hdf_name:
+            return None
+        return _source_path(self.files_root, self.template_unsteady_hdf_name)
+
+    @property
+    def template_plan_src(self) -> Optional[Path]:
+        if not self.template_plan_name:
+            return None
+        return _source_path(self.files_root, self.template_plan_name)
+
+    @property
     def perimeter_copy(self) -> Path:
-        return self.inputs_dir / "Perimeter" / self.perimeter_name
+        return self.inputs_dir / "Perimeter" / Path(self.perimeter_name).name
 
     @property
     def breakline_copy(self) -> Path:
-        return self.inputs_dir / "Breaklines" / self.breakline_name
+        return self.inputs_dir / "Breaklines" / Path(self.breakline_name).name
 
     @property
     def landcover_copy(self) -> Path:
-        return self.inputs_dir / "LandCover" / self.landcover_name
+        return self.inputs_dir / "LandCover" / Path(self.landcover_name).name
 
     @property
     def dss_copy(self) -> Path:
-        return self.boundary_dir / self.dss_name
+        return self.boundary_dir / Path(self.dss_name).name
 
     @property
     def dss_catalog_copy(self) -> Path:
@@ -233,7 +331,20 @@ class RasMapperConfig:
 
     @property
     def cross_section_copy(self) -> Path:
-        return self.boundary_dir / self.cross_section_name
+        return self.cross_section_copies[0]
+
+    @property
+    def cross_section_copies(self) -> List[Path]:
+        return [
+            self.boundary_dir / "CrossSections" / Path(name).name
+            for name in _as_config_list(self.cross_section_name)
+        ]
+
+    @property
+    def junction_bc_csv_copy(self) -> Optional[Path]:
+        if not self.junction_bc_csv_src:
+            return None
+        return self.boundary_dir / Path(self.junction_bc_csv_src).name
 
     @property
     def terrain_hdf(self) -> Path:
@@ -246,6 +357,32 @@ class RasMapperConfig:
     @property
     def geom_hdf_path(self) -> Path:
         return self.project_root / f"{self.project_name}.g01.hdf"
+
+    @property
+    def unsteady_id(self) -> str:
+        value = str(self.unsteady_number).lower()
+        if value.startswith("u"):
+            value = value[1:]
+        return value.zfill(2)
+
+    @property
+    def plan_id(self) -> str:
+        value = str(self.plan_number).lower()
+        if value.startswith("p"):
+            value = value[1:]
+        return value.zfill(2)
+
+    @property
+    def unsteady_path(self) -> Path:
+        return self.project_root / f"{self.project_name}.u{self.unsteady_id}"
+
+    @property
+    def unsteady_hdf_path(self) -> Path:
+        return self.project_root / f"{self.project_name}.u{self.unsteady_id}.hdf"
+
+    @property
+    def plan_path(self) -> Path:
+        return self.project_root / f"{self.project_name}.p{self.plan_id}"
 
     @property
     def landcover_raster(self) -> Path:
@@ -331,6 +468,10 @@ class RasMapperConfig:
         return self.reports_dir / "mesh_enforcement_summary.json"
 
     @property
+    def unsteady_plan_summary_json(self) -> Path:
+        return self.reports_dir / "unsteady_plan_summary.json"
+
+    @property
     def dss_catalog_csv(self) -> Path:
         return self.boundary_dir / "dss_catalog.csv"
 
@@ -367,6 +508,10 @@ class RasMapperConfig:
         return self.reports_dir / "prepare_summary.json"
 
     @property
+    def compute_summary_json(self) -> Path:
+        return self.reports_dir / "compute_summary.json"
+
+    @property
     def hecras_version(self) -> str:
         return self.ras_exe.parent.name
 
@@ -385,6 +530,8 @@ def _normalize_code(value: Any) -> str:
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, dict):
@@ -399,6 +546,21 @@ def _resolve_config_path(config_json: Path, raw_value: str) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (config_json.parent / path).resolve()
+
+
+def _source_path(root: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    return (root / path).resolve()
+
+
+def _as_config_list(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    if value in (None, ""):
+        return []
+    return [str(value)]
 
 
 def load_study_area_overrides(config_json: Path) -> Dict[str, Any]:
@@ -418,6 +580,7 @@ def load_study_area_overrides(config_json: Path) -> Dict[str, Any]:
     path_fields = {
         "files_root",
         "working_root",
+        "results_root",
         "ras_exe",
         "gdal_grid_exe",
         "existing_landcover_tif_name",
@@ -527,9 +690,11 @@ def validate_inputs(
         config.breakline_src,
         config.dss_src,
         config.dss_catalog_src,
-        config.cross_section_src,
         config.landcover_src,
     ]
+    required.extend(config.cross_section_srcs)
+    if config.junction_bc_csv_src is not None:
+        required.append(config.junction_bc_csv_src)
     if require_reference_geometry:
         required.extend(
             [
@@ -826,6 +991,155 @@ def estimate_normal_depth_slope(
     return max(slope, 0.0001)
 
 
+def load_cross_section_groups(config: RasMapperConfig) -> List[CrossSectionGroup]:
+    groups: List[CrossSectionGroup] = []
+    for source_path, copy_path in zip(
+        config.cross_section_srcs,
+        config.cross_section_copies,
+    ):
+        load_path = copy_path if copy_path.exists() else source_path
+        groups.append(
+            CrossSectionGroup(
+                name=source_path.stem,
+                source_path=source_path,
+                copy_path=copy_path,
+                sections=load_cross_sections(load_path),
+            )
+        )
+    return groups
+
+
+def _vector_between(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+) -> Tuple[float, float]:
+    return end[0] - start[0], end[1] - start[1]
+
+
+def _unit_dot(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+) -> float:
+    norm_a = math.hypot(a[0], a[1])
+    norm_b = math.hypot(b[0], b[1])
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return (a[0] * b[0] + a[1] * b[1]) / (norm_a * norm_b)
+
+
+def classify_case_a_topology(
+    groups: Sequence[CrossSectionGroup],
+    config: RasMapperConfig,
+) -> Dict[str, Any]:
+    if len(groups) != 2:
+        return {"model_type": "single", "selection_method": "not_applicable"}
+
+    for group in groups:
+        if len(group.sections) < 2:
+            raise ValueError(
+                "Case A junction detection requires at least two cross "
+                f"sections in each CSV. Group '{group.name}' has "
+                f"{len(group.sections)}."
+            )
+
+    rows = []
+    for group in groups:
+        previous_section = group.sections[-2]
+        last_section = group.sections[-1]
+        rows.append(
+            {
+                "group": group,
+                "name": group.name,
+                "previous": previous_section,
+                "last": last_section,
+                "flow_vector": _vector_between(
+                    previous_section.mean_point,
+                    last_section.mean_point,
+                ),
+            }
+        )
+
+    end_0 = rows[0]["last"].mean_point
+    end_1 = rows[1]["last"].mean_point
+    rows[0]["away_score"] = _unit_dot(
+        rows[0]["flow_vector"],
+        _vector_between(end_1, end_0),
+    )
+    rows[1]["away_score"] = _unit_dot(
+        rows[1]["flow_vector"],
+        _vector_between(end_0, end_1),
+    )
+
+    candidates = [
+        row
+        for row in rows
+        if row["away_score"] >= config.branch_connectivity_threshold
+    ]
+    if len(candidates) != 1:
+        report = {
+            "model_type": "junction_case_a",
+            "selection_method": "connectivity",
+            "status": "ambiguous",
+            "threshold": config.branch_connectivity_threshold,
+            "branches": [
+                {
+                    "name": row["name"],
+                    "away_score": row["away_score"],
+                    "last_station": row["last"].station_label,
+                    "last_mean_point": row["last"].mean_point,
+                    "previous_station": row["previous"].station_label,
+                }
+                for row in rows
+            ],
+        }
+        raise ValueError(
+            "Could not identify a single downstream-continuing branch for "
+            "Case A junction model. Provide a downstream BC CSV or adjust "
+            "cross-section ordering. Details: "
+            f"{json.dumps(_to_jsonable(report), indent=2)}"
+        )
+
+    downstream = candidates[0]
+    tributary = rows[1] if downstream is rows[0] else rows[0]
+    topology = {
+        "model_type": "junction_case_a",
+        "selection_method": "connectivity",
+        "status": "selected",
+        "threshold": config.branch_connectivity_threshold,
+        "downstream_group": downstream["name"],
+        "tributary_group": tributary["name"],
+        "junction_point_estimate": (
+            (
+                tributary["last"].mean_point[0]
+                + downstream["previous"].mean_point[0]
+            )
+            / 2.0,
+            (
+                tributary["last"].mean_point[1]
+                + downstream["previous"].mean_point[1]
+            )
+            / 2.0,
+        ),
+        "branches": [
+            {
+                "name": row["name"],
+                "away_score": row["away_score"],
+                "first_station": row["group"].sections[0].station_label,
+                "last_station": row["last"].station_label,
+                "last_mean_point": row["last"].mean_point,
+                "flow_vector": row["flow_vector"],
+                "role": (
+                    "downstream_continuing"
+                    if row is downstream
+                    else "tributary"
+                ),
+            }
+            for row in rows
+        ],
+    }
+    return topology
+
+
 def _write_prj_for_shapefile(config: RasMapperConfig, shp_path: Path) -> None:
     prj_path = shp_path.with_suffix(".prj")
     shutil.copy2(config.projection_copy, prj_path)
@@ -882,6 +1196,14 @@ def _decode_hdf_bytes(value: Any) -> str:
     return str(value).strip()
 
 
+def normalize_dss_pathname(pathname: str) -> str:
+    parts = [part.strip() for part in str(pathname).strip().split("/")]
+    parts = [part for part in parts if part]
+    if not parts:
+        return ""
+    return "/" + "/".join(parts[:6]) + "/"
+
+
 @log_call
 def parse_dss_catalog(dsc_h5_path: Path) -> pd.DataFrame:
     part_map = {
@@ -906,8 +1228,8 @@ def parse_dss_catalog(dsc_h5_path: Path) -> pd.DataFrame:
         for part, (_, column_index) in part_map.items():
             value_index = int(index_row[column_index])
             row[part] = unique_parts[part][value_index] if value_index >= 0 else ""
-        row["pathname"] = (
-            f"//{row['A']}/{row['B']}/{row['C']}/"
+        row["pathname"] = normalize_dss_pathname(
+            f"/{row['A']}/{row['B']}/{row['C']}/"
             f"{row['D']}/{row['E']}/{row['F']}/"
         )
         rows.append(row)
@@ -941,6 +1263,56 @@ def choose_preferred_dss_path(
         return str(catalog.loc[catalog.index[0], "pathname"]), catalog
 
     return None, catalog
+
+
+def choose_dss_paths_for_groups(
+    catalog_df: pd.DataFrame,
+    groups: Sequence[CrossSectionGroup],
+    preferred_f_part: str,
+    fallback_path: Optional[str],
+) -> Dict[str, Optional[str]]:
+    if catalog_df.empty:
+        return {group.name: fallback_path for group in groups}
+
+    a_parts = sorted(
+        {str(value) for value in catalog_df["A"].dropna().unique()},
+        key=len,
+        reverse=True,
+    )
+    paths: Dict[str, Optional[str]] = {}
+    for group in groups:
+        search_text = " ".join(
+            [
+                group.name,
+                group.source_path.stem,
+                group.source_path.name,
+            ]
+        ).upper()
+        selected_a = next(
+            (
+                a_part
+                for a_part in a_parts
+                if a_part.upper() in search_text
+            ),
+            None,
+        )
+        if not selected_a:
+            paths[group.name] = fallback_path
+            continue
+
+        matches = catalog_df[catalog_df["A"].astype(str) == selected_a]
+        if preferred_f_part:
+            f_matches = matches[
+                matches["F"].astype(str) == preferred_f_part
+            ]
+            if not f_matches.empty:
+                paths[group.name] = str(f_matches.iloc[0]["pathname"])
+                continue
+
+        paths[group.name] = (
+            str(matches.iloc[0]["pathname"]) if not matches.empty else fallback_path
+        )
+    return paths
 
 
 def _register_map_layer(
@@ -1022,6 +1394,89 @@ def _relative_rasmap_filename(rasmap_path: Path, layer_file: Path) -> str:
         return ".\\" + str(relative_path).replace("/", "\\")
     except ValueError:
         return str(layer_file)
+
+
+def _result_profile_name(result_hdf: Path) -> str:
+    """Return a stable result profile name for RAS Mapper map entries."""
+    dataset = (
+        "Results/Unsteady/Output/Output Blocks/Base Output/"
+        "Unsteady Time Series/Time Date Stamp"
+    )
+    if not result_hdf.exists():
+        return ""
+
+    try:
+        with h5py.File(result_hdf, "r") as hdf:
+            if dataset not in hdf or len(hdf[dataset]) == 0:
+                return ""
+            raw_value = hdf[dataset][min(1, len(hdf[dataset]) - 1)]
+    except OSError:
+        return ""
+
+    if isinstance(raw_value, bytes):
+        return raw_value.decode("utf-8", errors="ignore").strip()
+    return str(raw_value).strip()
+
+
+def _ensure_plan_result_layers(config: RasMapperConfig) -> bool:
+    """Register the computed plan/result HDF in the project .rasmap file."""
+    result_hdf = config.project_root / (
+        f"{config.project_name}.p{config.plan_id}.hdf"
+    )
+    if not config.rasmap_path.exists() or not result_hdf.exists():
+        return False
+
+    tree = ET.parse(config.rasmap_path)
+    root = tree.getroot()
+    results = root.find("Results")
+    if results is None:
+        results = ET.Element("Results")
+        map_layers = root.find("MapLayers")
+        if map_layers is not None:
+            root.insert(list(root).index(map_layers), results)
+        else:
+            root.append(results)
+
+    results.set("Checked", "True")
+    results.set("Expanded", "True")
+
+    result_filename = _relative_rasmap_filename(config.rasmap_path, result_hdf)
+
+    for layer in list(results.findall("Layer")):
+        filename = layer.get("Filename", "")
+        layer_name = layer.get("Name", "")
+        if (
+            filename == result_filename
+            or layer.get("Type") == "RASPlan"
+            or layer_name == config.plan_short_identifier
+        ):
+            results.remove(layer)
+
+    result_layer = ET.SubElement(results, "Layer")
+    result_layer.set("Name", config.plan_short_identifier)
+    result_layer.set("Type", "RASResults")
+    result_layer.set("Checked", "True")
+    result_layer.set("Expanded", "True")
+    result_layer.set("Filename", result_filename)
+
+    profile_name = _result_profile_name(result_hdf)
+    for display_name, map_type, checked in (
+        ("Depth", "depth", "True"),
+        ("Velocity", "velocity", "False"),
+        ("WSE", "elevation", "False"),
+    ):
+        map_layer = ET.SubElement(result_layer, "Layer")
+        map_layer.set("Name", display_name)
+        map_layer.set("Type", "RASResultsMap")
+        map_layer.set("Checked", checked)
+        params = ET.SubElement(map_layer, "MapParameters")
+        params.set("MapType", map_type)
+        params.set("ProfileIndex", "1")
+        if profile_name:
+            params.set("ProfileName", profile_name)
+
+    tree.write(config.rasmap_path, encoding="utf-8", xml_declaration=False)
+    return True
 
 
 def _remove_map_layer(rasmap_path: Path, layer_name: str) -> bool:
@@ -1482,50 +1937,122 @@ def create_boundary_artifacts(
     perimeter_ring: Sequence[Tuple[float, float]],
     breaklines: Sequence[Sequence[Tuple[float, float]]],
     preferred_dss_path: Optional[str],
+    cross_section_groups: Optional[Sequence[CrossSectionGroup]] = None,
+    dss_paths_by_group: Optional[Dict[str, Optional[str]]] = None,
 ) -> pd.DataFrame:
     centroid = _polygon_centroid(perimeter_ring)
-    downstream_slope = estimate_normal_depth_slope(sections)
     storage_area_name = resolve_storage_area_name(config)
-    boundary_lines = build_boundary_lines_from_sources(
-        sections,
-        perimeter_ring,
-        breaklines,
-        boundary_offset_distance=config.boundary_offset_distance,
-        downstream_bc_length_multiplier=(
-            config.downstream_bc_length_multiplier
-        ),
-        storage_area_name=storage_area_name,
-    )
-    line_by_role = {
-        "upstream": boundary_lines[0],
-        "downstream": boundary_lines[1],
-    }
-
     boundary_rows: List[Dict[str, Any]] = []
-    for role, section in (
-        ("upstream", sections[0]),
-        ("downstream", sections[-1]),
-    ):
+
+    def upstream_coords(section: CrossSectionInfo) -> List[Tuple[float, float]]:
+        limited_section = _limit_boundary_section_to_breaklines(
+            section.points,
+            section.mean_point,
+            perimeter_ring,
+            breaklines,
+        )
+        return _offset_polyline_outside_ring(
+            limited_section,
+            perimeter_ring,
+            offset_distance=config.boundary_offset_distance,
+        )
+
+    def append_row(
+        *,
+        line_name: str,
+        role: str,
+        section: CrossSectionInfo,
+        coords: List[Tuple[float, float]],
+        method: str,
+        branch_name: str,
+        normal_depth_slope: Optional[float] = None,
+        dss_path: Optional[str] = None,
+    ) -> None:
         interior_side = _point_side_of_line(centroid, section.points)
         boundary_rows.append(
             {
-                "bc_name": f"{config.flow_area_name}_{role}",
+                "bc_name": line_name,
+                "bc_line_name": line_name,
                 "role": role,
+                "branch": branch_name,
                 "station": section.station_label,
                 "mean_z": round(section.mean_z, 3),
                 "interior_side": interior_side,
                 "reverse_if_interior_should_be_right": interior_side == "left",
                 "reverse_if_interior_should_be_left": interior_side == "right",
-                "method": "Flow Hydrograph"
-                if role == "upstream"
-                else config.downstream_bc_method,
-                "normal_depth_slope": downstream_slope
-                if role == "downstream"
-                else None,
-                "dss_path": preferred_dss_path if role == "upstream" else None,
+                "method": method,
+                "normal_depth_slope": normal_depth_slope,
+                "dss_path": dss_path,
                 "offset_distance": config.boundary_offset_distance,
                 "storage_area_name": storage_area_name,
+                "coords": coords,
             }
+        )
+
+    groups = list(cross_section_groups or [])
+    topology: Dict[str, Any] = {"model_type": "single"}
+    if len(groups) == 2:
+        topology = classify_case_a_topology(groups, config)
+        downstream_group_name = str(topology["downstream_group"])
+        downstream_group = next(
+            group for group in groups if group.name == downstream_group_name
+        )
+        downstream_section = downstream_group.sections[-1]
+        downstream_slope = estimate_normal_depth_slope(downstream_group.sections)
+
+        for index, group in enumerate(groups, start=1):
+            section = group.sections[0]
+            append_row(
+                line_name=f"{config.upstream_bc_name} {index}",
+                role="upstream",
+                section=section,
+                coords=upstream_coords(section),
+                method="Flow Hydrograph",
+                branch_name=group.name,
+                dss_path=(
+                    (dss_paths_by_group or {}).get(group.name)
+                    or preferred_dss_path
+                ),
+            )
+
+        append_row(
+            line_name=config.downstream_bc_name,
+            role="downstream",
+            section=downstream_section,
+            coords=_build_downstream_boundary_from_cross_section(
+                downstream_section,
+                perimeter_ring,
+                boundary_offset_distance=config.boundary_offset_distance,
+                length_multiplier=config.downstream_bc_length_multiplier,
+            ),
+            method=config.downstream_bc_method,
+            branch_name=downstream_group.name,
+            normal_depth_slope=downstream_slope,
+        )
+    else:
+        downstream_slope = estimate_normal_depth_slope(sections)
+        append_row(
+            line_name=config.upstream_bc_name,
+            role="upstream",
+            section=sections[0],
+            coords=upstream_coords(sections[0]),
+            method="Flow Hydrograph",
+            branch_name="main",
+            dss_path=preferred_dss_path,
+        )
+        append_row(
+            line_name=config.downstream_bc_name,
+            role="downstream",
+            section=sections[-1],
+            coords=_build_downstream_boundary_from_cross_section(
+                sections[-1],
+                perimeter_ring,
+                boundary_offset_distance=config.boundary_offset_distance,
+                length_multiplier=config.downstream_bc_length_multiplier,
+            ),
+            method=config.downstream_bc_method,
+            branch_name="main",
+            normal_depth_slope=downstream_slope,
         )
 
     remove_shapefile_family(config.boundary_shp)
@@ -1543,9 +2070,11 @@ def create_boundary_artifacts(
     writer.field("method", "C", size=24)
     writer.field("slope", "F", size=12, decimal=6)
     writer.field("dss_path", "C", size=200)
+    writer.field("branch", "C", size=64)
+    writer.field("storage", "C", size=32)
 
     for row in boundary_rows:
-        coords = line_by_role[row["role"]]["coords"]
+        coords = row["coords"]
         writer.line([coords])
         writer.record(
             row["bc_name"],
@@ -1558,14 +2087,28 @@ def create_boundary_artifacts(
             row["method"],
             row["normal_depth_slope"] or 0.0,
             (row["dss_path"] or "")[:200],
+            row["branch"][:64],
+            row["storage_area_name"][:32],
         )
     writer.close()
     _write_prj_for_shapefile(config, config.boundary_shp)
 
-    boundary_df = pd.DataFrame(boundary_rows)
+    report_rows = [
+        {key: value for key, value in row.items() if key != "coords"}
+        for row in boundary_rows
+    ]
+    boundary_df = pd.DataFrame(report_rows)
     boundary_df.to_csv(config.boundary_csv, index=False)
     config.boundary_json.write_text(
-        json.dumps(_to_jsonable(boundary_rows), indent=2),
+        json.dumps(
+            _to_jsonable(
+                {
+                    "topology": topology,
+                    "boundary_rows": boundary_rows,
+                }
+            ),
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return boundary_df
@@ -1787,6 +2330,1144 @@ def ensure_project_has_geom_reference(config: RasMapperConfig) -> None:
         ),
     )
     config.project_file.write_text("".join(lines), encoding="utf-8")
+
+
+def _upsert_line_after_prefix(
+    lines: List[str],
+    prefix: str,
+    replacement: str,
+    insert_after_prefixes: Sequence[str],
+) -> List[str]:
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = replacement
+            return lines
+
+    insert_at = len(lines)
+    for index, line in enumerate(lines):
+        if any(line.startswith(candidate) for candidate in insert_after_prefixes):
+            insert_at = index + 1
+    lines.insert(insert_at, replacement)
+    return lines
+
+
+def _remove_lines_with_prefixes(
+    lines: Sequence[str],
+    prefixes: Sequence[str],
+) -> List[str]:
+    return [
+        line
+        for line in lines
+        if not any(line.startswith(prefix) for prefix in prefixes)
+    ]
+
+
+def _bool_to_ras_flag(value: bool) -> int:
+    return -1 if bool(value) else 0
+
+
+def _format_2d_boundary_location(storage_area: str, bc_name: str) -> str:
+    fields = [
+        "",
+        "",
+        "",
+        "",
+        "",
+        storage_area,
+        "",
+        bc_name,
+        "",
+    ]
+    widths = [16, 16, 8, 8, 16, 16, 16, 32, 32]
+    joined = ",".join(
+        f"{str(value):<{widths[index]}}"
+        for index, value in enumerate(fields)
+    )
+    return f"Boundary Location={joined}\n"
+
+
+def _get_template_program_version(
+    lines: Sequence[str],
+    default: str = "6.60",
+) -> str:
+    for line in lines:
+        if line.startswith("Program Version="):
+            return line.split("=", 1)[1].strip() or default
+    return default
+
+
+def _parse_dss_path_parts(pathname: str) -> Dict[str, str]:
+    parts = normalize_dss_pathname(pathname).strip("/").split("/")
+    keys = ("A", "B", "C", "D", "E", "F")
+    return {
+        key: parts[index] if index < len(parts) else ""
+        for index, key in enumerate(keys)
+    }
+
+
+def _parse_dss_d_part_date(d_part: str) -> datetime:
+    clean = d_part.strip()
+    for date_format in ("%d%b%Y", "%d%B%Y", "%d%b%y", "%d%B%y"):
+        try:
+            return datetime.strptime(clean.title(), date_format)
+        except ValueError:
+            continue
+    raise ValueError(f"Could not parse DSS D-part date: {d_part!r}")
+
+
+def _parse_hhmm_time(time_text: str) -> Tuple[int, int]:
+    clean = str(time_text).strip().replace(":", "")
+    if not clean:
+        return 0, 0
+    if len(clean) <= 2:
+        clean = clean.zfill(2) + "00"
+    clean = clean.zfill(4)
+    return int(clean[:2]), int(clean[2:4])
+
+
+def _format_hecras_date(dt_value: datetime) -> str:
+    return dt_value.strftime("%d%b%Y")
+
+
+def _format_hecras_time(dt_value: datetime) -> str:
+    return dt_value.strftime("%H%M")
+
+
+def _format_hecras_simulation_date(
+    start_dt: datetime,
+    end_dt: datetime,
+) -> str:
+    return (
+        f"{_format_hecras_date(start_dt)},{_format_hecras_time(start_dt)},"
+        f"{_format_hecras_date(end_dt)},{_format_hecras_time(end_dt)}"
+    )
+
+
+def resolve_plan_simulation_date(
+    config: RasMapperConfig,
+    upstream_dss_path: str,
+) -> Dict[str, Any]:
+    manual_value = str(config.plan_simulation_date).strip()
+    if not config.auto_plan_simulation_date and manual_value not in ("", ",,,"):
+        return {
+            "simulation_date": manual_value,
+            "source": "manual_config",
+            "upstream_dss_path": upstream_dss_path,
+        }
+
+    dss_parts = _parse_dss_path_parts(upstream_dss_path)
+    start_date = _parse_dss_d_part_date(dss_parts["D"])
+    start_hour, start_minute = _parse_hhmm_time(config.simulation_start_time)
+    start_dt = start_date.replace(
+        hour=start_hour,
+        minute=start_minute,
+        second=0,
+        microsecond=0,
+    )
+    start_dt += timedelta(hours=float(config.simulation_start_offset_hours))
+    end_dt = start_dt + timedelta(hours=float(config.simulation_duration_hours))
+    end_dt += timedelta(hours=float(config.simulation_end_offset_hours))
+
+    return {
+        "simulation_date": _format_hecras_simulation_date(start_dt, end_dt),
+        "source": "dss_path_d_part",
+        "start_datetime": start_dt,
+        "end_datetime": end_dt,
+        "duration_hours": float(config.simulation_duration_hours),
+        "start_offset_hours": float(config.simulation_start_offset_hours),
+        "end_offset_hours": float(config.simulation_end_offset_hours),
+        "upstream_dss_path": upstream_dss_path,
+        "dss_parts": dss_parts,
+    }
+
+
+def _extract_unsteady_template_tail(lines: Sequence[str]) -> List[str]:
+    for index, line in enumerate(lines):
+        if line.startswith(
+            (
+                "Met Point Raster Parameters=",
+                "Precipitation Mode=",
+                "Wind Mode=",
+                "Air Density Mode=",
+            )
+        ):
+            return list(lines[index:])
+
+    return [
+        "Met Point Raster Parameters=,,,,\n",
+        "Precipitation Mode=Disable\n",
+        "Wind Mode=No Wind Forces\n",
+        "Air Density Mode=Specified\n",
+        "Met BC=Precipitation|Expanded View=0\n",
+        "Met BC=Precipitation|Point Interpolation=Nearest\n",
+        "Met BC=Precipitation|Gridded Source=DSS\n",
+        "Met BC=Air Density|Mode=Constant\n",
+        "Met BC=Air Density|Expanded View=0\n",
+        "Met BC=Air Density|Constant Value=1.225\n",
+        "Met BC=Air Density|Constant Units=kg/m3\n",
+        "Met BC=Air Pressure|Mode=Constant\n",
+        "Met BC=Air Pressure|Expanded View=0\n",
+        "Met BC=Air Pressure|Constant Value=1013.2\n",
+        "Met BC=Air Pressure|Constant Units=mb\n",
+    ]
+
+
+def _load_boundary_config_values(config: RasMapperConfig) -> Dict[str, Any]:
+    if not config.boundary_csv.exists():
+        raise FileNotFoundError(
+            f"Boundary candidate CSV not found: {config.boundary_csv}. "
+            "Run 'prepare' before creating the unsteady plan."
+        )
+
+    boundary_df = pd.read_csv(config.boundary_csv)
+    if "role" not in boundary_df.columns:
+        raise ValueError(
+            f"Boundary candidate CSV missing 'role' column: {config.boundary_csv}"
+        )
+
+    upstream = boundary_df[boundary_df["role"].astype(str) == "upstream"]
+    downstream = boundary_df[boundary_df["role"].astype(str) == "downstream"]
+    if upstream.empty:
+        raise ValueError("No upstream boundary candidate found.")
+    if downstream.empty:
+        raise ValueError("No downstream boundary candidate found.")
+
+    downstream_row = downstream.iloc[0]
+    upstream_rows: List[Dict[str, Any]] = []
+    for _, upstream_row in upstream.iterrows():
+        raw_dss_path = str(upstream_row.get("dss_path", "")).strip()
+        if not raw_dss_path or raw_dss_path.lower() == "nan":
+            raise ValueError(
+                "No upstream DSS path was selected for boundary "
+                f"{upstream_row.get('bc_line_name', upstream_row.get('bc_name'))}. "
+                "Check preferred_dss_a_part and preferred_dss_f_part, then "
+                "rerun 'prepare'."
+            )
+        row_dict = upstream_row.to_dict()
+        row_dict["dss_path"] = normalize_dss_pathname(raw_dss_path)
+        upstream_rows.append(row_dict)
+
+    if config.downstream_friction_slope is not None:
+        downstream_slope = float(config.downstream_friction_slope)
+    else:
+        raw_slope = downstream_row.get("normal_depth_slope", "")
+        if pd.isna(raw_slope) or str(raw_slope).strip() == "":
+            sections = load_cross_sections(config.cross_section_copy)
+            downstream_slope = estimate_normal_depth_slope(sections)
+        else:
+            downstream_slope = float(raw_slope)
+
+    return {
+        "upstream_dss_path": upstream_rows[0]["dss_path"],
+        "upstream_rows": upstream_rows,
+        "downstream_row": downstream_row.to_dict(),
+        "downstream_slope": downstream_slope,
+        "boundary_rows": boundary_df.to_dict("records"),
+    }
+
+
+def _relative_project_path(path: Path, project_root: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(project_root.resolve())
+        return ".\\" + str(rel).replace("/", "\\")
+    except ValueError:
+        return str(path)
+
+
+def _write_minimal_unsteady_hdf(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as handle:
+        met_group = handle.require_group("Event Conditions/Meteorology")
+        for name in (
+            "Air Density",
+            "Air Pressure",
+            "Air Temperature",
+            "Evapotranspiration",
+            "Humidity",
+            "Precipitation",
+            "Wind Direction",
+            "Wind Speed",
+            "Wind Velocity X",
+            "Wind Velocity Y",
+        ):
+            met_group.require_group(name)
+
+
+def create_unsteady_file(config: RasMapperConfig) -> Dict[str, Any]:
+    boundary_values = _load_boundary_config_values(config)
+    template_lines: List[str] = []
+    if config.template_unsteady_src and config.template_unsteady_src.exists():
+        template_lines = config.template_unsteady_src.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines(True)
+
+    program_version = _get_template_program_version(template_lines)
+    storage_area_name = resolve_storage_area_name(config)
+    dss_file = (
+        config.unsteady_dss_file_relative
+        or _relative_project_path(config.dss_copy, config.project_root)
+    )
+
+    downstream_row = boundary_values["downstream_row"]
+    downstream_bc_name = str(
+        downstream_row.get("bc_line_name")
+        or downstream_row.get("bc_name")
+        or config.downstream_bc_name
+    )
+    flow_hydrograph_blocks: List[str] = []
+    for upstream_row in boundary_values["upstream_rows"]:
+        upstream_bc_name = str(
+            upstream_row.get("bc_line_name")
+            or upstream_row.get("bc_name")
+            or config.upstream_bc_name
+        )
+        flow_hydrograph_blocks.extend(
+            [
+                _format_2d_boundary_location(
+                    storage_area_name,
+                    upstream_bc_name,
+                ),
+                f"Interval={config.upstream_flow_interval}\n",
+                "Flow Hydrograph= 0 \n",
+                "Stage Hydrograph TW Check=0\n",
+                (
+                    "Flow Hydrograph Slope= "
+                    f"{config.upstream_flow_hydrograph_slope:.6g} \n"
+                ),
+                f"DSS File={dss_file}\n",
+                f"DSS Path={upstream_row['dss_path']}\n",
+                "Use DSS=True\n",
+                "Use Fixed Start Time=False\n",
+                "Fixed Start Date/Time=,\n",
+                "Is Critical Boundary=False\n",
+                "Critical Boundary Flow=\n",
+            ]
+        )
+
+    lines = [
+        f"Flow Title={config.unsteady_title[:32]}\n",
+        f"Program Version={program_version}\n",
+        "Use Restart= 0 \n",
+        _format_2d_boundary_location(
+            storage_area_name,
+            downstream_bc_name,
+        ),
+        f"Friction Slope={boundary_values['downstream_slope']:.6g},0\n",
+        *flow_hydrograph_blocks,
+        *_extract_unsteady_template_tail(template_lines),
+    ]
+
+    config.unsteady_path.write_text("".join(lines), encoding="utf-8")
+
+    if (
+        config.template_unsteady_hdf_src
+        and config.template_unsteady_hdf_src.exists()
+    ):
+        copy_file(config.template_unsteady_hdf_src, config.unsteady_hdf_path)
+    else:
+        _write_minimal_unsteady_hdf(config.unsteady_hdf_path)
+
+    return {
+        "unsteady_path": config.unsteady_path,
+        "unsteady_hdf_path": config.unsteady_hdf_path,
+        "storage_area_name": storage_area_name,
+        "upstream_bc_name": config.upstream_bc_name,
+        "upstream_bc_names": [
+            str(row.get("bc_line_name") or row.get("bc_name"))
+            for row in boundary_values["upstream_rows"]
+        ],
+        "downstream_bc_name": downstream_bc_name,
+        "upstream_dss_path": boundary_values["upstream_dss_path"],
+        "upstream_dss_paths": [
+            row["dss_path"] for row in boundary_values["upstream_rows"]
+        ],
+        "dss_file": dss_file,
+        "downstream_slope": boundary_values["downstream_slope"],
+        "template_unsteady": config.template_unsteady_src,
+        "template_unsteady_hdf": config.template_unsteady_hdf_src,
+    }
+
+
+def _minimal_plan_lines(
+    config: RasMapperConfig,
+    simulation_date: str,
+) -> List[str]:
+    hydrograph_output_interval = (
+        config.plan_hydrograph_output_interval
+        or config.plan_output_interval
+    )
+    detailed_output_interval = (
+        config.plan_detailed_output_interval
+        or config.plan_instantaneous_interval
+    )
+    return [
+        f"Plan Title={config.plan_title[:64]}\n",
+        "Program Version=6.60\n",
+        f"Short Identifier={config.plan_short_identifier[:24]}\n",
+        f"Simulation Date={simulation_date}\n",
+        "Geom File=g01\n",
+        f"Flow File=u{config.unsteady_id}\n",
+        f"{config.plan_flow_regime}\n",
+        f"Computation Interval={config.plan_computation_interval}\n",
+        f"Output Interval={hydrograph_output_interval}\n",
+        f"Instantaneous Interval={detailed_output_interval}\n",
+        f"Mapping Interval={config.plan_mapping_interval}\n",
+        "Computation Time Step Use Courant=        "
+        f"{_bool_to_ras_flag(config.plan_use_courant_timestep)}\n",
+        "Computation Time Step Use Time Series=    "
+        f"{_bool_to_ras_flag(config.plan_use_time_series_timestep)}\n",
+        f"Computation Time Step Max Courant={config.plan_max_courant:g}\n",
+        f"Computation Time Step Min Courant={config.plan_min_courant:g}\n",
+        "Computation Time Step Count To Double="
+        f"{int(config.plan_steps_below_min_before_doubling)}\n",
+        "Computation Time Step Max Doubling="
+        f"{int(config.plan_max_doubling_base_timestep)}\n",
+        "Computation Time Step Max Halving="
+        f"{int(config.plan_max_halving_base_timestep)}\n",
+        f"Computation Time Step Residence Courant={config.plan_residence_courant:g}\n",
+        f"Run HTab= {_bool_to_ras_flag(config.plan_run_htab)} \n",
+        f"Run UNet= {_bool_to_ras_flag(config.plan_run_unet)}\n",
+        "Run Sediment= 0\n",
+        f"Run PostProcess= {_bool_to_ras_flag(config.plan_run_postprocess)}\n",
+        "Run WQNet= 0 \n",
+        f"Run RASMapper= {_bool_to_ras_flag(config.plan_run_rasmapper)}\n",
+        "UNET Theta= 1 \n",
+        "UNET D2 Theta= 1 \n",
+        "UNET D2 SolverType=PARDISO (Direct)\n",
+        f"UNET D1 Cores= {int(config.plan_num_cores)} \n",
+        f"UNET D2 Cores= {int(config.plan_num_cores)} \n",
+        f"PS Cores={int(config.plan_num_cores)}\n",
+    ]
+
+
+def _set_plan_line(
+    lines: List[str],
+    prefix: str,
+    value: str,
+    insert_after_prefixes: Sequence[str],
+) -> List[str]:
+    return _upsert_line_after_prefix(
+        lines,
+        prefix,
+        f"{prefix}{value}\n",
+        insert_after_prefixes,
+    )
+
+
+def create_plan_file(
+    config: RasMapperConfig,
+    simulation_date: str,
+) -> Dict[str, Any]:
+    hydrograph_output_interval = (
+        config.plan_hydrograph_output_interval
+        or config.plan_output_interval
+    )
+    detailed_output_interval = (
+        config.plan_detailed_output_interval
+        or config.plan_instantaneous_interval
+    )
+    if config.template_plan_src and config.template_plan_src.exists():
+        lines = config.template_plan_src.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines(True)
+    else:
+        lines = _minimal_plan_lines(config, simulation_date)
+
+    lines = _remove_lines_with_prefixes(lines, ("Flow File=", "Unsteady File="))
+    lines = [
+        line
+        for line in lines
+        if line.strip()
+        not in ("Subcritical Flow", "Supercritical Flow", "Mixed Flow")
+    ]
+    lines = _set_plan_line(lines, "Plan Title=", config.plan_title[:64], ())
+    lines = _set_plan_line(
+        lines,
+        "Short Identifier=",
+        config.plan_short_identifier[:24],
+        ("Plan Title=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Simulation Date=",
+        simulation_date,
+        ("Short Identifier=",),
+    )
+    lines = _set_plan_line(lines, "Geom File=", "g01", ("Simulation Date=",))
+    lines = _set_plan_line(
+        lines,
+        "Flow File=",
+        f"u{config.unsteady_id}",
+        ("Geom File=",),
+    )
+    lines = _upsert_line_after_prefix(
+        lines,
+        config.plan_flow_regime,
+        f"{config.plan_flow_regime}\n",
+        ("Flow File=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Interval=",
+        config.plan_computation_interval,
+        ("Flow File=", "Geom File="),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Output Interval=",
+        hydrograph_output_interval,
+        ("Computation Interval=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Instantaneous Interval=",
+        detailed_output_interval,
+        ("Output Interval=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Mapping Interval=",
+        config.plan_mapping_interval,
+        ("Instantaneous Interval=", "Output Interval="),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Use Courant=",
+        f"        {_bool_to_ras_flag(config.plan_use_courant_timestep)}",
+        ("Mapping Interval=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Use Time Series=",
+        f"    {_bool_to_ras_flag(config.plan_use_time_series_timestep)}",
+        ("Computation Time Step Use Courant=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Max Courant=",
+        f"{config.plan_max_courant:g}",
+        ("Computation Time Step Use Time Series=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Min Courant=",
+        f"{config.plan_min_courant:g}",
+        ("Computation Time Step Max Courant=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Count To Double=",
+        str(int(config.plan_steps_below_min_before_doubling)),
+        ("Computation Time Step Min Courant=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Max Doubling=",
+        str(int(config.plan_max_doubling_base_timestep)),
+        ("Computation Time Step Count To Double=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Max Halving=",
+        str(int(config.plan_max_halving_base_timestep)),
+        ("Computation Time Step Max Doubling=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Computation Time Step Residence Courant=",
+        f"{config.plan_residence_courant:g}",
+        ("Computation Time Step Max Halving=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Run HTab=",
+        f" {_bool_to_ras_flag(config.plan_run_htab)} ",
+        ("Computation Time Step Residence Courant=", "Mapping Interval="),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Run UNet=",
+        f" {_bool_to_ras_flag(config.plan_run_unet)}",
+        ("Run HTab=",),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Run PostProcess=",
+        f" {_bool_to_ras_flag(config.plan_run_postprocess)}",
+        ("Run Sediment=", "Run UNet="),
+    )
+    lines = _set_plan_line(
+        lines,
+        "Run RASMapper=",
+        f" {_bool_to_ras_flag(config.plan_run_rasmapper)}",
+        ("Run WQNet=", "Run PostProcess="),
+    )
+    for prefix in ("UNET D1 Cores=", "UNET D2 Cores=", "PS Cores="):
+        lines = _set_plan_line(
+            lines,
+            prefix,
+            f" {int(config.plan_num_cores)} ",
+            ("Run RASMapper=", "Run UNet="),
+        )
+
+    config.plan_path.write_text("".join(lines), encoding="utf-8")
+    return {
+        "plan_path": config.plan_path,
+        "template_plan": config.template_plan_src,
+        "plan_title": config.plan_title,
+        "plan_short_identifier": config.plan_short_identifier,
+        "simulation_date": simulation_date,
+        "geom_file": "g01",
+        "flow_file": f"u{config.unsteady_id}",
+        "plan_flow_regime": config.plan_flow_regime,
+        "computation_interval": config.plan_computation_interval,
+        "hydrograph_output_interval": hydrograph_output_interval,
+        "mapping_output_interval": config.plan_mapping_interval,
+        "detailed_output_interval": detailed_output_interval,
+        "use_courant_timestep": config.plan_use_courant_timestep,
+        "max_courant": config.plan_max_courant,
+        "min_courant": config.plan_min_courant,
+        "steps_below_min_before_doubling": (
+            config.plan_steps_below_min_before_doubling
+        ),
+        "max_doubling_base_timestep": (
+            config.plan_max_doubling_base_timestep
+        ),
+        "max_halving_base_timestep": (
+            config.plan_max_halving_base_timestep
+        ),
+        "run_htab": _bool_to_ras_flag(config.plan_run_htab),
+        "run_unet": _bool_to_ras_flag(config.plan_run_unet),
+        "run_rasmapper": _bool_to_ras_flag(config.plan_run_rasmapper),
+    }
+
+
+def ensure_project_has_unsteady_plan_references(
+    config: RasMapperConfig,
+) -> None:
+    ensure_project_has_geom_reference(config)
+    lines = config.project_file.read_text(encoding="utf-8").splitlines(True)
+    lines = _upsert_project_line(
+        lines,
+        "Current Plan=",
+        f"p{config.plan_id}",
+        insert_after_prefixes=("Proj Title=",),
+    )
+    lines = _upsert_project_line(
+        lines,
+        "Unsteady File=",
+        f"u{config.unsteady_id}",
+        insert_after_prefixes=("Geom File=",),
+    )
+    lines = _upsert_project_line(
+        lines,
+        "Unsteady Title=",
+        config.unsteady_title[:64],
+        insert_after_prefixes=("Unsteady File=",),
+    )
+    lines = _upsert_project_line(
+        lines,
+        "Plan File=",
+        f"p{config.plan_id}",
+        insert_after_prefixes=("Unsteady Title=", "Unsteady File="),
+    )
+    lines = _upsert_project_line(
+        lines,
+        "Plan Title=",
+        config.plan_title[:64],
+        insert_after_prefixes=("Plan File=",),
+    )
+    config.project_file.write_text("".join(lines), encoding="utf-8")
+
+
+def verify_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
+    project_text = config.project_file.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+    plan_text = config.plan_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+    unsteady_text = config.unsteady_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    return {
+        "project_has_current_plan": (
+            f"Current Plan=p{config.plan_id}" in project_text
+        ),
+        "project_has_plan_entry": (
+            f"Plan File=p{config.plan_id}" in project_text
+        ),
+        "project_has_unsteady_entry": (
+            f"Unsteady File=u{config.unsteady_id}" in project_text
+        ),
+        "plan_has_geometry": "Geom File=g01" in plan_text,
+        "plan_has_unsteady_flow_file": (
+            f"Flow File=u{config.unsteady_id}" in plan_text
+        ),
+        "plan_has_no_steady_flow_file": "Flow File=f" not in plan_text,
+        "plan_run_unet": any(
+            line.startswith("Run UNet=") and "-1" in line
+            for line in plan_text.splitlines()
+        ),
+        "unsteady_has_upstream_bc": config.upstream_bc_name in unsteady_text,
+        "unsteady_has_downstream_bc": config.downstream_bc_name in unsteady_text,
+        "unsteady_uses_dss": "Use DSS=True" in unsteady_text,
+        "unsteady_hdf_exists": config.unsteady_hdf_path.exists(),
+    }
+
+
+def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
+    validate_inputs(config)
+    if not config.project_file.exists():
+        raise FileNotFoundError(
+            f"Project file not found: {config.project_file}. Run 'prepare' first."
+        )
+    if not config.geom_path.exists() or not config.geom_hdf_path.exists():
+        raise FileNotFoundError(
+            "Geometry files are missing. Run 'install-geometry' before "
+            "creating the unsteady plan."
+        )
+    if config.template_unsteady_src and not config.template_unsteady_src.exists():
+        raise FileNotFoundError(
+            f"Template unsteady file not found: {config.template_unsteady_src}"
+        )
+    if (
+        config.template_unsteady_hdf_src
+        and not config.template_unsteady_hdf_src.exists()
+    ):
+        raise FileNotFoundError(
+            "Template unsteady HDF file not found: "
+            f"{config.template_unsteady_hdf_src}"
+        )
+    if config.template_plan_src and not config.template_plan_src.exists():
+        raise FileNotFoundError(
+            f"Template plan file not found: {config.template_plan_src}"
+        )
+
+    unsteady_summary = create_unsteady_file(config)
+    simulation_date_summary = resolve_plan_simulation_date(
+        config,
+        unsteady_summary["upstream_dss_path"],
+    )
+    plan_summary = create_plan_file(
+        config,
+        simulation_date_summary["simulation_date"],
+    )
+    ensure_project_has_unsteady_plan_references(config)
+    verification = verify_unsteady_plan(config)
+
+    summary = {
+        "project_file": config.project_file,
+        "unsteady": unsteady_summary,
+        "plan": plan_summary,
+        "simulation_date": simulation_date_summary,
+        "verification": verification,
+    }
+    config.unsteady_plan_summary_json.write_text(
+        json.dumps(_to_jsonable(summary), indent=2),
+        encoding="utf-8",
+    )
+    return summary
+
+
+def _collect_ras_window_text(window: Any) -> List[str]:
+    texts: List[str] = []
+    title = str(window.window_text()).strip()
+    if title:
+        texts.append(title)
+    try:
+        descendants = window.descendants()
+    except Exception:
+        return texts
+
+    for child in descendants:
+        try:
+            child_text = str(child.window_text()).strip()
+            if child_text:
+                texts.append(child_text)
+            if child.class_name().endswith("ListBox"):
+                for item_text in child.texts():
+                    item_text = str(item_text).strip()
+                    if item_text:
+                        texts.append(item_text)
+        except Exception:
+            continue
+    return texts
+
+
+def _click_ras_button(window: Any, labels: Sequence[str]) -> bool:
+    normalized = {label.lower().replace("&", "") for label in labels}
+    try:
+        descendants = window.descendants()
+    except Exception:
+        return False
+
+    for child in descendants:
+        try:
+            child_key = str(child.window_text()).strip().lower()
+            child_key = child_key.replace("&", "")
+            if child_key not in normalized:
+                continue
+            child.click()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _handle_compute_dialogs(
+    process_id: int,
+    auto_confirm_preprocessor: bool,
+    messages: List[str],
+) -> Optional[str]:
+    try:
+        from pywinauto import Desktop
+    except Exception:
+        return None
+
+    fatal_message: Optional[str] = None
+    try:
+        windows = Desktop(backend="win32").windows()
+    except Exception:
+        return None
+
+    for window in windows:
+        try:
+            if window.process_id() != process_id or not window.is_visible():
+                continue
+        except Exception:
+            continue
+
+        texts = _collect_ras_window_text(window)
+        joined = "\n".join(texts)
+        lower_joined = joined.lower()
+        if not joined:
+            continue
+
+        if "geometry preprocessor output file was not found" in lower_joined:
+            if auto_confirm_preprocessor:
+                if _click_ras_button(window, ("Yes", "&Yes")):
+                    messages.append(
+                        "Accepted HEC-RAS geometry preprocessor prompt."
+                    )
+            continue
+
+        if "error parsing command line parameters" in lower_joined:
+            fatal_message = joined
+            _click_ras_button(window, ("OK", "&OK", "Close"))
+            continue
+
+        if "errors were found preparing unsteady flow data" in lower_joined:
+            fatal_message = joined
+            _click_ras_button(window, ("Close", "OK", "&OK"))
+            continue
+
+    return fatal_message
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _plan_data_errors_path(plan_file: Path) -> Path:
+    return plan_file.with_name(plan_file.name + ".data_errors.txt")
+
+
+def _read_plan_simulation_window(plan_file: Path) -> Tuple[datetime, datetime]:
+    for line in plan_file.read_text(
+        encoding="utf-8",
+        errors="replace",
+    ).splitlines():
+        if not line.startswith("Simulation Date="):
+            continue
+        parts = [part.strip() for part in line.split("=", 1)[1].split(",")]
+        if len(parts) != 4:
+            break
+        start = _parse_dss_d_part_date(parts[0])
+        end = _parse_dss_d_part_date(parts[2])
+        start_hour, start_minute = _parse_hhmm_time(parts[1])
+        end_hour, end_minute = _parse_hhmm_time(parts[3])
+        start = start.replace(hour=start_hour, minute=start_minute)
+        end = end.replace(hour=end_hour, minute=end_minute)
+        return start, end
+    raise ValueError(f"Could not parse Simulation Date in {plan_file}")
+
+
+def _write_plan_simulation_window(
+    plan_file: Path,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> str:
+    simulation_date = _format_hecras_simulation_date(start_dt, end_dt)
+    lines = plan_file.read_text(
+        encoding="utf-8",
+        errors="replace",
+    ).splitlines(True)
+    lines = _set_plan_line(
+        lines,
+        "Simulation Date=",
+        simulation_date,
+        ("Short Identifier=",),
+    )
+    plan_file.write_text("".join(lines), encoding="utf-8")
+    return simulation_date
+
+
+def _parse_hecras_data_error_time(
+    text: str,
+    point_name: str,
+) -> Optional[datetime]:
+    pattern = (
+        rf"{point_name}\s+time\s+series\s+point\s+is\s+at\s*:\s*"
+        r"(\d{1,2}[A-Za-z]{3}\d{4})\s+(\d{1,2}:\d{2}:\d{2})"
+    )
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    date_part, time_part = match.groups()
+    base = _parse_dss_d_part_date(date_part)
+    hour, minute = _parse_hhmm_time(time_part[:5])
+    return base.replace(hour=hour, minute=minute)
+
+
+def _copy_compute_results_to_project(
+    config: RasMapperConfig,
+    compute_dir: Path,
+) -> List[Path]:
+    stems = [
+        f"{config.project_name}.p{config.plan_id}",
+        f"{config.project_name}.g01",
+        f"{config.project_name}.b{config.plan_id}",
+        f"{config.project_name}.bco{config.plan_id}",
+        f"{config.project_name}.x{config.plan_id}",
+        f"{config.project_name}.ic.o{config.plan_id}",
+        f"{config.project_name}.dss",
+    ]
+    suffixes = ("", ".hdf")
+    copied: List[Path] = []
+    for stem in stems:
+        for suffix in suffixes:
+            source = compute_dir / f"{stem}{suffix}"
+            if not source.exists() or not source.is_file():
+                continue
+            destination = config.project_root / source.name
+            copy_file(source, destination)
+            copied.append(destination)
+    return copied
+
+
+@log_call
+def compute_plan(
+    config: RasMapperConfig,
+    output_dir: Optional[Path] = None,
+    overwrite: bool = False,
+    timeout_seconds: Optional[int] = None,
+) -> Dict[str, Any]:
+    validate_inputs(config)
+    if not config.project_file.exists():
+        raise FileNotFoundError(
+            f"Project file not found: {config.project_file}. "
+            "Run 'prepare' first."
+        )
+    if not config.plan_path.exists():
+        raise FileNotFoundError(
+            f"Plan file not found: {config.plan_path}. "
+            "Run 'create-unsteady-plan' first."
+        )
+
+    destination = (
+        output_dir.resolve()
+        if output_dir is not None
+        else config.default_compute_output_dir
+    )
+    if destination.exists():
+        if not overwrite:
+            raise FileExistsError(
+                f"Compute output folder already exists: {destination}. "
+                "Use --overwrite to replace it."
+            )
+        shutil.rmtree(destination)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(config.project_root, destination)
+
+    project_file = destination / config.project_file.name
+    plan_file = destination / config.plan_path.name
+    result_hdf = destination / f"{config.project_name}.p{config.plan_id}.hdf"
+    command = f'"{config.ras_exe}" -c "{project_file}" "{plan_file}"'
+    timeout = (
+        int(timeout_seconds)
+        if timeout_seconds is not None
+        else int(config.compute_timeout_seconds)
+    )
+
+    messages: List[str] = []
+    fatal_message: Optional[str] = None
+    attempt_summaries: List[Dict[str, Any]] = []
+    start_time = time.time()
+    return_code: Optional[int] = None
+    success = False
+    max_attempts = (
+        4 if config.auto_adjust_simulation_window_from_dss else 1
+    )
+
+    for attempt in range(1, max_attempts + 1):
+        data_errors_path = _plan_data_errors_path(plan_file)
+        if data_errors_path.exists():
+            data_errors_path.unlink()
+
+        attempt_start = time.time()
+        process = subprocess.Popen(command, cwd=str(destination))
+        attempt_fatal: Optional[str] = None
+
+        while process.poll() is None:
+            attempt_fatal = _handle_compute_dialogs(
+                process.pid,
+                config.auto_confirm_geometry_preprocessor,
+                messages,
+            ) or attempt_fatal
+            if attempt_fatal:
+                time.sleep(2)
+                _terminate_process(process)
+                break
+            if time.time() - start_time > timeout:
+                attempt_fatal = (
+                    f"HEC-RAS compute timed out after {timeout} seconds."
+                )
+                _terminate_process(process)
+                break
+            time.sleep(2)
+
+        return_code = process.poll()
+        data_error_text = ""
+        if data_errors_path.exists():
+            data_error_text = data_errors_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
+        attempt_summaries.append(
+            {
+                "attempt": attempt,
+                "return_code": return_code,
+                "elapsed_seconds": time.time() - attempt_start,
+                "fatal_message": attempt_fatal,
+                "data_errors": data_error_text,
+                "simulation_date": next(
+                    (
+                        line.split("=", 1)[1].strip()
+                        for line in plan_file.read_text(
+                            encoding="utf-8",
+                            errors="replace",
+                        ).splitlines()
+                        if line.startswith("Simulation Date=")
+                    ),
+                    "",
+                ),
+            }
+        )
+
+        if return_code == 0 and result_hdf.exists() and not attempt_fatal:
+            success = True
+            fatal_message = None
+            break
+
+        combined_error = "\n".join(
+            text for text in (attempt_fatal, data_error_text) if text
+        )
+        fatal_message = combined_error or attempt_fatal
+        if not config.auto_adjust_simulation_window_from_dss:
+            break
+
+        try:
+            current_start, current_end = _read_plan_simulation_window(plan_file)
+        except ValueError:
+            break
+
+        first_time = _parse_hecras_data_error_time(
+            combined_error,
+            "first",
+        )
+        last_time = _parse_hecras_data_error_time(combined_error, "last")
+
+        adjusted = False
+        if first_time and first_time > current_start:
+            duration = current_end - current_start
+            current_start = first_time
+            current_end = max(current_end, current_start + duration)
+            adjusted = True
+        elif last_time and last_time < current_end:
+            current_end = last_time
+            adjusted = True
+        elif "no data read from dss pathname" in combined_error.lower():
+            current_end = current_start + timedelta(days=3)
+            adjusted = True
+
+        if not adjusted or current_end <= current_start:
+            break
+
+        new_simulation_date = _write_plan_simulation_window(
+            plan_file,
+            current_start,
+            current_end,
+        )
+        messages.append(
+            "Adjusted Simulation Date from DSS validation: "
+            f"{new_simulation_date}"
+        )
+
+    elapsed_seconds = time.time() - start_time
+    source_plan_simulation_date: Optional[str] = None
+    copied_result_files: List[Path] = []
+    if success and config.auto_adjust_simulation_window_from_dss:
+        final_start, final_end = _read_plan_simulation_window(plan_file)
+        source_plan_simulation_date = _write_plan_simulation_window(
+            config.plan_path,
+            final_start,
+            final_end,
+        )
+    if success and config.copy_compute_results_to_project:
+        copied_result_files = _copy_compute_results_to_project(
+            config,
+            destination,
+        )
+        _ensure_plan_result_layers(config)
+
+    summary = {
+        "success": success,
+        "command": command,
+        "output_dir": destination,
+        "project_file": project_file,
+        "plan_file": plan_file,
+        "result_hdf": result_hdf if result_hdf.exists() else None,
+        "return_code": return_code,
+        "elapsed_seconds": elapsed_seconds,
+        "messages": messages,
+        "fatal_message": fatal_message,
+        "attempts": attempt_summaries,
+        "source_plan_simulation_date": source_plan_simulation_date,
+        "copied_result_files": copied_result_files,
+    }
+    reports_dir = destination / "Reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (reports_dir / "compute_summary.json").write_text(
+        json.dumps(_to_jsonable(summary), indent=2),
+        encoding="utf-8",
+    )
+    return summary
 
 
 def set_geometry_title(geom_path: Path, title: str) -> None:
@@ -3056,21 +4737,45 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
 
     perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
     breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
-    sections = load_cross_sections(config.cross_section_src)
-    boundary_lines = build_boundary_lines_from_sources(
-        sections,
-        perimeter_ring,
-        breaklines,
-        boundary_offset_distance=config.boundary_offset_distance,
-        downstream_bc_length_multiplier=(
-            config.downstream_bc_length_multiplier
-        ),
-        storage_area_name=resolve_storage_area_name(
-            config,
-            geom_path=config.geom_path,
-            lines=lines,
-        ),
-    )
+    if config.boundary_shp.exists():
+        boundary_lines = [
+            {
+                "name": str(
+                    item["record"].get("bc_name")
+                    or item["record"].get("name")
+                    or f"BC Line {index}"
+                ),
+                "storage_area": str(
+                    item["record"].get("storage")
+                    or resolve_storage_area_name(
+                        config,
+                        geom_path=config.geom_path,
+                        lines=lines,
+                    )
+                ),
+                "coords": item["coords"],
+            }
+            for index, item in enumerate(
+                _load_boundary_lines_from_shapefile(config.boundary_shp),
+                start=1,
+            )
+        ]
+    else:
+        sections = load_cross_sections(config.cross_section_src)
+        boundary_lines = build_boundary_lines_from_sources(
+            sections,
+            perimeter_ring,
+            breaklines,
+            boundary_offset_distance=config.boundary_offset_distance,
+            downstream_bc_length_multiplier=(
+                config.downstream_bc_length_multiplier
+            ),
+            storage_area_name=resolve_storage_area_name(
+                config,
+                geom_path=config.geom_path,
+                lines=lines,
+            ),
+        )
 
     view_coord_sets = [
         perimeter_ring,
@@ -3207,21 +4912,41 @@ def refresh_geometry_display_metadata(config: RasMapperConfig) -> None:
     ).splitlines(True)
     perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
     breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
-    sections = load_cross_sections(config.cross_section_src)
-    boundary_lines = build_boundary_lines_from_sources(
-        sections,
-        perimeter_ring,
-        breaklines,
-        boundary_offset_distance=config.boundary_offset_distance,
-        downstream_bc_length_multiplier=(
-            config.downstream_bc_length_multiplier
-        ),
-        storage_area_name=resolve_storage_area_name(
-            config,
-            geom_path=config.geom_path,
-            lines=lines,
-        ),
-    )
+    if config.boundary_shp.exists():
+        boundary_lines = [
+            {
+                "name": str(item["record"].get("bc_name") or f"BC Line {index}"),
+                "storage_area": str(
+                    item["record"].get("storage")
+                    or resolve_storage_area_name(
+                        config,
+                        geom_path=config.geom_path,
+                        lines=lines,
+                    )
+                ),
+                "coords": item["coords"],
+            }
+            for index, item in enumerate(
+                _load_boundary_lines_from_shapefile(config.boundary_shp),
+                start=1,
+            )
+        ]
+    else:
+        sections = load_cross_sections(config.cross_section_src)
+        boundary_lines = build_boundary_lines_from_sources(
+            sections,
+            perimeter_ring,
+            breaklines,
+            boundary_offset_distance=config.boundary_offset_distance,
+            downstream_bc_length_multiplier=(
+                config.downstream_bc_length_multiplier
+            ),
+            storage_area_name=resolve_storage_area_name(
+                config,
+                geom_path=config.geom_path,
+                lines=lines,
+            ),
+        )
 
     view_coord_sets = [
         perimeter_ring,
@@ -3707,7 +5432,13 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
     copy_shapefile_family(config.landcover_src, config.landcover_copy.parent)
     copy_file(config.dss_src, config.dss_copy)
     copy_file(config.dss_catalog_src, config.dss_catalog_copy)
-    copy_file(config.cross_section_src, config.cross_section_copy)
+    for source, destination in zip(
+        config.cross_section_srcs,
+        config.cross_section_copies,
+    ):
+        copy_file(source, destination)
+    if config.junction_bc_csv_src is not None and config.junction_bc_csv_copy is not None:
+        copy_file(config.junction_bc_csv_src, config.junction_bc_csv_copy)
 
     write_minimal_project_file(config)
     ensure_project_has_geom_reference(config)
@@ -3716,7 +5447,12 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
     perimeter_ring = load_polygon_rings(config.perimeter_copy)[0]
     breakline_features = load_polyline_features(config.breakline_copy)
     breaklines = [coords for _, coords in breakline_features]
-    sections = load_cross_sections(config.cross_section_copy)
+    cross_section_groups = load_cross_section_groups(config)
+    sections = [
+        section
+        for group in cross_section_groups
+        for section in group.sections
+    ]
 
     write_cross_section_shapefile(sections, config.cross_sections_shp, config)
     write_centerline_shapefile(sections, config.centerline_shp, config)
@@ -3734,6 +5470,12 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         preferred_a_part=config.preferred_dss_a_part,
         preferred_f_part=config.preferred_dss_f_part,
     )
+    dss_paths_by_group = choose_dss_paths_for_groups(
+        dss_catalog,
+        cross_section_groups,
+        preferred_f_part=config.preferred_dss_f_part,
+        fallback_path=preferred_dss_path,
+    )
     dss_catalog.to_csv(config.dss_catalog_csv, index=False)
 
     boundary_df = create_boundary_artifacts(
@@ -3742,6 +5484,8 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         perimeter_ring=perimeter_ring,
         breaklines=breaklines,
         preferred_dss_path=preferred_dss_path,
+        cross_section_groups=cross_section_groups,
+        dss_paths_by_group=dss_paths_by_group,
     )
     boundary_features = _load_boundary_lines_from_shapefile(config.boundary_shp)
     _set_rasmap_current_view(
@@ -3760,7 +5504,12 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         sections=sections,
     )
 
-    downstream_slope = estimate_normal_depth_slope(sections)
+    downstream_rows = boundary_df[boundary_df["role"].astype(str) == "downstream"]
+    downstream_slope = (
+        float(downstream_rows.iloc[0]["normal_depth_slope"])
+        if not downstream_rows.empty
+        else estimate_normal_depth_slope(sections)
+    )
     write_manual_checklist(
         config,
         preferred_dss_path=preferred_dss_path,
@@ -3820,9 +5569,19 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         "existing_ras_layer": existing_landcover_status,
         "geometry_landcover_association_updated": geometry_assoc_updated,
         "cross_sections_shp": config.cross_sections_shp,
+        "cross_section_groups": [
+            {
+                "name": group.name,
+                "source": group.source_path,
+                "copy": group.copy_path,
+                "section_count": len(group.sections),
+            }
+            for group in cross_section_groups
+        ],
         "boundary_shp": config.boundary_shp,
         "dss_catalog_csv": config.dss_catalog_csv,
         "preferred_dss_path": preferred_dss_path,
+        "dss_paths_by_group": dss_paths_by_group,
         "downstream_slope": downstream_slope,
         "boundary_candidates": boundary_df.to_dict(orient="records"),
         "removed_stale_landcover_layers": removed_layers,
@@ -3863,6 +5622,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=Path,
         default=DEFAULT_WORKING_ROOT,
         help="Root folder where the HEC-RAS project will be created.",
+    )
+    parser.add_argument(
+        "--results-root",
+        type=Path,
+        default=DEFAULT_RESULTS_ROOT,
+        help="Root folder where compute output folders will be written.",
     )
     parser.add_argument(
         "--project-name",
@@ -3994,6 +5759,39 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Only rewrite the geometry text and skip the GUI regeneration step.",
     )
 
+    subparsers.add_parser(
+        "create-unsteady-plan",
+        help=(
+            "Create/register .u## and .p## files for a 2D unsteady model "
+            "using the prepared geometry and boundary artifacts."
+        ),
+    )
+
+    compute_parser = subparsers.add_parser(
+        "compute-plan",
+        help="Run the current 2D unsteady plan and write results to a folder.",
+    )
+    compute_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional compute output folder. Defaults to "
+            "<results-root>/<project-name>_plan<plan-number>_run."
+        ),
+    )
+    compute_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace the compute output folder if it already exists.",
+    )
+    compute_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="Maximum seconds to wait for HEC-RAS compute.",
+    )
+
     for command_name in ("apply-mannings", "check-mannings"):
         command_parser = subparsers.add_parser(
             command_name,
@@ -4011,6 +5809,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
     values: Dict[str, Any] = {
         "files_root": DEFAULT_FILES_ROOT.resolve(),
         "working_root": DEFAULT_WORKING_ROOT.resolve(),
+        "results_root": DEFAULT_RESULTS_ROOT.resolve(),
         "project_name": DEFAULT_PROJECT_NAME,
         "ras_exe": DEFAULT_RAS_EXE.resolve(),
         "gdal_grid_exe": DEFAULT_GDAL_GRID.resolve(),
@@ -4026,6 +5825,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
     cli_overrides = {
         "files_root": args.files_root.resolve(),
         "working_root": args.working_root.resolve(),
+        "results_root": args.results_root.resolve(),
         "project_name": args.project_name,
         "ras_exe": args.ras_exe.resolve(),
         "gdal_grid_exe": args.gdal_grid_exe.resolve(),
@@ -4040,6 +5840,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
     cli_defaults = {
         "files_root": DEFAULT_FILES_ROOT.resolve(),
         "working_root": DEFAULT_WORKING_ROOT.resolve(),
+        "results_root": DEFAULT_RESULTS_ROOT.resolve(),
         "project_name": DEFAULT_PROJECT_NAME,
         "ras_exe": DEFAULT_RAS_EXE.resolve(),
         "gdal_grid_exe": DEFAULT_GDAL_GRID.resolve(),
@@ -4119,6 +5920,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             print(json.dumps(_to_jsonable(summary), indent=2))
             return 0
+
+        if args.command == "create-unsteady-plan":
+            summary = create_unsteady_plan(config)
+            print(json.dumps(_to_jsonable(summary), indent=2))
+            return 0
+
+        if args.command == "compute-plan":
+            summary = compute_plan(
+                config,
+                output_dir=args.output_dir,
+                overwrite=args.overwrite,
+                timeout_seconds=args.timeout,
+            )
+            print(json.dumps(_to_jsonable(summary), indent=2))
+            return 0 if summary["success"] else 1
 
         if args.command == "apply-mannings":
             report = apply_mannings(config, geom=args.geom)

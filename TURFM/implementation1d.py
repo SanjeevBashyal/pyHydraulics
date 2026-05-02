@@ -360,6 +360,7 @@ def run_junction_model(
     config: Config,
     main_model: ModelInput,
     tributary_model: ModelInput,
+    additional_models: list[ModelInput] | None,
     hydrology_kmz: Path,
     projection_file: Path,
     dry_run: bool,
@@ -382,6 +383,17 @@ def run_junction_model(
         "main_structure_csv": main_model.structure_csv,
         "tributary_structure_csv": tributary_model.structure_csv,
         "combined_bank_lines_shp": find_combined_bank_lines_shp(config, main_model, tributary_model),
+        "additional_reaches": [
+            {
+                "name": model.sub_project_name,
+                "project_stem": model.project_stem,
+                "project_title": model.project_title,
+                "cross_section_csv": Path(model.paths.cross_section_file_path),
+                "bank_lines_shp": Path(model.paths.bank_line_file_path),
+                "structure_csv": model.structure_csv,
+            }
+            for model in (additional_models or [])
+        ],
         "hydrology_kmz": hydrology_kmz,
         "buffer_distance": HYDROLOGY_BUFFER_METERS,
         "reference_geometry_file": reference_geometry,
@@ -390,9 +402,14 @@ def run_junction_model(
         "bank_station_mode": BANK_STATION_MODE,
         "river_line_method": RIVER_LINE_METHOD,
         "return_periods": RETURN_PERIODS,
+        "all_flows_in_single_plan": ALL_FLOW_IN_SINGLE_PLAN,
     }
 
-    sub_projects = [main_model.sub_project_name, tributary_model.sub_project_name]
+    sub_projects = [
+        main_model.sub_project_name,
+        tributary_model.sub_project_name,
+        *[model.sub_project_name for model in (additional_models or [])],
+    ]
     logger.info("Junction model %s %s -> %s", main_model.project_name, sub_projects, output_folder)
     if dry_run:
         return WorkflowResult(
@@ -481,18 +498,30 @@ def run_project(
         pairings = [(main_model.sub_project_name, tributary.sub_project_name) for tributary in models[1:]]
 
     model_by_name = {_normalize_name(model.sub_project_name): model for model in models}
+    paired_model_names = {
+        _normalize_name(name)
+        for pair in pairings
+        for name in pair
+    }
+    unpaired_models = [
+        model
+        for model in models
+        if _normalize_name(model.sub_project_name) not in paired_model_names
+    ]
     results: list[WorkflowResult] = []
     for main_name, tributary_name in pairings:
         main_model = model_by_name[_normalize_name(main_name)]
         tributary_model = model_by_name[_normalize_name(tributary_name)]
         project_stem = project_name if len(pairings) == 1 else f"{project_name}_{tributary_model.sub_project_name}"
+        additional_models = unpaired_models if len(pairings) == 1 else []
         results.append(
             guarded_run(
-                lambda main=main_model, trib=tributary_model, stem=project_stem: run_junction_model(
+                lambda main=main_model, trib=tributary_model, extras=additional_models, stem=project_stem: run_junction_model(
                     hec=hec,
                     config=config,
                     main_model=main,
                     tributary_model=trib,
+                    additional_models=extras,
                     hydrology_kmz=hydrology_kmz,
                     projection_file=projection_file,
                     dry_run=dry_run,

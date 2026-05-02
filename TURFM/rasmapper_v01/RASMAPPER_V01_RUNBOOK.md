@@ -1,6 +1,7 @@
 # RAS Mapper V01 Runbook
 
-This runbook explains how to use `working/rasmapper_v01.py` for a new study area.
+This runbook explains how to use `rasmapper_v01.py` from the standalone
+folder `F:\codex_rascommander\rasmapper_v01`.
 
 It reflects the current workflow that was validated against the Ataturk case:
 
@@ -12,13 +13,16 @@ It reflects the current workflow that was validated against the Ataturk case:
 - fix mesh issues
 - associate `LandCover` to `Manning's n` through `Manage Geometry Associations`
 - verify final Manning values
+- create/register a 2D unsteady `.u##` file
+- create/register a 2D unsteady plan `.p##`
+- set `Current Plan=p##` in the HEC-RAS project
 
 ## 1. Prerequisites
 
 - Python environment for this repo is installed
 - HEC-RAS 6.6 is installed
 - GDAL tools bundled with HEC-RAS are available
-- `working/rasmapper_v01.py` exists and runs
+- `F:\codex_rascommander\rasmapper_v01\rasmapper_v01.py` exists and runs
 
 Default executable paths used by the workflow:
 
@@ -43,6 +47,9 @@ Required files:
 - landcover polygon shapefile
 - reference geometry `.g01`
 - reference geometry `.g01.hdf`
+- template unsteady file `.u##`
+- template unsteady HDF `.u##.hdf`
+- template plan file `.p##`
 
 Recommended files:
 
@@ -101,19 +108,34 @@ Important:
 - `prepare` does not require a reference geometry
 - `install-geometry` and `sync-geometry` do require `reference_geom_name` and `reference_geom_hdf_name`
 
+### Unsteady and plan templates
+
+The unsteady-plan step can create files from internal defaults, but the
+recommended production path is to provide real HEC-RAS templates:
+
+- `inputs\UnsteadyTemplate\template.u01`
+- `inputs\UnsteadyTemplate\template.u01.hdf`
+- `inputs\PlanTemplate\template.p01`
+
+For each model, set these JSON fields:
+
+- `template_unsteady_name`
+- `template_unsteady_hdf_name`
+- `template_plan_name`
+
 ## 4. Create The Study-Area JSON
 
 Start from:
 
-- `working/study_areas/template_v01.json`
+- `model_template_v01.json`
 
 Create a site config such as:
 
-- `working/study_areas/new_site.json`
+- `new_site_v01.json`
 
 Use the Ataturk example as reference:
 
-- `working/study_areas/ataturk.json`
+- `ataturk_v01.json`
 
 ### Key JSON fields
 
@@ -125,7 +147,8 @@ Use the Ataturk example as reference:
 - `perimeter_name`: perimeter shapefile name under `files_root`
 - `breakline_name`: breakline shapefile name under `files_root`
 - `dss_name`: DSS file name under `files_root`
-- `cross_section_name`: cross-section CSV name under `files_root`
+- `cross_section_name`: cross-section CSV name under `files_root`; for Case A junction models this may be a two-item list of CSVs where one branch continues downstream
+- `junction_bc_csv_name`: optional future junction BC CSV under `files_root` with explicit junction line points
 - `landcover_name`: landcover shapefile name under `files_root`
 - `existing_landcover_tif_name`: optional native HEC-RAS landcover TIFF
 - `existing_landcover_hdf_name`: optional native HEC-RAS landcover HDF
@@ -148,19 +171,74 @@ Use the Ataturk example as reference:
 - `preferred_dss_a_part`: preferred DSS A-part
 - `preferred_dss_f_part`: preferred DSS F-part
 - `downstream_bc_method`: currently `Normal Depth`
+- `junction_bc_name`: HEC-RAS BC line name to use when a junction BC CSV is provided
+- `junction_snap_tolerance`: distance tolerance for future junction snapping/validation
+- `branch_connectivity_threshold`: cosine threshold for Case A downstream-continuing branch detection, usually `0.25`
+- `unsteady_number`: output unsteady number, usually `01`
+- `plan_number`: output plan number, usually `01`
+- `template_unsteady_name`: template `.u##` path under `files_root` or an absolute path
+- `template_unsteady_hdf_name`: template `.u##.hdf` path under `files_root` or an absolute path
+- `template_plan_name`: template `.p##` path under `files_root` or an absolute path
+- `unsteady_title`: title written to the `.u##`
+- `plan_title`: title written to the `.p##`
+- `plan_short_identifier`: HEC-RAS plan short ID, max 24 characters
+- `plan_flow_regime`: normally `Mixed Flow` for 2D unsteady plans
+- `plan_simulation_date`: manual HEC-RAS simulation date line, used only when `auto_plan_simulation_date` is `false`
+- `auto_plan_simulation_date`: when true, derive the plan window from the selected upstream DSS pathname
+- `simulation_start_time`: HHMM start time applied to the DSS D-part date
+- `simulation_duration_hours`: simulation duration after start time
+- `simulation_start_offset_hours`: optional offset applied to the derived start time
+- `simulation_end_offset_hours`: optional offset applied to the derived end time
+- `plan_computation_interval`: computation interval, for example `6SEC`
+- `plan_hydrograph_output_interval`: hydrograph output interval, for example `5MIN`
+- `plan_output_interval`: legacy alias for hydrograph output interval
+- `plan_detailed_output_interval`: detailed output interval, for example `5MIN`
+- `plan_instantaneous_interval`: legacy alias for detailed output interval
+- `plan_mapping_interval`: mapping output interval, for example `5MIN`
+- `plan_use_courant_timestep`: enables Advanced Time Step Control > Adjust Time Step Based on Courant
+- `plan_use_time_series_timestep`: enables time-series based time step control when true
+- `plan_max_courant`: maximum Courant value, for example `1.0`
+- `plan_min_courant`: minimum Courant value, for example `0.45`
+- `plan_steps_below_min_before_doubling`: steps below minimum before doubling, for example `4`
+- `plan_max_doubling_base_timestep`: maximum number of doubling base time step, for example `2`
+- `plan_max_halving_base_timestep`: maximum number of halving base time step, for example `2`
+- `plan_residence_courant`: residence Courant value, usually `0.0`
+- `plan_run_htab`: write `Run HTab=-1` when true
+- `plan_run_unet`: write `Run UNet=-1` when true
+- `plan_run_postprocess`: write `Run PostProcess=-1` when true
+- `plan_run_rasmapper`: write `Run RASMapper=-1` when true
+- `plan_num_cores`: core count written to plan solver settings
+- `upstream_bc_name`: generated upstream BC line name in geometry
+- `downstream_bc_name`: generated downstream BC line name in geometry
+- `upstream_flow_interval`: interval line for upstream flow hydrograph
+- `upstream_flow_hydrograph_slope`: flow hydrograph slope value
+- `downstream_friction_slope`: optional override for normal-depth slope
+- `unsteady_dss_file_relative`: optional override for DSS path inside `.u##`
+- `copy_compute_results_to_project`: copy successful plan result files back to the source project for RAS Mapper review
 
 Notes:
 
 - leave `storage_area_name` and `hdf_2d_area_name` as `null` if autodetect works
 - if autodetect fails, set both explicitly
 - CLI flags override the JSON values
+- with `auto_plan_simulation_date=true`, the workflow uses the selected DSS
+  pathname D-part, for example `01May2025`, plus `simulation_start_time`
+  and `simulation_duration_hours`
+- for Case A junction models, set `cross_section_name` to a two-item list:
+  `["CrossSections/main_stem.csv", "CrossSections/tributary.csv"]`
+- Case A assumes one branch continues downstream past the junction; if both
+  CSVs are upstream tributaries only, provide a downstream BC input instead of
+  relying on automatic connectivity
+- for two CSVs, the workflow attempts branch-specific DSS selection by matching
+  each CSV file name/stem against DSS A-parts; if no match is found, it falls
+  back to the global `preferred_dss_a_part`/`preferred_dss_f_part` path
 
 ## 5. Recommended Run Order
 
 ### Step 1: Dry-run the project shell
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json prepare --skip-terrain
+python .\rasmapper_v01.py --config-json .\new_site_v01.json prepare --skip-terrain
 ```
 
 Use this to catch bad paths and missing inputs quickly.
@@ -168,7 +246,7 @@ Use this to catch bad paths and missing inputs quickly.
 ### Step 2: Full prepare
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json prepare
+python .\rasmapper_v01.py --config-json .\new_site_v01.json prepare
 ```
 
 What `prepare` does:
@@ -189,7 +267,7 @@ What `prepare` does:
 Recommended command:
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json install-geometry --timeout 420
+python .\rasmapper_v01.py --config-json .\new_site_v01.json install-geometry --timeout 420
 ```
 
 What `install-geometry` does:
@@ -202,16 +280,48 @@ What `install-geometry` does:
 - applies `Geometries > Manage Geometry Associations > Manning's n = LandCover`
 - saves the project
 
-### Step 4: Verify Manning values
+### Step 4: Create the unsteady flow and plan files
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json check-mannings --geom g01
+python .\rasmapper_v01.py --config-json .\new_site_v01.json create-unsteady-plan
 ```
 
-### Step 5: Open the project for review
+What `create-unsteady-plan` does:
+
+- creates `<project_name>.u01`
+- creates or copies `<project_name>.u01.hdf`
+- creates `<project_name>.p01`
+- links `Flow File=u01` and `Geom File=g01` inside the plan
+- adds `Unsteady File=u01` and `Plan File=p01` to the project
+- sets `Current Plan=p01`
+- writes `Reports\unsteady_plan_summary.json`
+
+### Step 5: Run the 2D unsteady plan
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json open --timeout 300
+python .\rasmapper_v01.py --config-json .\new_site_v01.json compute-plan --overwrite --timeout 1800
+```
+
+What `compute-plan` does:
+
+- copies the project to `<results_root>\<project_name>_plan##_run`
+- runs HEC-RAS with quoted project and plan filenames
+- automatically accepts the first-run geometry preprocessor prompt
+- adjusts the copied plan simulation window from DSS validation messages if needed
+- writes `Reports\compute_summary.json`
+- writes the final discovered `Simulation Date` back to the source plan
+- copies successful `.p##.hdf`, compute logs, and updated geometry HDF back to the source project
+
+### Step 6: Verify Manning values
+
+```powershell
+python .\rasmapper_v01.py --config-json .\new_site_v01.json check-mannings --geom g01
+```
+
+### Step 7: Open the project for review
+
+```powershell
+python .\rasmapper_v01.py --config-json .\new_site_v01.json open --timeout 300
 ```
 
 ## 6. Alternative Update Path
@@ -219,9 +329,11 @@ python working\rasmapper_v01.py --config-json working\study_areas\new_site.json 
 Use this when the project geometry already exists and you only want to rewrite it from updated inputs:
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json sync-geometry
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json regenerate-geometry --timeout 420
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json check-mannings --geom g01
+python .\rasmapper_v01.py --config-json .\new_site_v01.json sync-geometry
+python .\rasmapper_v01.py --config-json .\new_site_v01.json regenerate-geometry --timeout 420
+python .\rasmapper_v01.py --config-json .\new_site_v01.json create-unsteady-plan
+python .\rasmapper_v01.py --config-json .\new_site_v01.json compute-plan --overwrite --timeout 1800
+python .\rasmapper_v01.py --config-json .\new_site_v01.json check-mannings --geom g01
 ```
 
 Important:
@@ -240,7 +352,7 @@ The project is created under:
 With the default template, this resolves to:
 
 ```text
-<repo>\working\<project_name>\
+F:\codex_rascommander\rasmapper_v01\projects\<project_name>\
 ```
 
 Main outputs:
@@ -249,6 +361,21 @@ Main outputs:
 - `<project_name>.rasmap`
 - `<project_name>.g01`
 - `<project_name>.g01.hdf`
+- `<project_name>.u01`
+- `<project_name>.u01.hdf`
+- `<project_name>.p01`
+
+Compute outputs are saved under:
+
+```text
+<results_root>\<project_name>_plan##_run\
+```
+
+For the standalone Ataturk test, this resolves to:
+
+```text
+F:\codex_rascommander\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\
+```
 
 Typical saved locations inside the project:
 
@@ -281,6 +408,7 @@ After a run, check these files:
 - `Reports\geometry_sync_summary.json`
 - `Reports\mesh_enforcement_summary.json`
 - `Reports\landcover_layer_status.json`
+- `Reports\compute_summary.json`
 - `Reports\region_mannings_check_report.csv`
 - `Boundary\boundary_candidates.csv`
 
@@ -320,7 +448,7 @@ Cause:
 Fix:
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json regenerate-geometry --timeout 420
+python .\rasmapper_v01.py --config-json .\new_site_v01.json regenerate-geometry --timeout 420
 ```
 
 ### `LandCover` is missing or not usable in geometry association
@@ -370,13 +498,15 @@ Use a clean state:
 Main commands:
 
 ```powershell
-python working\rasmapper_v01.py --config-json <json> prepare
-python working\rasmapper_v01.py --config-json <json> prepare --skip-terrain
-python working\rasmapper_v01.py --config-json <json> install-geometry --timeout 420
-python working\rasmapper_v01.py --config-json <json> sync-geometry
-python working\rasmapper_v01.py --config-json <json> regenerate-geometry --timeout 420
-python working\rasmapper_v01.py --config-json <json> check-mannings --geom g01
-python working\rasmapper_v01.py --config-json <json> open --timeout 300
+python .\rasmapper_v01.py --config-json <json> prepare
+python .\rasmapper_v01.py --config-json <json> prepare --skip-terrain
+python .\rasmapper_v01.py --config-json <json> install-geometry --timeout 420
+python .\rasmapper_v01.py --config-json <json> sync-geometry
+python .\rasmapper_v01.py --config-json <json> regenerate-geometry --timeout 420
+python .\rasmapper_v01.py --config-json <json> create-unsteady-plan
+python .\rasmapper_v01.py --config-json <json> compute-plan --overwrite --timeout 1800
+python .\rasmapper_v01.py --config-json <json> check-mannings --geom g01
+python .\rasmapper_v01.py --config-json <json> open --timeout 300
 ```
 
 ## 13. Practical Recommendation
@@ -384,11 +514,13 @@ python working\rasmapper_v01.py --config-json <json> open --timeout 300
 For a new site, use this exact sequence first:
 
 ```powershell
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json prepare --skip-terrain
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json prepare
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json install-geometry --timeout 420
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json check-mannings --geom g01
-python working\rasmapper_v01.py --config-json working\study_areas\new_site.json open --timeout 300
+python .\rasmapper_v01.py --config-json .\new_site_v01.json prepare --skip-terrain
+python .\rasmapper_v01.py --config-json .\new_site_v01.json prepare
+python .\rasmapper_v01.py --config-json .\new_site_v01.json install-geometry --timeout 420
+python .\rasmapper_v01.py --config-json .\new_site_v01.json create-unsteady-plan
+python .\rasmapper_v01.py --config-json .\new_site_v01.json compute-plan --overwrite --timeout 1800
+python .\rasmapper_v01.py --config-json .\new_site_v01.json check-mannings --geom g01
+python .\rasmapper_v01.py --config-json .\new_site_v01.json open --timeout 300
 ```
 
 That is the cleanest path for a new study area.

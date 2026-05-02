@@ -1,0 +1,30 @@
+[
+  {
+    "bc_name": "Ataturk_2D_upstream",
+    "role": "upstream",
+    "station": "1",
+    "mean_z": 952.502,
+    "interior_side": "left",
+    "reverse_if_interior_should_be_right": true,
+    "reverse_if_interior_should_be_left": false,
+    "method": "Flow Hydrograph",
+    "normal_depth_slope": null,
+    "dss_path": "/BUR-BUR-MER-ATATURK-T/BURDUR2/DEBI/01May2025/30Minute/Q100/",
+    "offset_distance": 1.0,
+    "storage_area_name": "AtaturkPerimeter"
+  },
+  {
+    "bc_name": "Ataturk_2D_downstream",
+    "role": "downstream",
+    "station": "11",
+    "mean_z": 937.804,
+    "interior_side": "right",
+    "reverse_if_interior_should_be_right": false,
+    "reverse_if_interior_should_be_left": true,
+    "method": "Normal Depth",
+    "normal_depth_slope": 0.19789524100222472,
+    "dss_path": null,
+    "offset_distance": 1.0,
+    "storage_area_name": "AtaturkPerimeter"
+  }
+]

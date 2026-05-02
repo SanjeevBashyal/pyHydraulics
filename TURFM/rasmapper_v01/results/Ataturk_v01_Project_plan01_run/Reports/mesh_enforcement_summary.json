@@ -1,0 +1,36 @@
+{
+  "available": true,
+  "mesh_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
+  "breaklines": [
+    {
+      "name": "Breakline 1",
+      "near_spacing": 0.5,
+      "far_spacing": 3.0,
+      "near_repeats": 5,
+      "influence_distance": 2.5,
+      "facepoint_count_within_influence": 13521,
+      "closest_facepoint_distance": 0.0,
+      "median_facepoint_distance_within_influence": 1.49999999869198,
+      "within_1x": 2877,
+      "within_2x": 5230,
+      "within_3x": 7942,
+      "within_4x": 10576,
+      "within_5x": 13521
+    },
+    {
+      "name": "Breakline 2",
+      "near_spacing": 0.5,
+      "far_spacing": 3.0,
+      "near_repeats": 5,
+      "influence_distance": 2.5,
+      "facepoint_count_within_influence": 13547,
+      "closest_facepoint_distance": 0.0,
+      "median_facepoint_distance_within_influence": 1.4999999978992562,
+      "within_1x": 2915,
+      "within_2x": 5245,
+      "within_3x": 7858,
+      "within_4x": 10790,
+      "within_5x": 13547
+    }
+  ]
+}

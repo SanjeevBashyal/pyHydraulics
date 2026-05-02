@@ -1,0 +1,69 @@
+{
+  "project_file": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.prj",
+  "unsteady": {
+    "unsteady_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.u01",
+    "unsteady_hdf_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.u01.hdf",
+    "storage_area_name": "AtaturkPerimeter",
+    "upstream_bc_name": "upstream BC",
+    "downstream_bc_name": "downstream BC",
+    "upstream_dss_path": "/BUR-BUR-MER-ATATURK-T/BURDUR2/DEBI/01May2025/30Minute/Q100/",
+    "dss_file": ".\\Boundary\\Burdur_Debiler.dss",
+    "downstream_slope": 0.1978952410022247,
+    "template_unsteady": "F:\\codex_rascommander\\rasmapper_v01\\inputs\\UnsteadyTemplate\\BUR-BUR-MER-ATATURK.u01",
+    "template_unsteady_hdf": "F:\\codex_rascommander\\rasmapper_v01\\inputs\\UnsteadyTemplate\\BUR-BUR-MER-ATATURK.u01.hdf"
+  },
+  "plan": {
+    "plan_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.p01",
+    "template_plan": "F:\\codex_rascommander\\rasmapper_v01\\inputs\\PlanTemplate\\BUR-BUR-MER-ATATURK.p01",
+    "plan_title": "Ataturk_v01_2D_Unsteady",
+    "plan_short_identifier": "Ataturk_v01_U",
+    "simulation_date": "01May2025,0000,02May2025,0000",
+    "geom_file": "g01",
+    "flow_file": "u01",
+    "plan_flow_regime": "Mixed Flow",
+    "computation_interval": "6SEC",
+    "hydrograph_output_interval": "5MIN",
+    "mapping_output_interval": "5MIN",
+    "detailed_output_interval": "5MIN",
+    "use_courant_timestep": true,
+    "max_courant": 1.0,
+    "min_courant": 0.45,
+    "steps_below_min_before_doubling": 4,
+    "max_doubling_base_timestep": 2,
+    "max_halving_base_timestep": 2,
+    "run_htab": -1,
+    "run_unet": -1,
+    "run_rasmapper": -1
+  },
+  "simulation_date": {
+    "simulation_date": "01May2025,0000,02May2025,0000",
+    "source": "dss_path_d_part",
+    "start_datetime": "2025-05-01T00:00:00",
+    "end_datetime": "2025-05-02T00:00:00",
+    "duration_hours": 24.0,
+    "start_offset_hours": 0.0,
+    "end_offset_hours": 0.0,
+    "upstream_dss_path": "/BUR-BUR-MER-ATATURK-T/BURDUR2/DEBI/01May2025/30Minute/Q100/",
+    "dss_parts": {
+      "A": "BUR-BUR-MER-ATATURK-T",
+      "B": "BURDUR2",
+      "C": "DEBI",
+      "D": "01May2025",
+      "E": "30Minute",
+      "F": "Q100"
+    }
+  },
+  "verification": {
+    "project_has_current_plan": true,
+    "project_has_plan_entry": true,
+    "project_has_unsteady_entry": true,
+    "plan_has_geometry": true,
+    "plan_has_unsteady_flow_file": true,
+    "plan_has_no_steady_flow_file": true,
+    "plan_run_unet": true,
+    "unsteady_has_upstream_bc": true,
+    "unsteady_has_downstream_bc": true,
+    "unsteady_uses_dss": true,
+    "unsteady_hdf_exists": true
+  }
+}

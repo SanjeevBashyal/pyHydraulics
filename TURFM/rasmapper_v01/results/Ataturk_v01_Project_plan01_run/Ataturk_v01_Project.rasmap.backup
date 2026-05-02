@@ -1,0 +1,10 @@
+<RASMapper>
+  <Version>2.0</Version>
+  <RASProjectionFilename Filename=".\Terrain\TUREF_CM30_projection.prj" /><Geometries Checked="True" Expanded="True" />
+  <Results Checked="True" Expanded="True" />
+  <Terrains Checked="True" Expanded="True"><Layer Name="Terrain" Type="TerrainLayer" Checked="True" Filename=".\Terrain\BUR-BUR-MER-ATATURK-T_channel.hdf"><ResampleMethod>near</ResampleMethod><Surface On="True" /></Layer></Terrains><MapLayers Checked="True" Expanded="True"><Layer Name="LandCover" Type="LandCoverLayer" Checked="True" Filename=".\Land Classification\LC_At_clip_V1.hdf" /></MapLayers>
+  <CurrentSettings>
+    <ProjectSettings />
+    <Folders />
+  </CurrentSettings>
+<CurrentView><MinX>521586.1931560158</MinX><MaxX>522288.5083553824</MaxX><MinY>4174650.9576768707</MinY><MaxY>4175310.3274055547</MaxY></CurrentView></RASMapper>
