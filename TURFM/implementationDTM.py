@@ -7,17 +7,24 @@ from Automation.callDTM import DTM
 
 
 CONFIG_SOURCE = "folder"
-MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-0"
+MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 SHEET_NAME = None
 
-PROJECTS_TO_RUN: list[str] | None = None
-TARGET_RES = 0.1
+# PROJECTS_TO_RUN: list[str] | None = None
+PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN"]
+TARGET_RES = 0.5
 BUFFER_M = 20.0
 BLEND_TYPE = "cubic"
 BANK_OFFSET_M = 0.2
+SKEWNESS_CORRECTION = True
 FULL_CROSS_SECTION_WEIGHT_DISTANCE_M = 1.5
 TRANSITION_TO_DTM_DISTANCE_M = 5.0
 JUNCTION_TOLERANCE = 50.0
+JUNCTION_CENTERLINE_GAP_M = 0.5
+JUNCTION_BANK_CLIP_BUFFER_M = 5.0
+JUNCTION_CLIP_CROSS_SECTION_COUNT = 2
+JUNCTION_HALF_SECTION_INTERPOLATION = True
+JUNCTION_BANK_STRUCTURE_PROTECTION_M = 1.0
 PERIMETER_OFFSET_M = 500.0
 WRITE_INTERMEDIATE_TIFS = True
 
@@ -66,9 +73,15 @@ if __name__ == "__main__":
         buffer_m=BUFFER_M,
         blend_type=BLEND_TYPE,
         bank_offset_m=BANK_OFFSET_M,
+        skewness_correction=SKEWNESS_CORRECTION,
         full_cross_section_weight_distance_m=FULL_CROSS_SECTION_WEIGHT_DISTANCE_M,
         transition_to_dtm_distance_m=TRANSITION_TO_DTM_DISTANCE_M,
         junction_tolerance=JUNCTION_TOLERANCE,
+        centerline_gap_m=JUNCTION_CENTERLINE_GAP_M,
+        junction_bank_clip_buffer_m=JUNCTION_BANK_CLIP_BUFFER_M,
+        junction_clip_cross_section_count=JUNCTION_CLIP_CROSS_SECTION_COUNT,
+        junction_half_section_interpolation=JUNCTION_HALF_SECTION_INTERPOLATION,
+        junction_bank_structure_protection_m=JUNCTION_BANK_STRUCTURE_PROTECTION_M,
         perimeter_offset_m=PERIMETER_OFFSET_M,
         write_intermediate=WRITE_INTERMEDIATE_TIFS,
     )

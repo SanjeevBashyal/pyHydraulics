@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import asdict, dataclass
 import json
 import logging
@@ -36,14 +37,15 @@ if TYPE_CHECKING:
 # SHEET_NAME: str | None = None
 
 CONFIG_SOURCE = "folder"
-MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-0"
+MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
-PROJECTS_TO_RUN: list[str] | None = None
+# PROJECTS_TO_RUN: list[str] | None = None
+PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN"]
 
-# Optional manual pairing. If omitted, the first sub-project listed in the sheet
-# is used as the main reach and each later sub-project is modeled as a tributary.
+# Optional manual pairing. If omitted, network.csv is used when available.
+# Each pair is (main reach, tributary reach).
 # Example:
 # JUNCTION_PAIRS_BY_PROJECT = {"ATATURK": [("ATATURK-V1", "ATATURK-T")]}
 JUNCTION_PAIRS_BY_PROJECT: dict[str, list[tuple[str, str]]] = {}
@@ -54,6 +56,7 @@ CENTERLINE_SAMPLES_PER_SEGMENT = 500
 BANK_STATION_MODE = "snap"
 RIVER_LINE_METHOD = "simple_distance"
 RETURN_PERIODS: list[str] | None = None
+ALL_FLOW_IN_SINGLE_PLAN = True
 USE_EXISTING_PROJECT_GEOMETRY_AS_REFERENCE = False
 
 
@@ -163,6 +166,75 @@ def find_essential_file(config: Config, preferred_name: str, pattern: str) -> Pa
     )
 
 
+def find_network_csv(config: Config) -> Path | None:
+    preferred = Path(config.ESSENTIALS_PATH) / "network.csv"
+    if preferred.exists():
+        return preferred
+
+    candidates = sorted(Path(config.PROJECT_FOLDER).glob("0*Essentials*/network.csv"))
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def read_network_pairs(config: Config) -> list[tuple[str, str]]:
+    network_csv = find_network_csv(config)
+    if network_csv is None:
+        return []
+
+    with network_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or len(reader.fieldnames) < 2:
+            return []
+
+        field_lookup = {field.strip().casefold(): field for field in reader.fieldnames}
+        from_field = field_lookup.get("from") or reader.fieldnames[0]
+        to_field = field_lookup.get("to") or reader.fieldnames[1]
+        pairs = []
+        for row in reader:
+            from_name = str(row.get(from_field, "")).strip()
+            to_name = str(row.get(to_field, "")).strip()
+            if from_name and to_name:
+                pairs.append((from_name, to_name))
+        return pairs
+
+
+def network_pairings_for_project(
+    config: Config,
+    models: list[ModelInput],
+    network_pairs: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    model_aliases: list[tuple[ModelInput, set[str]]] = []
+    for model in models:
+        aliases = {
+            model.sub_project_name,
+            model.project_stem,
+            Path(model.paths.sub_project_path).name,
+            Path(model.paths.cross_section_file_path).stem,
+        }
+        model_aliases.append((model, {_normalize_name(alias) for alias in aliases if alias}))
+
+    def find_model(name: str) -> ModelInput | None:
+        normalized = _normalize_name(name)
+        for model, aliases in model_aliases:
+            if any(_names_match(normalized, alias) for alias in aliases):
+                return model
+        return None
+
+    pairings: list[tuple[str, str]] = []
+    pairs = network_pairs if network_pairs is not None else read_network_pairs(config)
+    for from_name, to_name in pairs:
+        tributary_model = find_model(from_name)
+        main_model = find_model(to_name)
+        if tributary_model is None or main_model is None:
+            continue
+        if tributary_model.sub_project_name == main_model.sub_project_name:
+            continue
+        pairings.append((main_model.sub_project_name, tributary_model.sub_project_name))
+
+    return pairings
+
+
 def find_combined_bank_lines_shp(
     config: Config,
     main_model: ModelInput,
@@ -178,9 +250,14 @@ def find_combined_bank_lines_shp(
     ]
     name_pairs = [
         (main_model.sub_project_name, tributary_model.sub_project_name),
+        (tributary_model.sub_project_name, main_model.sub_project_name),
         (
             main_model.project_stem.replace("BUR-BUR-MER-", ""),
             tributary_model.project_stem.replace("BUR-BUR-MER-", ""),
+        ),
+        (
+            tributary_model.project_stem.replace("BUR-BUR-MER-", ""),
+            main_model.project_stem.replace("BUR-BUR-MER-", ""),
         ),
     ]
 
@@ -251,6 +328,7 @@ def run_single_model(
         "bank_station_mode": BANK_STATION_MODE,
         "river_line_method": RIVER_LINE_METHOD,
         "return_periods": RETURN_PERIODS,
+        "all_flows_in_single_plan": ALL_FLOW_IN_SINGLE_PLAN,
     }
 
     logger.info("Single model %s/%s -> %s", model.project_name, model.sub_project_name, output_folder)
@@ -373,12 +451,34 @@ def run_project(
         ]
 
     pairings = JUNCTION_PAIRS_BY_PROJECT.get(project_name)
+    network_pairs = read_network_pairs(config)
     if pairings is None:
-        main_model = models[0]
-        pairings = [
-            (main_model.sub_project_name, tributary.sub_project_name)
-            for tributary in models[1:]
+        pairings = network_pairings_for_project(config, models, network_pairs=network_pairs)
+    if not pairings and network_pairs:
+        logger.info(
+            "No network.csv junction pair matched project %s; running sub-projects separately.",
+            project_name,
+        )
+        return [
+            guarded_run(
+                lambda model=model: run_single_model(
+                    hec=hec,
+                    config=config,
+                    model=model,
+                    hydrology_kmz=hydrology_kmz,
+                    projection_file=projection_file,
+                    dry_run=dry_run,
+                ),
+                project_name=project_name,
+                sub_projects=[model.sub_project_name],
+                run_type="single",
+                continue_on_error=continue_on_error,
+            )
+            for model in models
         ]
+    if not pairings:
+        main_model = models[0]
+        pairings = [(main_model.sub_project_name, tributary.sub_project_name) for tributary in models[1:]]
 
     model_by_name = {_normalize_name(model.sub_project_name): model for model in models}
     results: list[WorkflowResult] = []
@@ -462,6 +562,16 @@ def version_sort_key(path: Path) -> tuple[int, float, str]:
 
 def _normalize_name(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "", value).upper()
+
+
+def _names_match(left_normalized: str, right_normalized: str) -> bool:
+    if not left_normalized or not right_normalized:
+        return False
+    return (
+        left_normalized == right_normalized
+        or left_normalized.endswith(right_normalized)
+        or right_normalized.endswith(left_normalized)
+    )
 
 
 def build_hecras(ras_exe_path: Path) -> HECRAS:

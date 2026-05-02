@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,9 +15,9 @@ from sheets import GoogleSheetsClient, sheet_id
 # DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
 
 DIRECT_RUN_SOURCE = "folder"
-DIRECT_RUN_MASTER_PROJECT_PATH = Path(r"C:\Users\Ripple\Downloads\Group-4")
+DIRECT_RUN_MASTER_PROJECT_PATH = Path(r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model")
 DIRECT_RUN_SHEET_NAME = None
-DIRECT_RUN_PREPARE_FULL_STRUCTURE = True
+DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class SubProjectPaths:
     cross_section_file_path: str
     bank_line_path: str
     bank_line_file_path: str
+    dtm_path: str
 
 
 @dataclass
@@ -75,15 +77,17 @@ class Config:
     master_project_path: str | None = None
     project_folder: str | None = None
     create_master_folder_if_missing: bool = False
-    PROJECT_NAME: str = "ATATURK"
-    SUB_PROJECT_NAME: str = "ATATURK-T"
-    PROJECT_SHORT_NAME: str = "ATATURK-T"
+    PROJECT_NAME: str = ""
+    SUB_PROJECT_NAME: str = ""
+    PROJECT_SHORT_NAME: str = ""
 
     # Processing Config
     BLEND_TYPE: str = "linear"
     HECRAS_VERSION: str = "6.7"
     RAS_EXE_PATH: str = r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\Ras.exe"
     DEM_FILENAME: str = "SET4_27_DTM_070226_R1.tif"
+    DTM_INDEX_FILENAME: str = "dtm.csv"
+    DTM_DIRNAME: str = "DTMs"
     CROSS_SECTION_DIRNAME: str = "KESIT_TESLIM"
     BANK_LINE_DIRNAME: str = "SEV_USTU"
     IGNORED_PROJECT_FOLDER_NAMES: tuple[str, ...] = ("Z Received",)
@@ -115,6 +119,8 @@ class Config:
     PROJECT_GROUP: str = field(init=False, default="")
 
     DEM_PATH: str = field(init=False)
+    DTM_INDEX_PATH: str = field(init=False)
+    DTM_FOLDER_PATH: str = field(init=False)
     CROSS_SECTION_PATH: str = field(init=False)
     CROSS_SECTION_FILE_PATH: str = field(init=False)
     BANK_LINE_PATH: str = field(init=False)
@@ -367,7 +373,8 @@ class Config:
             setattr(self, self._to_attr_name(entry.relative_parts), absolute_path)
 
     def _refresh_compatibility_paths(self):
-        self.PROJECT_LONG_NAME = f"BUR-BUR-MER-{self.PROJECT_SHORT_NAME}"
+        self._select_active_names_from_structure_if_missing()
+        self.PROJECT_LONG_NAME = self._project_long_name_from_short_name(self.PROJECT_SHORT_NAME)
 
         self.ESSENTIALS_PATH = self._sheet_path_or_default("0 Essentials")
         self.BUR_BUR_PATH = self._sheet_path_or_default("1 Bur-Bur")
@@ -376,6 +383,8 @@ class Config:
         self.OUTPUT_ROOT_PATH = self._sheet_path_or_default("4 Outputs")
         self.OUTPUT_PATH = self.OUTPUT_ROOT_PATH
         self.TEMP_PATH = self._sheet_path_or_default("5 Temp")
+        self.DTM_INDEX_PATH = str(Path(self.ESSENTIALS_PATH) / self.DTM_INDEX_FILENAME)
+        self.DTM_FOLDER_PATH = str(Path(self.ESSENTIALS_PATH) / self.DTM_DIRNAME)
 
         project_relative_path = self._resolve_project_relative_path()
         self.PROJECT_GROUP = self._project_group_from_relative_path(project_relative_path)
@@ -390,7 +399,11 @@ class Config:
         self.TEMP_PROJECT_PATH = str(Path(self.TEMP_PATH) / active_project_name)
         self.TEMP_SUB_PROJECT_PATH = str(Path(self.TEMP_PROJECT_PATH) / self.SUB_PROJECT_NAME)
 
-        self.DEM_PATH = str(Path(self.ESSENTIALS_PATH) / self.DEM_FILENAME)
+        self.DEM_PATH = self.resolve_dtm_path(
+            project_name=active_project_name,
+            sub_project_name=self.SUB_PROJECT_NAME,
+            required=False,
+        )
         self.CROSS_SECTION_PATH = str(
             Path(self.PROJECT_DATA_PATH) / self.CROSS_SECTION_DIRNAME
         )
@@ -402,6 +415,38 @@ class Config:
         self.BANK_LINE_FILE_PATH = str(
             Path(self.BANK_LINE_PATH) / f"{self.PROJECT_LONG_NAME}_{self.BANK_LINE_DIRNAME}.shp"
         )
+
+    def _select_active_names_from_structure_if_missing(self):
+        """
+        Keeps legacy active-project attributes usable without hardcoded project
+        names. Project execution still uses discover_project_subprojects().
+        """
+        project_name = self._clean_cell(self.PROJECT_NAME)
+        sub_project_name = self._clean_cell(self.SUB_PROJECT_NAME)
+        project_short_name = self._clean_cell(self.PROJECT_SHORT_NAME)
+
+        project_subprojects: dict[str, list[str]] = {}
+        for entry in self.FOLDER_ENTRIES:
+            parts = entry.relative_parts
+            if len(parts) == 2 and parts[0] == "1 Bur-Bur":
+                project_subprojects.setdefault(parts[1], [])
+            elif len(parts) == 3 and parts[0] == "1 Bur-Bur":
+                project_subprojects.setdefault(parts[1], []).append(parts[2])
+
+        if not project_name and project_subprojects:
+            project_name = next(iter(project_subprojects))
+
+        if not sub_project_name and project_name:
+            sub_projects = project_subprojects.get(project_name, [])
+            if sub_projects:
+                sub_project_name = sub_projects[0]
+
+        if not project_short_name:
+            project_short_name = self._project_short_name_from_long_name(sub_project_name or project_name)
+
+        self.PROJECT_NAME = project_name
+        self.SUB_PROJECT_NAME = sub_project_name
+        self.PROJECT_SHORT_NAME = project_short_name
 
     def set_project_folder(
         self,
@@ -428,6 +473,7 @@ class Config:
         sub_project_name: str,
         cross_section_stem: str | None = None,
         bank_line_stem: str | None = None,
+        resolve_dtm: bool = False,
     ) -> SubProjectPaths:
         """
         Resolves all important paths for one project/sub-project.
@@ -454,6 +500,7 @@ class Config:
             file_stem=bank_line_stem,
         )
         bank_line_path = str(Path(bank_line_file_path).parent)
+        dtm_path = self.resolve_dtm_path(project_name, sub_project_name) if resolve_dtm else ""
         gis_project_path = self.get_gis_project_path(project_name)
         output_project_path = self.get_output_project_path(project_name)
         temp_project_path = self.get_temp_project_path(project_name)
@@ -475,6 +522,7 @@ class Config:
             cross_section_file_path=cross_section_file_path,
             bank_line_path=bank_line_path,
             bank_line_file_path=bank_line_file_path,
+            dtm_path=dtm_path,
         )
 
     def set_active_sub_project(
@@ -497,6 +545,7 @@ class Config:
             sub_project_name=sub_project_name,
             cross_section_stem=cross_section_stem,
             bank_line_stem=bank_line_stem,
+            resolve_dtm=False,
         )
 
         self.PROJECT_NAME = paths.project_name
@@ -516,6 +565,8 @@ class Config:
         self.CROSS_SECTION_FILE_PATH = paths.cross_section_file_path
         self.BANK_LINE_PATH = paths.bank_line_path
         self.BANK_LINE_FILE_PATH = paths.bank_line_file_path
+        if paths.dtm_path:
+            self.DEM_PATH = paths.dtm_path
 
         self.PROJECT_LONG_NAME = self._project_long_name_from_file(paths.cross_section_file_path)
         self.PROJECT_SHORT_NAME = self._project_short_name_from_long_name(self.PROJECT_LONG_NAME)
@@ -591,6 +642,247 @@ class Config:
                 extension=".shp",
             )
         )
+
+    def resolve_dtm_path(
+        self,
+        project_name: str | None = None,
+        sub_project_name: str | None = None,
+        dtm_name: str | None = None,
+        required: bool = True,
+    ) -> str:
+        """
+        Resolves the DTM raster for a project/sub-project.
+
+        If ``0 Essentials/dtm.csv`` exists, it is treated as the DTM index and
+        the selected DTM token is matched as ``<token>*.tif`` inside
+        ``0 Essentials/DTMs``. The root ``0 Essentials`` folder is also searched
+        as a backward-compatible fallback.
+        """
+        selected_dtm_name = self._clean_cell(dtm_name or "")
+        if not selected_dtm_name:
+            selected_dtm_name = self._lookup_dtm_name(project_name, sub_project_name) or ""
+
+        if selected_dtm_name:
+            try:
+                return str(self._resolve_dtm_file(selected_dtm_name))
+            except FileNotFoundError:
+                if required:
+                    raise
+
+        if required and Path(self.DTM_INDEX_PATH).exists() and not selected_dtm_name:
+            raise FileNotFoundError(
+                f"No matching DTM row was found in {Path(self.DTM_INDEX_PATH)} for "
+                f"project {project_name!r}, sub-project {sub_project_name!r}."
+            )
+
+        fallback = self._resolve_default_dtm_path(required=required)
+        return str(fallback)
+
+    def _lookup_dtm_name(
+        self,
+        project_name: str | None,
+        sub_project_name: str | None,
+    ) -> str | None:
+        dtm_index_path = Path(self.DTM_INDEX_PATH)
+        if not dtm_index_path.exists():
+            return None
+
+        fieldnames, rows = self._read_delimited_dict_rows(dtm_index_path)
+        if not rows or not fieldnames:
+            return None
+
+        dtm_column = self._find_dtm_index_column(
+            fieldnames,
+            preferred=("DTM", "DTMName", "DTMPrefix", "DEM", "DEMName", "Raster", "RasterName", "TIF", "TIFF"),
+            contains=("DTM", "DEM", "RASTER", "TIF", "TIFF"),
+        )
+        if dtm_column is None:
+            raise ValueError(
+                f"Could not find a DTM name column in {dtm_index_path}. "
+                "Use a column such as 'DTM' or 'DTM Name'."
+            )
+
+        project_column = self._find_dtm_index_column(
+            fieldnames,
+            preferred=("Project", "ProjectName", "ProjectShortName", "MainProject"),
+            contains=("PROJECT",),
+            reject_contains=("SUB",),
+        )
+        sub_project_column = self._find_dtm_index_column(
+            fieldnames,
+            preferred=("SubProject", "SubProjectName", "SubProjectFolder", "SubProjectPath", "Channel", "River", "RiverName"),
+            contains=("SUBPROJECT", "CHANNEL", "RIVER"),
+        )
+
+        project_name = self._clean_cell(project_name or "")
+        sub_project_name = self._clean_cell(sub_project_name or "")
+        best_score = -1
+        best_dtm_name = None
+
+        for row in rows:
+            score = 0
+            has_filter = False
+
+            if project_column:
+                project_value = self._clean_cell(row.get(project_column, ""))
+                if project_value:
+                    has_filter = True
+                    if not self._names_match(project_name, project_value):
+                        continue
+                    score += 2
+
+            if sub_project_column:
+                sub_project_value = self._clean_cell(row.get(sub_project_column, ""))
+                if sub_project_value:
+                    has_filter = True
+                    if not self._names_match(sub_project_name, sub_project_value):
+                        continue
+                    score += 4
+
+            if not has_filter:
+                first_value = self._clean_cell(row.get(fieldnames[0], ""))
+                if not (
+                    self._names_match(project_name, first_value)
+                    or self._names_match(sub_project_name, first_value)
+                ):
+                    continue
+                score += 1
+
+            dtm_value = self._clean_cell(row.get(dtm_column, ""))
+            if not dtm_value:
+                continue
+
+            if score > best_score:
+                best_score = score
+                best_dtm_name = dtm_value
+
+        return best_dtm_name
+
+    @classmethod
+    def _read_delimited_dict_rows(cls, path: Path) -> tuple[list[str], list[dict[str, str]]]:
+        text = path.read_text(encoding="utf-8-sig")
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return [], []
+
+        sample = "\n".join(lines[:20])
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            first_line = lines[0]
+            delimiter = "\t" if "\t" in first_line else ";" if ";" in first_line else "|" if "|" in first_line else ","
+            dialect = csv.excel()
+            dialect.delimiter = delimiter
+
+        reader = csv.DictReader(lines, dialect=dialect)
+        if not reader.fieldnames:
+            return [], []
+
+        clean_fieldnames = [cls._clean_cell(field or "") for field in reader.fieldnames]
+        rows: list[dict[str, str]] = []
+        for raw_row in reader:
+            row: dict[str, str] = {}
+            for raw_field, clean_field in zip(reader.fieldnames, clean_fieldnames):
+                if not clean_field:
+                    continue
+                row[clean_field] = cls._clean_cell(raw_row.get(raw_field, ""))
+            if any(value for value in row.values()):
+                rows.append(row)
+
+        return [field for field in clean_fieldnames if field], rows
+
+    @classmethod
+    def _find_dtm_index_column(
+        cls,
+        fieldnames: list[str],
+        preferred: tuple[str, ...],
+        contains: tuple[str, ...] = (),
+        reject_contains: tuple[str, ...] = (),
+    ) -> str | None:
+        normalized_lookup = {cls._normalize_name(field): field for field in fieldnames}
+        for candidate in preferred:
+            match = normalized_lookup.get(cls._normalize_name(candidate))
+            if match is not None:
+                return match
+
+        for field in fieldnames:
+            normalized = cls._normalize_name(field)
+            if reject_contains and any(token in normalized for token in reject_contains):
+                continue
+            if contains and any(token in normalized for token in contains):
+                return field
+        return None
+
+    def _resolve_dtm_file(self, dtm_name: str) -> Path:
+        clean_name = self._clean_cell(dtm_name)
+        candidate_path = Path(clean_name).expanduser()
+
+        if candidate_path.is_absolute() and candidate_path.exists():
+            return candidate_path
+
+        search_roots = [
+            Path(self.DTM_FOLDER_PATH),
+            Path(self.ESSENTIALS_PATH),
+        ]
+        if not candidate_path.is_absolute() and candidate_path.parent != Path("."):
+            search_roots.insert(0, Path(self.ESSENTIALS_PATH) / candidate_path.parent)
+            clean_name = candidate_path.name
+
+        patterns = []
+        if any(char in clean_name for char in "*?"):
+            patterns.append(clean_name)
+        elif Path(clean_name).suffix.lower() in {".tif", ".tiff"}:
+            patterns.extend([clean_name, f"{Path(clean_name).stem}*.tif", f"{Path(clean_name).stem}*.tiff"])
+        else:
+            patterns.extend([f"{clean_name}*.tif", f"{clean_name}*.tiff"])
+
+        candidates: list[Path] = []
+        for root in search_roots:
+            if not root.exists():
+                continue
+            for pattern in patterns:
+                candidates.extend(
+                    path
+                    for path in root.glob(pattern)
+                    if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+                )
+
+        if candidates:
+            return self._select_best_path(list(dict.fromkeys(candidates)))
+
+        available = self._available_dtm_raster_names()
+        available_message = f" Available rasters: {', '.join(available)}." if available else ""
+        raise FileNotFoundError(
+            f"Could not find DTM raster matching {dtm_name!r}. "
+            f"Searched {Path(self.DTM_FOLDER_PATH)} and {Path(self.ESSENTIALS_PATH)} using '<DTM name>*.tif'."
+            f"{available_message}"
+        )
+
+    def _available_dtm_raster_names(self) -> list[str]:
+        names = []
+        for root in (Path(self.DTM_FOLDER_PATH), Path(self.ESSENTIALS_PATH)):
+            if not root.exists():
+                continue
+            for path in root.glob("*"):
+                if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}:
+                    names.append(path.name)
+        return sorted(set(names))
+
+    def _resolve_default_dtm_path(self, required: bool = True) -> Path:
+        candidates = [
+            Path(self.ESSENTIALS_PATH) / self.DEM_FILENAME,
+            Path(self.DTM_FOLDER_PATH) / self.DEM_FILENAME,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        if required:
+            raise FileNotFoundError(
+                f"No DTM could be resolved. Add {Path(self.DTM_INDEX_PATH)} "
+                f"or place {self.DEM_FILENAME!r} in {Path(self.DTM_FOLDER_PATH)}."
+            )
+        return candidates[0]
 
     def get_path(self, *parts: str) -> str:
         """Returns an absolute path for a relative folder path from the sheet."""
@@ -772,17 +1064,27 @@ class Config:
         ]
 
         for target_name in (
+            self.PROJECT_NAME,
             self.PROJECT_SHORT_NAME,
             self.PROJECT_LONG_NAME,
+            self._normalize_name(self.PROJECT_NAME),
             self._normalize_name(self.PROJECT_SHORT_NAME),
             self._normalize_name(self.PROJECT_LONG_NAME),
         ):
+            if not target_name:
+                continue
             for candidate in project_candidates:
                 candidate_name = Path(candidate).name
                 if candidate_name == target_name:
                     return candidate
                 if self._normalize_name(candidate_name) == target_name:
                     return candidate
+
+        if self.PROJECT_NAME:
+            return Path("1 Bur-Bur", self.PROJECT_NAME).as_posix()
+
+        if project_candidates:
+            return project_candidates[0]
 
         return Path("1 Bur-Bur", self.PROJECT_LONG_NAME).as_posix()
 
@@ -808,6 +1110,18 @@ class Config:
     @staticmethod
     def _normalize_name(value: str) -> str:
         return re.sub(r"[^0-9A-Za-z]+", "", value).upper()
+
+    @classmethod
+    def _names_match(cls, left: str, right: str) -> bool:
+        left_norm = cls._normalize_name(cls._clean_cell(left or ""))
+        right_norm = cls._normalize_name(cls._clean_cell(right or ""))
+        if not left_norm or not right_norm:
+            return False
+        return (
+            left_norm == right_norm
+            or left_norm.endswith(right_norm)
+            or right_norm.endswith(left_norm)
+        )
 
     def _resolve_child_directory(
         self,
@@ -932,6 +1246,16 @@ class Config:
         if project_long_name.upper().startswith(prefix):
             return project_long_name[len(prefix):]
         return project_long_name
+
+    @staticmethod
+    def _project_long_name_from_short_name(project_short_name: str) -> str:
+        project_short_name = str(project_short_name or "").strip()
+        if not project_short_name:
+            return ""
+        prefix = "BUR-BUR-MER-"
+        if project_short_name.upper().startswith(prefix):
+            return project_short_name
+        return f"{prefix}{project_short_name}"
 
 
 def parse_direct_run_args() -> argparse.Namespace:

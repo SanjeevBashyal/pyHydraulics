@@ -31,16 +31,50 @@ class DTM:
 
         channel_inputs = []
         for sub_project_name in sub_project_names:
-            paths = self.config.get_sub_project_paths(project_name, sub_project_name)
+            paths = self.config.get_sub_project_paths(
+                project_name,
+                sub_project_name,
+                resolve_dtm=True,
+            )
             channel_inputs.append(
                 {
                     "name": paths.sub_project_name,
                     "cross_section_csv": paths.cross_section_file_path,
                     "bank_shp_path": paths.bank_line_file_path,
+                    "dtm_path": paths.dtm_path,
                 }
             )
 
         return channel_inputs
+
+    def get_network_csv_path(self):
+        for filename in ("networks.csv", "network.csv"):
+            preferred = Path(self.config.ESSENTIALS_PATH) / filename
+            if preferred.exists():
+                return preferred
+
+        candidates = []
+        for filename in ("networks.csv", "network.csv"):
+            candidates.extend(Path(self.config.PROJECT_FOLDER).glob(f"0*Essentials*/{filename}"))
+        candidates = sorted(candidates)
+        if candidates:
+            return candidates[0]
+        return None
+
+    def preflight_project_dtms(self, project_subprojects):
+        missing = []
+        for project_name, sub_project_names in project_subprojects.items():
+            for sub_project_name in sub_project_names:
+                try:
+                    self.config.resolve_dtm_path(project_name, sub_project_name)
+                except FileNotFoundError as exc:
+                    missing.append(f"{project_name}/{sub_project_name}: {exc}")
+
+        if missing:
+            raise FileNotFoundError(
+                "Could not resolve DTM raster(s) before running DTM interpolation:\n"
+                + "\n".join(f"- {message}" for message in missing)
+            )
 
     def process_project_channels(
         self,
@@ -55,6 +89,13 @@ class DTM:
         junction_tolerance=50.0,
         perimeter_offset_m=500.0,
         write_intermediate=True,
+        network_csv_path=None,
+        centerline_gap_m=0.5,
+        junction_bank_clip_buffer_m=5.0,
+        junction_clip_cross_section_count=2,
+        junction_half_section_interpolation=True,
+        junction_bank_structure_protection_m=1.0,
+        skewness_correction=True,
     ):
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
         gis_output_dir = Path(self.config.get_gis_project_path(project_name)) / "DTM"
@@ -62,6 +103,7 @@ class DTM:
         gis_output_dir.mkdir(parents=True, exist_ok=True)
         temp_output_dir.mkdir(parents=True, exist_ok=True)
         resolved_blend_type = blend_type or self.config.BLEND_TYPE
+        resolved_network_csv_path = network_csv_path or self.get_network_csv_path()
 
         terrain_stem = (
             f"{project_name}_channel_terrain"
@@ -70,24 +112,66 @@ class DTM:
         )
 
         print(f"--- Processing DTM project {project_name}: {[item['name'] for item in channel_inputs]} ---")
-        return DTMChannelModifier.process_channel_network_dtm(
-            dtm_path=self.config.DEM_PATH,
-            channel_inputs=channel_inputs,
-            output_tif_path=gis_output_dir / f"{terrain_stem}.tif",
-            target_res=target_res,
-            buffer_m=buffer_m,
-            blend_type=resolved_blend_type,
-            bank_offset_m=bank_offset_m,
-            full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
-            transition_to_dtm_distance_m=transition_to_dtm_distance_m,
-            junction_tolerance=junction_tolerance,
-            write_intermediate=write_intermediate,
-            centerline_output_path=gis_output_dir / f"{project_name}_Centerlines.shp",
-            merged_banks_output_path=gis_output_dir / f"{project_name}_Merged_Banks.shp",
-            perimeter_output_path=gis_output_dir / f"{project_name}_Study_Perimeter.shp",
-            perimeter_offset_m=perimeter_offset_m,
-            intermediate_output_dir=temp_output_dir / "intermediate_channel_tifs",
-        )
+        channel_groups: dict[str, list[dict]] = {}
+        for channel in channel_inputs:
+            dtm_path = str(Path(channel.get("dtm_path") or self.config.DEM_PATH))
+            channel_groups.setdefault(dtm_path, []).append(channel)
+
+        results = []
+        multiple_dtms = len(channel_groups) > 1
+        if multiple_dtms:
+            print(
+                f"Project {project_name} uses {len(channel_groups)} DTM rasters; "
+                "processing one shared raster window per DTM group."
+            )
+
+        for dtm_path, grouped_channels in channel_groups.items():
+            group_suffix = ""
+            if multiple_dtms:
+                group_suffix = f"_{DTMChannelModifier._safe_name(Path(dtm_path).stem)}"
+
+            group_terrain_stem = (
+                f"{project_name}_channel_terrain{group_suffix}"
+                if len(grouped_channels) == 1
+                else f"{terrain_stem}{group_suffix}"
+            )
+
+            result = DTMChannelModifier.process_channel_network_dtm(
+                dtm_path=dtm_path,
+                channel_inputs=grouped_channels,
+                output_tif_path=gis_output_dir / f"{group_terrain_stem}.tif",
+                target_res=target_res,
+                buffer_m=buffer_m,
+                blend_type=resolved_blend_type,
+                bank_offset_m=bank_offset_m,
+                full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
+                transition_to_dtm_distance_m=transition_to_dtm_distance_m,
+                junction_tolerance=junction_tolerance,
+                write_intermediate=write_intermediate,
+                centerline_output_path=gis_output_dir / f"{project_name}_Centerlines{group_suffix}.shp",
+                merged_banks_output_path=gis_output_dir / f"{project_name}_Merged_Banks{group_suffix}.shp",
+                perimeter_output_path=gis_output_dir / f"{project_name}_Study_Perimeter{group_suffix}.shp",
+                perimeter_offset_m=perimeter_offset_m,
+                intermediate_output_dir=temp_output_dir / f"intermediate_channel_tifs{group_suffix}",
+                network_csv_path=resolved_network_csv_path,
+                centerline_gap_m=centerline_gap_m,
+                connected_banks_output_dir=Path(self.config.get_gis_project_path(project_name)),
+                junction_bank_clip_buffer_m=junction_bank_clip_buffer_m,
+                junction_clip_cross_section_count=junction_clip_cross_section_count,
+                junction_half_section_interpolation=junction_half_section_interpolation,
+                junction_bank_structure_protection_m=junction_bank_structure_protection_m,
+                skewness_correction=skewness_correction,
+            )
+            result["dtm_path"] = str(dtm_path)
+            results.append(result)
+
+        if len(results) == 1:
+            return results[0]
+        return {
+            "project": project_name,
+            "dtm_group_count": len(results),
+            "dtm_group_results": results,
+        }
 
     def process_structure_projects(
         self,
@@ -101,6 +185,13 @@ class DTM:
         junction_tolerance=50.0,
         perimeter_offset_m=500.0,
         write_intermediate=True,
+        network_csv_path=None,
+        centerline_gap_m=0.5,
+        junction_bank_clip_buffer_m=5.0,
+        junction_clip_cross_section_count=2,
+        junction_half_section_interpolation=True,
+        junction_bank_structure_protection_m=1.0,
+        skewness_correction=True,
     ):
         project_subprojects = self.discover_project_subprojects()
         if isinstance(projects, str):
@@ -119,6 +210,8 @@ class DTM:
                 f"In folder mode, check that {Path(self.config.BUR_BUR_PATH)} contains project folders with sub-project folders."
             )
 
+        self.preflight_project_dtms(project_subprojects)
+
         results = []
         for project_name, sub_project_names in project_subprojects.items():
             results.append(
@@ -134,6 +227,13 @@ class DTM:
                     junction_tolerance=junction_tolerance,
                     perimeter_offset_m=perimeter_offset_m,
                     write_intermediate=write_intermediate,
+                    network_csv_path=network_csv_path,
+                    centerline_gap_m=centerline_gap_m,
+                    junction_bank_clip_buffer_m=junction_bank_clip_buffer_m,
+                    junction_clip_cross_section_count=junction_clip_cross_section_count,
+                    junction_half_section_interpolation=junction_half_section_interpolation,
+                    junction_bank_structure_protection_m=junction_bank_structure_protection_m,
+                    skewness_correction=skewness_correction,
                 )
             )
 
@@ -151,6 +251,7 @@ class DTM:
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
         transition_to_dtm_distance_m=5.0,
+        skewness_correction=True,
     ):
         """
         Generates the interpolated DTM channel terrain for the active sub-project.
@@ -174,6 +275,7 @@ class DTM:
             bank_offset_m=bank_offset_m,
             full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
             transition_to_dtm_distance_m=transition_to_dtm_distance_m,
+            skewness_correction=skewness_correction,
         )
 
         if modifier is None:

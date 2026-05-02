@@ -33,5 +33,5 @@ SN,Easting,Northing,Bed width,Bank slope,Bed elevation,Type,Spill left,Spillway 
 32,616082.078,3096599.767,4.257,0,631.5,Normal,No,,,Yes,635.5,,drain
 33,616082.153,3096598.77,4.148,0,631.5,Normal,No,,,Yes,635.5,,drain
 34,616082.227,3096597.773,4.038,0,631.5,Normal,No,,,Yes,635.5,,drain
-35,616082.302,3096596.775,3.929,0,631.5,Normal,No,,,Yes,635.5,,drain
-36,616082.376,3096595.778,3.82,0,631.5,Normal,No,,,Yes,635.5,,drain
+35,616082.302,3096596.775,3.929,0,631.5,Normal,No,,,Yes,636.5,,drain
+36,616082.376,3096595.778,3.82,0,631.5,Normal,No,,,No,,,

@@ -209,19 +209,16 @@ class HECRAS:
        set.
     """
 
-    LOWER_REACH_SUFFIX = "-L"
-    LEGACY_LOWER_REACH_SUFFIX = "-Lower"
-
     def __init__(
         self,
-        hecras_version: str = "RAS67.HECRASController",
+        hecras_version: str = "RAS66.HECRASController",
         ras_exe_path: Optional[str | Path] = None,
     ) -> None:
         self.hecras_version = hecras_version
         self.ras_exe_path = (
             Path(ras_exe_path)
             if ras_exe_path is not None
-            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\Ras.exe")
+            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\Ras.exe")
         )
         self.hec = None
         self.project_path: Optional[Path] = None
@@ -332,7 +329,6 @@ class HECRAS:
         """
         Build a minimal steady 1D HEC-RAS project in `project_folder`.
         """
-        self._set_target_projection_crs(projection_file)
         geometry_context = self._prepare_geometry_context(
             cross_section_csv=cross_section_csv,
             bank_lines_shp=bank_lines_shp,
@@ -393,7 +389,6 @@ class HECRAS:
             else ["Q1000", "Q500", "Q100", "Q50", "Q25", "Q10", "Q5"]
         )
 
-        self._set_target_projection_crs(projection_file)
         geometry_context = self._prepare_geometry_context(
             cross_section_csv=cross_section_csv,
             bank_lines_shp=bank_lines_shp,
@@ -879,7 +874,6 @@ class HECRAS:
             else ["Q1000", "Q500", "Q100", "Q50", "Q25", "Q10", "Q5"]
         )
 
-        self._set_target_projection_crs(projection_file)
         geometry_context = self._prepare_junction_geometry_context(
             main_cross_section_csv=main_cross_section_csv,
             main_bank_lines_shp=main_bank_lines_shp,
@@ -1531,7 +1525,7 @@ class HECRAS:
             reach_name=main_context["reach"],
             river_station_offset=4000.0,
         )
-        lower_reach_name = self._lower_reach_name(main_context["reach"])
+        lower_reach_name = f"{main_context['reach']}-Lower"
         lower_context = self._build_reach_context_from_existing_context(
             geometry_context=main_context,
             start_index=main_split["downstream_start_index"],
@@ -1660,10 +1654,7 @@ class HECRAS:
             lower_context = self._replace_reach_identity(
                 lower_context,
                 river=downstream_reach[0],
-                reach=self._normalize_lower_reach_name(
-                    main_reach=main_upper["reach"],
-                    candidate_reach=downstream_reach[1],
-                ),
+                reach=downstream_reach[1],
             )
         return tributary_context, main_upper, lower_context
 
@@ -1913,30 +1904,22 @@ class HECRAS:
         if self.target_projection_crs:
             return self.target_projection_crs
 
-        return ""
+        projection_dir = Path(__file__).resolve().parent / "0 Proj"
+        projection_files = sorted(projection_dir.glob("*.prj"))
+        if len(projection_files) != 1:
+            names = ", ".join(path.name for path in projection_files) or "none"
+            raise FileNotFoundError(
+                f"Expected exactly one projection .prj file in {projection_dir}; "
+                f"found {len(projection_files)}: {names}"
+            )
 
-    def _set_target_projection_crs(
-        self,
-        projection_file: Optional[str | Path],
-    ) -> None:
-        if projection_file is None:
-            return
-
-        projection_path = Path(projection_file)
-        if not projection_path.exists():
-            return
-
-        target_projection_crs = projection_path.read_text(encoding="utf-8").strip()
-        if target_projection_crs:
-            self.target_projection_crs = target_projection_crs
+        self.target_projection_crs = projection_files[0].read_text().strip()
+        if not self.target_projection_crs:
+            raise ValueError(f"Projection file is empty: {projection_files[0]}")
+        return self.target_projection_crs
 
     def _project_bank_gdf_to_model_crs(self, bank_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         target_crs = self._load_model_projection_crs()
-        if not target_crs:
-            if bank_gdf.crs:
-                self.source_crs = str(bank_gdf.crs)
-            return bank_gdf
-
         if bank_gdf.crs is None:
             logger.warning(
                 "Bank line shapefile has no CRS; assigning model projection without "
@@ -2418,30 +2401,6 @@ class HECRAS:
         return f"{compact}_junc"
 
     @classmethod
-    def _lower_reach_name(cls, main_reach: str) -> str:
-        reach = str(main_reach).strip()
-        if reach.endswith(cls.LOWER_REACH_SUFFIX):
-            return reach
-        if reach.endswith(cls.LEGACY_LOWER_REACH_SUFFIX):
-            reach = reach[: -len(cls.LEGACY_LOWER_REACH_SUFFIX)]
-        return f"{reach}{cls.LOWER_REACH_SUFFIX}"
-
-    @classmethod
-    def _normalize_lower_reach_name(
-        cls,
-        main_reach: str,
-        candidate_reach: Optional[str] = None,
-    ) -> str:
-        reach = str(candidate_reach).strip() if candidate_reach else ""
-        if not reach:
-            return cls._lower_reach_name(main_reach)
-        if reach.endswith(cls.LEGACY_LOWER_REACH_SUFFIX):
-            return cls._lower_reach_name(
-                reach[: -len(cls.LEGACY_LOWER_REACH_SUFFIX)]
-            )
-        return reach
-
-    @classmethod
     def _infer_junction_naming_template(
         cls,
         main_river: str,
@@ -2462,7 +2421,7 @@ class HECRAS:
                 (tributary_river, tributary_reach),
                 (main_river, main_reach),
             ],
-            downstream_reach=(main_river, cls._lower_reach_name(main_reach)),
+            downstream_reach=(main_river, f"{main_reach}-Lower"),
         )
 
     @staticmethod
@@ -5468,7 +5427,7 @@ class HECRAS:
         )
         lines = [
             f"Geom Title={geom_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             (
                 "Viewing Rectangle= "
                 f"{xmin:.4f} , {xmax:.4f} , {ymax:.3f} , {ymin:.3f} \n"
@@ -5649,7 +5608,7 @@ class HECRAS:
 
         lines = [
             f"Geom Title={geom_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             (
                 "Viewing Rectangle= "
                 f"{xmin:.4f} , {xmax:.4f} , {ymax:.3f} , {ymin:.3f} \n"
@@ -6009,7 +5968,7 @@ class HECRAS:
         )
         content = [
             f"Flow Title={flow_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             f"Number of Profiles= {len(profiles)} \n",
             f"Profile Names={profile_names}\n",
             (
@@ -6048,7 +6007,7 @@ class HECRAS:
     ) -> None:
         content = [
             f"Flow Title={flow_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             "Number of Profiles= 1 \n",
             f"Profile Names={profile_name}\n",
         ]
@@ -6111,7 +6070,7 @@ class HECRAS:
     ) -> None:
         content = [
             f"Plan Title={plan_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             f"Short Identifier={plan_title[:64]:<64}\n",
             "Simulation Date=,,,\n",
             "Geom File=g01\n",

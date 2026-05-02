@@ -1,13 +1,14 @@
 import argparse
 import math
+import re
 from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.styles import Alignment
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.workbook.properties import CalcProperties
 
 
 WORKSHEET_NAME = "1D"
@@ -40,6 +41,12 @@ DEFAULT_SLOPE_REF = "$D$17"
 PROFILE_RELAX_REF = "$D$18"
 PROFILE_TOL_REF = "$D$19"
 RESET_REF = "$D$20"
+SEGMENT_RESET_REF = "$A$2"
+SEGMENT_INFO_ROW = 2
+SEGMENT_WSE_HEADER_ROW = 4
+SEGMENT_TABLE_HEADER_ROW = 8
+SEGMENT_TABLE_UNITS_ROW = 9
+SEGMENT_TABLE_DATA_START_ROW = 10
 INIT_J1_REF = "$D$21"
 INIT_J2_REF = "$D$22"
 INIT_A1_REF = "$D$23"
@@ -499,11 +506,11 @@ def boundary_stage_formula(summary_row, end_label, type_ref, value_ref, q_ref):
         f'IF({type_ref}="Critical Depth",({bed_ref})+({crit_depth}),'
         f'IF(OR({type_ref}="Dead End",{type_ref}="None",{type_ref}="Spill End"),IF({value_ref}="",({bed_ref})+{MIN_DEPTH_REF},{value_ref}),'
         f'IF({type_ref}="Spill Zero",({bed_ref})+{MIN_DEPTH_REF},'
-        f'({bed_ref})+({norm_depth}))))))'
+        f'({bed_ref})+({norm_depth})))))))'
     )
 
 
-def build_sheet():
+def build_sheet(include_metadata=False):
     segments = load_network()
     segments_by_name = {seg["name"]: seg for seg in segments}
     segment_order = [seg["name"] for seg in segments]
@@ -542,10 +549,10 @@ def build_sheet():
     forebay_dead_end_cond = f'OR({forebay_type_ref}="Dead End",{forebay_type_ref}="None")'
     side_dead_end_cond = f'OR({side_type_ref}="Dead End",{side_type_ref}="None")'
 
-    current_alpha1 = f"IFERROR({FINAL_ALPHA1_REF},{INIT_A1_REF})"
-    current_alpha2 = f"IFERROR({FINAL_ALPHA2_REF},{INIT_A2_REF})"
-    current_j1 = f"IFERROR({FINAL_J1_REF},{INIT_J1_REF})"
-    current_j2 = f"IFERROR({FINAL_J2_REF},{INIT_J2_REF})"
+    current_alpha1 = f"IF(IFERROR({FINAL_ALPHA1_REF},0)<=0,{INIT_A1_REF},{FINAL_ALPHA1_REF})"
+    current_alpha2 = f"IF(IFERROR({FINAL_ALPHA2_REF},0)<=0,{INIT_A2_REF},{FINAL_ALPHA2_REF})"
+    current_j1 = f"IF(IFERROR({FINAL_J1_REF},0)<=0,{INIT_J1_REF},{FINAL_J1_REF})"
+    current_j2 = f"IF(IFERROR({FINAL_J2_REF},0)<=0,{INIT_J2_REF},{FINAL_J2_REF})"
 
     j1_bed_ref = a1(summary_rows["UsProject"], SUM_BED1)
     j2_bed_ref = a1(summary_rows["waterway"], SUM_BED1)
@@ -556,20 +563,26 @@ def build_sheet():
 
     us_end_ws_super_ref = a1(usproject_end_row, TABLE_WSF)
     us_end_m_super_ref = a1(usproject_end_row, TABLE_MF)
+    us_end_eg_final_ref = a1(usproject_end_row, TABLE_EG)
     ww_start_ws_sub_ref = a1(waterway_start_row, TABLE_WSB)
     ww_start_m_sub_ref = a1(waterway_start_row, TABLE_MB)
     ww_start_ws_final_ref = a1(waterway_start_row, TABLE_WS)
+    ww_start_eg_final_ref = a1(waterway_start_row, TABLE_EG)
     ue_start_ws_sub_ref = a1(usexit_start_row, TABLE_WSB)
     ue_start_m_sub_ref = a1(usexit_start_row, TABLE_MB)
     ue_start_ws_final_ref = a1(usexit_start_row, TABLE_WS)
+    ue_start_eg_final_ref = a1(usexit_start_row, TABLE_EG)
     ww_end_ws_super_ref = a1(waterway_end_row, TABLE_WSF)
     ww_end_m_super_ref = a1(waterway_end_row, TABLE_MF)
+    ww_end_eg_final_ref = a1(waterway_end_row, TABLE_EG)
     fb_start_ws_sub_ref = a1(forebay_start_row, TABLE_WSB)
     fb_start_m_sub_ref = a1(forebay_start_row, TABLE_MB)
     fb_start_ws_final_ref = a1(forebay_start_row, TABLE_WS)
+    fb_start_eg_final_ref = a1(forebay_start_row, TABLE_EG)
     sc_start_ws_sub_ref = a1(side_start_row, TABLE_WSB)
     sc_start_m_sub_ref = a1(side_start_row, TABLE_MB)
     sc_start_ws_final_ref = a1(side_start_row, TABLE_WS)
+    sc_start_eg_final_ref = a1(side_start_row, TABLE_EG)
     usproject_done_ref = "$I$20"
     waterway_done_ref = "$I$21"
     usexit_done_ref = "$I$22"
@@ -578,26 +591,34 @@ def build_sheet():
     j1_ready_ref = "$I$25"
     j2_ready_ref = "$I$26"
 
-    j1_sub_stage_actual = f"IFERROR({ww_start_ws_sub_ref},{INIT_J1_REF})"
-    j1_sub_force_actual = f"IFERROR({ww_start_m_sub_ref},-1E99)"
-    j1_super_stage_actual = f"IFERROR({us_end_ws_super_ref},{INIT_J1_REF})"
-    j1_super_force_actual = f"IFERROR({us_end_m_super_ref},-1E99)"
-    j1_target_actual = f"IF(({j1_super_force_actual})>=({j1_sub_force_actual}),({j1_super_stage_actual}),({j1_sub_stage_actual}))"
+    j1_up_energy_actual = f"IFERROR({us_end_eg_final_ref},IFERROR({us_end_ws_super_ref},{INIT_J1_REF}))"
+    j1_ww_energy_actual = f"IFERROR(({ww_start_eg_final_ref})+IF({usexit_dead_end_cond},0,T{summary_rows['waterway']}),IFERROR({ww_start_ws_final_ref},IFERROR({ww_start_ws_sub_ref},{INIT_J1_REF})))"
+    j1_ue_energy_actual = f"IFERROR(({ue_start_eg_final_ref})+T{summary_rows['UsExit']},IFERROR({ue_start_ws_final_ref},IFERROR({ue_start_ws_sub_ref},{INIT_J1_REF})))"
+    j1_down_energy_actual = (
+        f"IF({usexit_dead_end_cond},"
+        f"({j1_ww_energy_actual}),"
+        f"((ABS({waterway_summary_q_ref})*({j1_ww_energy_actual})+ABS({usexit_summary_q_ref})*({j1_ue_energy_actual}))"
+        f"/MAX(ABS({waterway_summary_q_ref})+ABS({usexit_summary_q_ref}),1E-6)))"
+    )
+    j1_target_actual = f"({current_j1})+(({j1_down_energy_actual})-({j1_up_energy_actual}))"
     j1_error_actual = f"(({j1_target_actual})-({current_j1}))"
     j1_branch_stage_delta = (
         f"(IFERROR({ue_start_ws_final_ref},IFERROR({ue_start_ws_sub_ref},{FINAL_J1_REF}))-"
         f"IFERROR({ww_start_ws_final_ref},IFERROR({ww_start_ws_sub_ref},{FINAL_J1_REF})))"
     )
 
-    j2_sub_stage_actual = (
-        f"IF(IFERROR({sc_start_m_sub_ref},-1E99)>=IFERROR({fb_start_m_sub_ref},-1E99),"
-        f"IFERROR({sc_start_ws_sub_ref},IFERROR({fb_start_ws_sub_ref},{INIT_J2_REF})),"
-        f"IFERROR({fb_start_ws_sub_ref},IFERROR({sc_start_ws_sub_ref},{INIT_J2_REF})))"
+    j2_up_energy_actual = f"IFERROR({ww_end_eg_final_ref},IFERROR({ww_end_ws_super_ref},{INIT_J2_REF}))"
+    j2_fb_energy_actual = f"IFERROR(({fb_start_eg_final_ref})+T{summary_rows['forebay']},IFERROR({fb_start_ws_final_ref},IFERROR({fb_start_ws_sub_ref},{INIT_J2_REF})))"
+    j2_sc_energy_actual = f"IFERROR(({sc_start_eg_final_ref})+T{summary_rows['sidechannel']},IFERROR({sc_start_ws_final_ref},IFERROR({sc_start_ws_sub_ref},{INIT_J2_REF})))"
+    j2_fb_weight = f"IF({forebay_dead_end_cond},0,ABS({forebay_summary_q_ref}))"
+    j2_sc_weight = f"IF({side_dead_end_cond},0,ABS({side_summary_q_ref}))"
+    j2_down_energy_actual = (
+        f"IF(({j2_fb_weight})+({j2_sc_weight})<=1E-6,"
+        f"({j2_up_energy_actual}),"
+        f"(({j2_fb_weight})*({j2_fb_energy_actual})+({j2_sc_weight})*({j2_sc_energy_actual}))"
+        f"/MAX(({j2_fb_weight})+({j2_sc_weight}),1E-6))"
     )
-    j2_sub_force_actual = f"MAX(IFERROR({fb_start_m_sub_ref},-1E99),IFERROR({sc_start_m_sub_ref},-1E99))"
-    j2_super_stage_actual = f"IFERROR({ww_end_ws_super_ref},{INIT_J2_REF})"
-    j2_super_force_actual = f"IFERROR({ww_end_m_super_ref},-1E99)"
-    j2_target_actual = f"IF(({j2_super_force_actual})>=({j2_sub_force_actual}),({j2_super_stage_actual}),({j2_sub_stage_actual}))"
+    j2_target_actual = f"({current_j2})+(({j2_down_energy_actual})-({j2_up_energy_actual}))"
     j2_error_actual = f"(({j2_target_actual})-({current_j2}))"
     j2_branch_stage_delta = (
         f"(IFERROR({sc_start_ws_final_ref},IFERROR({sc_start_ws_sub_ref},{FINAL_J2_REF}))-"
@@ -626,9 +647,9 @@ def build_sheet():
         ("Boundary slope", "-", 0.001),
         ("Profile relaxation", "-", 0.15),
         ("Profile tolerance", "m", 0.001),
-        ("Reset (0: Hold, 1: Eval)", "-", 1),
-        ("J1 initial WSE", "m", 634.30),
-        ("J2 initial WSE", "m", 631.90),
+        ("Reset (0: Hold, 1: Eval)", "-", 0),
+        ("J1 initial WSE", "m", 637),
+        ("J2 initial WSE", "m", 636),
         ("alpha J1 initial", "-", 0.65),
         ("alpha J2 initial", "-", 0.65),
         ("Spill relaxation", "-", 0.20),
@@ -654,9 +675,7 @@ def build_sheet():
         grid,
         11,
         9,
-        f'=IF({RESET_REF}=0,{current_alpha1},IF({usexit_dead_end_cond},'
-        f'MIN(0.98,MAX(0.02,MAX(0,1-({usexit_summary_q_ref}/MAX({TOTAL_Q_REF},1E-6))))),'
-        f'MIN(0.98,MAX(0.02,{current_alpha1}+({SPLIT_RELAX_REF}*(({j1_branch_stage_delta})/MAX(ABS({FINAL_J1_REF}),1)))))))',
+        f"={INIT_A1_REF}",
     )
     set_cell(grid, 12, 7, "Final alpha J2")
     set_cell(grid, 12, 8, "-")
@@ -664,12 +683,7 @@ def build_sheet():
         grid,
         12,
         9,
-        f'=IF({RESET_REF}=0,{current_alpha2},'
-        f'IF(AND({forebay_dead_end_cond},{side_dead_end_cond}),'
-        f'MIN(0.98,MAX(0.02,IFERROR({forebay_summary_q_ref}/MAX({waterway_summary_q_ref},1E-6),{current_alpha2}))),'
-        f'IF({side_dead_end_cond},1,'
-        f'IF({forebay_dead_end_cond},0,'
-        f'MIN(0.98,MAX(0.02,{current_alpha2}+({SPLIT_RELAX_REF}*(({j2_branch_stage_delta})/MAX(ABS({FINAL_J2_REF}),1)))))))))',
+        f"={INIT_A2_REF}",
     )
     set_cell(grid, 13, 7, "Final J1 WSE")
     set_cell(grid, 13, 8, "m")
@@ -677,9 +691,7 @@ def build_sheet():
         grid,
         13,
         9,
-        f'=IF({RESET_REF}=0,{current_j1},'
-        f'IF(ABS($I$16)<{PROFILE_TOL_REF},({current_j1}),'
-        f'MAX(({j1_bed_ref})+{MIN_DEPTH_REF},({current_j1})+({STAGE_RELAX_REF}*$I$16))))',
+        f"={INIT_J1_REF}",
     )
     set_cell(grid, 14, 7, "Final J2 WSE")
     set_cell(grid, 14, 8, "m")
@@ -687,25 +699,23 @@ def build_sheet():
         grid,
         14,
         9,
-        f'=IF({RESET_REF}=0,{current_j2},'
-        f'IF(ABS($I$17)<{PROFILE_TOL_REF},({current_j2}),'
-        f'MAX(({j2_bed_ref})+{MIN_DEPTH_REF},({current_j2})+({STAGE_RELAX_REF}*$I$17))))',
+        f"={INIT_J2_REF}",
     )
     set_cell(grid, 15, 7, "Total spill to drain")
     set_cell(grid, 15, 8, "m3/s")
     set_cell(grid, 15, 9, f"=IFERROR(N{summary_rows['drain']},0)")
     set_cell(grid, 16, 7, "J1 junction error")
     set_cell(grid, 16, 8, "m")
-    set_cell(grid, 16, 9, f"=IFERROR($I$18-IFERROR($I$13,$D$21),0)")
+    set_cell(grid, 16, 9, f"=IFERROR({quoted_sheet_name('J1')}!$D$2-{quoted_sheet_name('J1')}!$B$2,0)")
     set_cell(grid, 17, 7, "J2 junction error")
     set_cell(grid, 17, 8, "m")
-    set_cell(grid, 17, 9, f"=IFERROR($I$19-IFERROR($I$14,$D$22),0)")
-    set_cell(grid, 18, 7, "J1 target WSE")
+    set_cell(grid, 17, 9, f"=IFERROR({quoted_sheet_name('J2')}!$D$2-{quoted_sheet_name('J2')}!$B$2,0)")
+    set_cell(grid, 18, 7, "J1 revised WSE")
     set_cell(grid, 18, 8, "m")
-    set_cell(grid, 18, 9, f"=IF({j1_ready_ref}=0,{current_j1},IFERROR({j1_target_actual},{INIT_J1_REF}))")
-    set_cell(grid, 19, 7, "J2 target WSE")
+    set_cell(grid, 18, 9, f"=IFERROR({quoted_sheet_name('J1')}!$D$2,$I$13)")
+    set_cell(grid, 19, 7, "J2 revised WSE")
     set_cell(grid, 19, 8, "m")
-    set_cell(grid, 19, 9, f"=IF({j2_ready_ref}=0,{current_j2},IFERROR({j2_target_actual},{INIT_J2_REF}))")
+    set_cell(grid, 19, 9, f"=IFERROR({quoted_sheet_name('J2')}!$D$2,$I$14)")
     set_cell(grid, 20, 7, "UsProject done")
     set_cell(grid, 20, 8, "-")
     set_cell(grid, 20, 9, f"=IFERROR(MIN(V{segment_table_rows['UsProject']['data_start']}:V{segment_table_rows['UsProject']['data_end']},AG{segment_table_rows['UsProject']['data_start']}:AG{segment_table_rows['UsProject']['data_end']}),0)")
@@ -723,10 +733,20 @@ def build_sheet():
     set_cell(grid, 24, 9, f"=IFERROR(MIN(V{segment_table_rows['sidechannel']['data_start']}:V{segment_table_rows['sidechannel']['data_end']},AG{segment_table_rows['sidechannel']['data_start']}:AG{segment_table_rows['sidechannel']['data_end']}),0)")
     set_cell(grid, 25, 7, "J1 ready")
     set_cell(grid, 25, 8, "-")
-    set_cell(grid, 25, 9, f"=IFERROR(MIN({usproject_done_ref},{waterway_done_ref},{usexit_done_ref}),0)")
+    set_cell(
+        grid,
+        25,
+        9,
+        f"=IFERROR(IF({usexit_dead_end_cond},MIN({usproject_done_ref},{waterway_done_ref}),MIN({usproject_done_ref},{waterway_done_ref},{usexit_done_ref})),0)",
+    )
     set_cell(grid, 26, 7, "J2 ready")
     set_cell(grid, 26, 8, "-")
-    set_cell(grid, 26, 9, f"=IFERROR(MIN({waterway_done_ref},{forebay_done_ref},{side_done_ref}),0)")
+    set_cell(
+        grid,
+        26,
+        9,
+        f"=IFERROR(MIN({waterway_done_ref},IF({forebay_dead_end_cond},1,{forebay_done_ref}),IF({side_dead_end_cond},1,{side_done_ref})),0)",
+    )
 
     for col_idx, title in enumerate(["Boundary", "Segment", "End", "Type", "Value", "Resolved Stage", "Remarks"], start=11):
         set_cell(grid, 4, col_idx, title)
@@ -789,6 +809,7 @@ def build_sheet():
     usexit_type_ref = a1(boundary_rows[boundary_label("UsExit", "end")], 14)
     forebay_type_ref = a1(boundary_rows[boundary_label("forebay", "end")], 14)
     side_type_ref = a1(boundary_rows[boundary_label("sidechannel", "end")], 14)
+    drain_start_type_ref = a1(boundary_rows[boundary_label("drain", "start")], 14)
     dead_end_pilot_q = "0.05"
     usexit_closed_q_expr = f"MAX({dead_end_pilot_q},IFERROR(O{usexit_row},0)+{dead_end_pilot_q})"
     forebay_closed_q_expr = f"MAX({dead_end_pilot_q},IFERROR(O{forebay_row},0)+{dead_end_pilot_q})"
@@ -808,7 +829,7 @@ def build_sheet():
             f'IF({side_dead_end_cond},{side_closed_q_expr},'
             f'IF({forebay_dead_end_cond},MAX(0,N{waterway_row}-N{forebay_row}),MAX(0,N{waterway_row}-N{forebay_row}))))'
         ),
-        "drain": f"=O{forebay_row}+O{side_row}",
+        "drain": f'=IF({drain_start_type_ref}="Spill Zero",{dead_end_pilot_q},O{forebay_row}+O{side_row})',
     }
     for seg_name, formula in qin_formulas.items():
         set_cell(grid, summary_rows[seg_name], SUM_QIN, formula)
@@ -1016,25 +1037,17 @@ def build_sheet():
                 grid,
                 boundary_row,
                 16,
-                f"=IF({RESET_REF}=0,IFERROR(P{boundary_row},{seed_stage}),"
-                f"IF({ready_ref}=0,IFERROR(P{boundary_row},{seed_stage}),"
-                f"IF(({branch_mismatch})>{PROFILE_TOL_REF},"
-                f"MAX(({seed_stage}),IFERROR(P{boundary_row},{seed_stage})+({STAGE_RELAX_REF}*({branch_mismatch}))),"
-                f"IFERROR(P{boundary_row},{seed_stage}))))",
+                f"={seed_stage}",
             )
-            set_cell(grid, boundary_row, 17, "Dead End outlet; start from the master WSE and only raise the downstream stage until the branch backwater meets the solved junction stage.")
+            set_cell(grid, boundary_row, 17, "Dead End outlet; dummy reach resolves downstream stage only to maintain the solved upstream junction energy.")
         else:
-            bed_ref = a1(summary_rows[seg["name"]], SUM_BED1)
             set_cell(
                 grid,
                 boundary_row,
                 16,
-                f"=IF({RESET_REF}=0,IFERROR(P{boundary_row},{seed_stage}),"
-                f"IF({ready_ref}=0,IFERROR(P{boundary_row},{seed_stage}),"
-                f"IF(ABS({branch_mismatch})<{PROFILE_TOL_REF},IFERROR(P{boundary_row},{seed_stage}),"
-                f"MAX(({bed_ref})+{MIN_DEPTH_REF},IFERROR(P{boundary_row},{seed_stage})+({STAGE_RELAX_REF}*({branch_mismatch}))))))",
+                f"={seed_stage}",
             )
-            set_cell(grid, boundary_row, 17, "Spill End outlet; start from the master WSE, relax spill from zero, then adjust the downstream stage up or down until the branch backwater matches the solved junction stage.")
+            set_cell(grid, boundary_row, 17, "Spill End outlet; lateral spill is capacity-limited and the downstream stage rises when spill capacity is short.")
 
     table_headers = [
         "SN", "Dist", "Easting", "Northing", "Bed Z", "Width", "Side z", "Type", "Def Ang", "dx",
@@ -1055,9 +1068,12 @@ def build_sheet():
         summary_row = summary_rows[seg["name"]]
         data_start = rows["data_start"]
         data_end = rows["data_end"]
-        start_stage_expr = stage_inputs[seg["name"]]["start"]
-        end_stage_expr = stage_inputs[seg["name"]]["end"]
-        q_ref = a1(summary_row, SUM_QIN)
+        summary_start_stage_expr = stage_inputs[seg["name"]]["start"]
+        summary_end_stage_expr = stage_inputs[seg["name"]]["end"]
+        start_stage_expr = "$I$2"
+        end_stage_expr = "$N$2"
+        downstream_y_sub_cell = a1(data_end, TABLE_YB)
+        q_ref = "$F$2"
         mode_ref = a1(summary_row, SUM_MODE)
         end_bc_type = default_boundary_type(seg, "end")
         start_bc_type = default_boundary_type(seg, "start")
@@ -1072,7 +1088,7 @@ def build_sheet():
             (has_lateral_spill or is_spill_end_bc)
             and not is_closed_bc
         )
-        q_floor_expr = dead_end_pilot_q if (is_closed_bc or is_spill_end_bc) else ("0.001" if uses_spill_pilot_flow else "0")
+        q_floor_expr = dead_end_pilot_q if (is_closed_bc or is_spill_end_bc or is_spill_zero_bc) else ("0.001" if uses_spill_pilot_flow else "0")
 
         set_cell(grid, rows["title"], 1, f"Segment: {seg['name']}")
         set_cell(grid, rows["title"], 5, f"=E{summary_row}")
@@ -1149,10 +1165,10 @@ def build_sheet():
             set_cell(grid, row, TABLE_DX, 0 if is_first else f"={a1(row, TABLE_DIST)}-{a1(prev_row, TABLE_DIST)}")
             if is_spill_zero_bc and seg["name"] == "drain":
                 if idx < 2:
-                    set_cell(grid, row, TABLE_Q, 0)
+                    set_cell(grid, row, TABLE_Q, f"={q_ref}")
                 else:
                     mapped_expr = spill_mapping_expr(segments_by_name, segment_table_rows, [name for name in segments_by_name if name != "drain"], "drain", idx)
-                    set_cell(grid, row, TABLE_Q, f"={prev_q_cell}+{mapped_expr}")
+                    set_cell(grid, row, TABLE_Q, f"=MAX({q_floor_expr},{prev_q_cell}+{mapped_expr})")
             elif is_first:
                 set_cell(grid, row, TABLE_Q, f"={q_ref}")
             else:
@@ -1168,6 +1184,7 @@ def build_sheet():
             eg_fwd = f"={ws_super_cell}+(({vel_fwd})^2)/(2*{G_REF})"
             sf_fwd = f"={friction_slope_expr(q_cell, area_fwd, radius_fwd)}"
             crit_depth = approx_critical_depth_expr(a1(row, TABLE_Q), a1(row, TABLE_WIDTH))
+            critical_depth = f"MAX({MIN_DEPTH_REF},{crit_depth})"
             safe_prev_y_super = f"IFERROR({prev_y_super_cell},{crit_depth})"
             safe_prev_done_super = f"IFERROR({prev_done_super_cell},0)"
             safe_prev_fr_super = f"IFERROR({prev_fr_super_cell},0)"
@@ -1189,12 +1206,6 @@ def build_sheet():
                 f"IF(({crit_depth})>{safe_y_super},"
                 f"MIN(({crit_depth}),{safe_y_super}+({super_to_crit_step})),"
                 f"MAX(({crit_depth}),{safe_y_super}-({super_to_crit_step})))"
-            )
-            sub_to_crit_step = f"MIN(ABS({safe_err_sub})*{PROFILE_RELAX_REF},ABS(({crit_depth})-{safe_y_sub}))"
-            sub_to_crit_y = (
-                f"IF(({crit_depth})>{safe_y_sub},"
-                f"MIN(({crit_depth}),{safe_y_sub}+({sub_to_crit_step})),"
-                f"MAX(({crit_depth}),{safe_y_sub}-({sub_to_crit_step})))"
             )
             if is_first:
                 set_cell(grid, row, TABLE_YF, f"=MAX({MIN_DEPTH_REF},({start_stage_expr})-E{row})")
@@ -1231,7 +1242,7 @@ def build_sheet():
                     grid,
                     row,
                     TABLE_DONEF,
-                    f'=IF({RESET_REF}=0,1,IFERROR(IF(ROUND({fr_super_cell},3)=1,1,IF(AND(ABS({err_super_cell})<{PROFILE_TOL_REF},{fr_super_cell}>1),1,0)),0))',
+                    f'=IF({RESET_REF}=0,1,IF({safe_prev_done_super}=0,0,IFERROR(IF(ROUND({fr_super_cell},3)=1,1,IF(AND(ABS({err_super_cell})<{PROFILE_TOL_REF},{fr_super_cell}>1),1,0)),0)))',
                 )
             set_cell(grid, row, TABLE_AF, f"={area_fwd}")
             set_cell(grid, row, TABLE_RF, f"={radius_fwd}")
@@ -1252,24 +1263,22 @@ def build_sheet():
             eg_bwd = f"={ws_sub_cell}+(({vel_bwd})^2)/(2*{G_REF})"
             sf_bwd = f"={friction_slope_expr(q_cell, area_bwd, radius_bwd)}"
             if is_last:
-                set_cell(grid, row, TABLE_YB, f"=MAX({MIN_DEPTH_REF},({end_stage_expr})-E{row})")
+                set_cell(grid, row, TABLE_YB, f"=MAX({critical_depth},({end_stage_expr})-E{row})")
                 set_cell(grid, row, TABLE_ERRB, 0)
                 set_cell(grid, row, TABLE_DONEB, 1)
             else:
+                downstream_y_sub_seed = f"IFERROR({downstream_y_sub_cell},MAX({critical_depth},({end_stage_expr})-{a1(data_end, TABLE_BED)}))"
+                sub_step_candidate = f"({safe_y_sub})+(({safe_err_sub})*{PROFILE_RELAX_REF})"
                 set_cell(
                     grid,
                     row,
                     TABLE_YB,
-                    f"=IF({RESET_REF}=0,{safe_next_y_sub},"
-                    f"IF({safe_next_done_sub}=0,{safe_next_y_sub},"
-                    f"IF(OR({safe_y_sub}=0,{safe_next_fr_sub}>1),{crit_depth},"
-                    f"IF({safe_err_sub}>0,"
-                    f"MAX({MIN_DEPTH_REF},{safe_y_sub}+(({safe_err_sub})*{PROFILE_RELAX_REF}*IF(({safe_fr_sub})<1,1,-1))),"
-                    f"IF({safe_err_sub}<0,"
-                    f"IF(ABS(({crit_depth})-{safe_y_sub})>{PROFILE_TOL_REF},"
-                    f"MAX({MIN_DEPTH_REF},{sub_to_crit_y}),"
-                    f"{crit_depth}),"
-                    f"MAX({MIN_DEPTH_REF},{safe_y_sub}))))))",
+                    f"=IF({RESET_REF}=0,MAX({critical_depth},{downstream_y_sub_seed}),"
+                    f"IF({safe_next_done_sub}=0,MAX({critical_depth},{downstream_y_sub_seed}),"
+                    f"IF({safe_y_sub}=0,MAX({critical_depth},{downstream_y_sub_seed}),"
+                    f"IF(OR({safe_fr_sub}>=1,{safe_next_fr_sub}>=1),{critical_depth},"
+                    f"IF(ABS({safe_err_sub})<{PROFILE_TOL_REF},MAX({critical_depth},{safe_y_sub}),"
+                    f"MAX({critical_depth},{sub_step_candidate}))))))",
                 )
                 local_bwd = (
                     f"IF({vel_sub_cell}>{a1(next_row, TABLE_VB)},{KE_REF}*(({vel_sub_cell}^2-{a1(next_row, TABLE_VB)}^2)/(2*{G_REF})),"
@@ -1286,7 +1295,7 @@ def build_sheet():
                     grid,
                     row,
                     TABLE_DONEB,
-                    f'=IF({RESET_REF}=0,1,IFERROR(IF(ROUND({fr_sub_cell},3)=1,1,IF(AND(ABS({err_sub_cell})<{PROFILE_TOL_REF},{fr_sub_cell}<1),1,0)),0))',
+                    f'=IF({RESET_REF}=0,1,IF({safe_next_done_sub}=0,0,IFERROR(IF(OR(ROUND({fr_sub_cell},3)>=1,AND(ABS({err_sub_cell})<{PROFILE_TOL_REF},{fr_sub_cell}<1)),1,0),0)))',
                 )
             set_cell(grid, row, TABLE_AB, f"={area_bwd}")
             set_cell(grid, row, TABLE_RB, f"={radius_bwd}")
@@ -1301,7 +1310,7 @@ def build_sheet():
                 grid,
                 row,
                 TABLE_Y,
-                f'=IFERROR(IF({mode_ref}="Supercritical",MAX({MIN_DEPTH_REF},IFERROR({y_super_cell},{crit_depth})),IF({mode_ref}="Subcritical",MAX({MIN_DEPTH_REF},IFERROR({y_sub_cell},{crit_depth})),IF(AND({safe_done_super}=1,{safe_done_sub}=1),IF({safe_m_super}>={safe_m_sub},MAX({MIN_DEPTH_REF},IFERROR({y_super_cell},{crit_depth})),MAX({MIN_DEPTH_REF},IFERROR({y_sub_cell},{crit_depth}))),IF({safe_done_super}=1,MAX({MIN_DEPTH_REF},IFERROR({y_super_cell},{crit_depth})),IF({safe_done_sub}=1,MAX({MIN_DEPTH_REF},IFERROR({y_sub_cell},{crit_depth})),{crit_depth}))))),{crit_depth})',
+                f'=IFERROR(IF({mode_ref}="Supercritical",MAX({MIN_DEPTH_REF},IFERROR({y_super_cell},{crit_depth})),IF({mode_ref}="Subcritical",MAX({MIN_DEPTH_REF},IFERROR({y_sub_cell},{crit_depth})),IF({safe_m_super}>={safe_m_sub},MAX({MIN_DEPTH_REF},IFERROR({y_super_cell},{crit_depth})),MAX({MIN_DEPTH_REF},IFERROR({y_sub_cell},{crit_depth}))))),{crit_depth})',
             )
             final_area = trap_area(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), final_y_cell)
             top_final = trap_top_width(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), final_y_cell)
@@ -1319,14 +1328,18 @@ def build_sheet():
             set_cell(grid, row, TABLE_CREST_R, right_crest)
             left_target_expr = f"{SPILL_COEFF_REF}*MAX({a1(row, TABLE_DX)},0.1)*POWER(MAX(0,{final_ws_cell}-{crest_l_cell}),1.5)"
             right_target_expr = f"{SPILL_COEFF_REF}*MAX({a1(row, TABLE_DX)},0.1)*POWER(MAX(0,{final_ws_cell}-{crest_r_cell}),1.5)"
+            left_available_expr = f"MAX(0,{q_cell}-({q_floor_expr}))"
+            right_available_expr = f"MAX(0,{q_cell}-({q_floor_expr})-IFERROR({spill_l_cell},0))"
+            left_relaxed_expr = f"MAX(0,IFERROR({spill_l_cell},0)+({SPILL_RELAX_REF}*(({left_target_expr})-IFERROR({spill_l_cell},0))))"
+            right_relaxed_expr = f"MAX(0,IFERROR({spill_r_cell},0)+({SPILL_RELAX_REF}*(({right_target_expr})-IFERROR({spill_r_cell},0))))"
             set_cell(
                 grid,
                 row,
                 TABLE_SPILL_L,
                 0 if left_crest == "" else (
-                    f"=IF({RESET_REF}=0,IFERROR({spill_l_cell},0),"
+                    f"=IF({RESET_REF}=0,MIN(({left_target_expr}),({left_available_expr}),IFERROR({spill_l_cell},0)),"
                     f"IF(({left_target_expr})<=0,0,"
-                    f"MAX(0,IFERROR({spill_l_cell},0)+({SPILL_RELAX_REF}*(({left_target_expr})-IFERROR({spill_l_cell},0))))))"
+                    f"MIN(({left_target_expr}),({left_available_expr}),({left_relaxed_expr}))))"
                 ),
             )
             set_cell(
@@ -1334,23 +1347,20 @@ def build_sheet():
                 row,
                 TABLE_SPILL_R,
                 0 if right_crest == "" else (
-                    f"=IF({RESET_REF}=0,IFERROR({spill_r_cell},0),"
+                    f"=IF({RESET_REF}=0,MIN(({right_target_expr}),({right_available_expr}),IFERROR({spill_r_cell},0)),"
                     f"IF(({right_target_expr})<=0,0,"
-                    f"MAX(0,IFERROR({spill_r_cell},0)+({SPILL_RELAX_REF}*(({right_target_expr})-IFERROR({spill_r_cell},0))))))"
+                    f"MIN(({right_target_expr}),({right_available_expr}),({right_relaxed_expr}))))"
                 ),
             )
-            if is_spill_end_bc and is_last:
-                set_cell(grid, row, TABLE_SPILL, f"={spill_l_cell}+{spill_r_cell}+MAX(0,{q_cell}-({spill_l_cell}+{spill_r_cell})-{q_floor_expr})")
-            else:
-                set_cell(grid, row, TABLE_SPILL, f"={spill_l_cell}+{spill_r_cell}")
+            set_cell(grid, row, TABLE_SPILL, f"={spill_l_cell}+{spill_r_cell}")
             set_cell(grid, row, TABLE_CUM_SPILL, f"={spill_cell}" if is_first else f"={prev_cum_spill_cell}+{spill_cell}")
             set_cell(grid, row, TABLE_FR, f"={froude_expr(q_cell, final_area, top_final)}")
             set_cell(grid, row, TABLE_REGIME, f'=IF({final_fr_cell}<1,"Subcritical","Supercritical")')
             final_radius = trap_radius(a1(row, TABLE_WIDTH), a1(row, TABLE_SIDE), a1(row, TABLE_Y))
             set_cell(grid, row, TABLE_SF, f'={friction_slope_expr(q_cell, final_area, final_radius)}')
 
-        set_cell(grid, summary_row, SUM_WS0, f"=IFERROR({a1(data_start, TABLE_WS)},IFERROR({start_stage_expr},0))")
-        set_cell(grid, summary_row, SUM_WS1, f"=IFERROR({a1(data_end, TABLE_WS)},IFERROR({end_stage_expr},0))")
+        set_cell(grid, summary_row, SUM_WS0, f"=IFERROR({a1(data_start, TABLE_WS)},IFERROR({summary_start_stage_expr},0))")
+        set_cell(grid, summary_row, SUM_WS1, f"=IFERROR({a1(data_end, TABLE_WS)},IFERROR({summary_end_stage_expr},0))")
         set_cell(grid, summary_row, SUM_SPILL, "0" if seg["name"] == "drain" else f"=IFERROR(AGGREGATE(9,6,{a1(data_start, TABLE_SPILL)}:{a1(data_end, TABLE_SPILL)}),0)")
         if is_closed_bc or is_spill_end_bc:
             set_cell(grid, summary_row, SUM_QOUT, 0)
@@ -1364,20 +1374,28 @@ def build_sheet():
         row = summary_rows[seg["name"]]
         if seg["name"] == "waterway":
             terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J1_REF, FINAL_J2_REF, seg["junction_delta"], a1(usexit_row, SUM_QIN), TOTAL_Q_REF)
-            set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
+            set_cell(grid, row, SUM_HJ, f"=IF({usexit_dead_end_cond},0,{terms['hj']})")
         elif seg["name"] == "UsExit":
             terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J1_REF, f'IF({usexit_dead_end_cond},{usexit_stage_ref},{usexit_stage_ref})', seg["junction_delta"], a1(waterway_row, SUM_QIN), TOTAL_Q_REF)
-            set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
+            set_cell(grid, row, SUM_HJ, f"=IF({usexit_dead_end_cond},0,{terms['hj']})")
         elif seg["name"] == "forebay":
             terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J2_REF, forebay_stage_ref, seg["junction_delta"], a1(side_row, SUM_QIN), a1(waterway_row, SUM_QIN))
-            set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
+            set_cell(grid, row, SUM_HJ, f"=IF(OR({forebay_dead_end_cond},{side_dead_end_cond}),0,{terms['hj']})")
         elif seg["name"] == "sidechannel":
             terms = summary_segment_terms(row, a1(row, SUM_QIN), FINAL_J2_REF, side_stage_ref, seg["junction_delta"], a1(forebay_row, SUM_QIN), a1(waterway_row, SUM_QIN))
-            set_cell(grid, row, SUM_HJ, f"={terms['hj']}")
+            set_cell(grid, row, SUM_HJ, f"=IF(OR({forebay_dead_end_cond},{side_dead_end_cond}),0,{terms['hj']})")
         else:
             set_cell(grid, row, SUM_HJ, 0)
         set_cell(grid, row, SUM_HTOT, f"=S{row}+T{row}")
 
+    if include_metadata:
+        return grid, total_rows, total_cols, {
+            "segments": segments,
+            "segment_order": segment_order,
+            "segment_table_rows": segment_table_rows,
+            "summary_rows": summary_rows,
+            "boundary_rows": boundary_rows,
+        }
     return grid, total_rows, total_cols
 
 
@@ -1397,12 +1415,447 @@ def apply_fill(ws, start_row, end_row, start_col, end_col, fill, bold=False, fon
                 cell.font = font
 
 
+def apply_column_widths(ws, total_cols):
+    for col_idx in range(1, total_cols + 1):
+        letter = get_column_letter(col_idx)
+        if col_idx in (1, 2, 3, 4):
+            ws.column_dimensions[letter].width = 14
+        elif col_idx <= 10:
+            ws.column_dimensions[letter].width = 12
+        elif col_idx <= 17:
+            ws.column_dimensions[letter].width = 18
+        else:
+            ws.column_dimensions[letter].width = 13
+
+
 def write_grid_to_worksheet(ws, grid):
     for row_idx, row_values in enumerate(grid, start=1):
         for col_idx, value in enumerate(row_values, start=1):
             if value == "":
                 continue
             ws.cell(row=row_idx, column=col_idx, value=value)
+
+
+CELL_REF_RE = re.compile(r"(?<![A-Za-z0-9_.'!])(?P<col_abs>\$?)(?P<col>[A-Z]{1,3})(?P<row_abs>\$?)(?P<row>\d+)")
+
+
+def quoted_sheet_name(sheet_name):
+    return "'" + str(sheet_name).replace("'", "''") + "'"
+
+
+def quoted_main_cell(row_idx, col_idx):
+    return f"{quoted_sheet_name(WORKSHEET_NAME)}!{a1(row_idx, col_idx)}"
+
+
+def safe_positive_expr(expr, fallback_expr):
+    return f"IF(IFERROR({expr},0)<=0,{fallback_expr},{expr})"
+
+
+def junction_sheet_name(node_name):
+    text = str(node_name).strip()
+    match = re.fullmatch(r"junction\s*(\d+)", text, flags=re.IGNORECASE)
+    if match:
+        return f"J{match.group(1)}"
+    sanitized = re.sub(r"[\[\]\:\*\?\/\\]", "_", text)[:31]
+    return sanitized or "Junction"
+
+
+def collect_junction_specs(segments):
+    junctions = {}
+    for seg in segments:
+        from_node = str(seg["from_node"]).strip()
+        to_node = str(seg["to_node"]).strip()
+        if from_node.lower() not in {"inlet", "outlet", "spill"}:
+            junctions.setdefault(from_node, {"node": from_node, "incoming": [], "outgoing": []})["outgoing"].append(seg)
+        if to_node.lower() not in {"inlet", "outlet", "spill"}:
+            junctions.setdefault(to_node, {"node": to_node, "incoming": [], "outgoing": []})["incoming"].append(seg)
+    specs = []
+    for node_name in sorted(junctions):
+        data = junctions[node_name]
+        outgoing = sorted(data["outgoing"], key=lambda seg: (not is_resolved_wse_segment(seg), seg["name"]))
+        specs.append({
+            "node": data["node"],
+            "sheet": junction_sheet_name(data["node"]),
+            "segments": [(seg, "Upstream") for seg in data["incoming"]] + [(seg, "Downstream") for seg in outgoing],
+        })
+    return specs
+
+
+def segment_sheet_maps(segment_table_rows):
+    maps = {}
+    for name, rows in segment_table_rows.items():
+        maps[name] = {
+            "old_start": rows["title"],
+            "old_end": rows["data_end"],
+            "local_rows": rows["data_end"] - rows["title"] + SEGMENT_TABLE_HEADER_ROW - 1,
+        }
+    return maps
+
+
+def locate_formula_reference(row_idx, sheet_maps):
+    for sheet_name, rows in sheet_maps.items():
+        if rows["old_start"] <= row_idx <= rows["old_end"]:
+            return sheet_name, row_idx - rows["old_start"] + SEGMENT_TABLE_HEADER_ROW - 1
+    return WORKSHEET_NAME, row_idx
+
+
+def transform_unquoted_formula_chunk(chunk, current_sheet, sheet_maps):
+    def replace_ref(match):
+        row_idx = int(match.group("row"))
+        if current_sheet != WORKSHEET_NAME and match.group("col") == "D" and row_idx == 20:
+            return SEGMENT_RESET_REF
+        col_idx = column_index_from_string(match.group("col"))
+        if current_sheet != WORKSHEET_NAME and row_idx == SEGMENT_INFO_ROW and col_idx <= 14:
+            return f"{match.group('col_abs')}{match.group('col')}{match.group('row_abs')}{row_idx}"
+        target_sheet, target_row = locate_formula_reference(row_idx, sheet_maps)
+        prefix = "" if target_sheet == current_sheet else f"{quoted_sheet_name(target_sheet)}!"
+        return f"{prefix}{match.group('col_abs')}{match.group('col')}{match.group('row_abs')}{target_row}"
+
+    return CELL_REF_RE.sub(replace_ref, chunk)
+
+
+def transform_formula_references(formula, current_sheet, sheet_maps):
+    if not (isinstance(formula, str) and formula.startswith("=")):
+        return formula
+    output = []
+    chunk = []
+    in_string = False
+    idx = 0
+    while idx < len(formula):
+        char = formula[idx]
+        if char == '"':
+            if in_string and idx + 1 < len(formula) and formula[idx + 1] == '"':
+                output.append('""')
+                idx += 2
+                continue
+            if chunk:
+                output.append(transform_unquoted_formula_chunk("".join(chunk), current_sheet, sheet_maps))
+                chunk = []
+            output.append(char)
+            in_string = not in_string
+        elif in_string:
+            output.append(char)
+        else:
+            chunk.append(char)
+        idx += 1
+    if chunk:
+        output.append(transform_unquoted_formula_chunk("".join(chunk), current_sheet, sheet_maps))
+    return "".join(output)
+
+
+def pretty_formula(formula):
+    if not (isinstance(formula, str) and formula.startswith("=")):
+        return formula
+    output = []
+    indent = 0
+    in_string = False
+    idx = 0
+    while idx < len(formula):
+        char = formula[idx]
+        if char == '"':
+            if in_string and idx + 1 < len(formula) and formula[idx + 1] == '"':
+                output.append('""')
+                idx += 2
+                continue
+            in_string = not in_string
+            output.append(char)
+        elif in_string:
+            output.append(char)
+        elif char == "(":
+            output.append(char)
+            indent += 1
+        elif char == ",":
+            output.append(char)
+            output.append("\n" + ("    " * indent))
+        elif char == ")":
+            indent = max(indent - 1, 0)
+            output.append(char)
+        else:
+            output.append(char)
+        idx += 1
+    return "".join(output)
+
+
+def prepared_cell_value(value, current_sheet, sheet_maps):
+    value = transform_formula_references(value, current_sheet, sheet_maps)
+    return pretty_formula(value)
+
+
+def set_prepared_cell(ws, row_idx, col_idx, value, current_sheet, sheet_maps):
+    if value == "":
+        return
+    cell_value = prepared_cell_value(value, current_sheet, sheet_maps)
+    cell = ws.cell(row=row_idx, column=col_idx, value=cell_value)
+    if isinstance(cell_value, str) and cell_value.startswith("="):
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def node_stage_ref(node_name, resolved=False):
+    node_text = str(node_name).strip().lower()
+    if node_text == "junction1":
+        main_stage = safe_positive_expr(f"{quoted_sheet_name(WORKSHEET_NAME)}!$I$13", f"{quoted_sheet_name(WORKSHEET_NAME)}!$D$21")
+        if resolved:
+            return safe_positive_expr(f"{quoted_sheet_name('J1')}!$D$2", main_stage)
+        return main_stage
+    if node_text == "junction2":
+        main_stage = safe_positive_expr(f"{quoted_sheet_name(WORKSHEET_NAME)}!$I$14", f"{quoted_sheet_name(WORKSHEET_NAME)}!$D$22")
+        if resolved:
+            return safe_positive_expr(f"{quoted_sheet_name('J2')}!$D$2", main_stage)
+        return main_stage
+    return ""
+
+
+def endpoint_condition_formula(summary_row, summary_col):
+    node_ref = quoted_main_cell(summary_row, summary_col)
+    return f'=IF(OR({node_ref}="Inlet",{node_ref}="Outlet"),{node_ref},"Junction")'
+
+
+def endpoint_boundary_formula(seg, end_name, boundary_rows):
+    node_key = "from_node" if end_name == "start" else "to_node"
+    node_name = seg.get(node_key, "")
+    if str(node_name).strip().lower() in {"inlet", "outlet"}:
+        boundary_row = boundary_rows[boundary_label(seg["name"], end_name)]
+        return f"={quoted_main_cell(boundary_row, 14)}"
+    return "Junction"
+
+
+def endpoint_value_formula(seg, end_name, boundary_rows, resolved=False, junction_row_lookup=None):
+    node_key = "from_node" if end_name == "start" else "to_node"
+    node_name = seg.get(node_key, "")
+    if str(node_name).strip().lower() in {"inlet", "outlet"}:
+        boundary_row = boundary_rows[boundary_label(seg["name"], end_name)]
+        value_expr = quoted_main_cell(boundary_row, 15)
+        if not resolved:
+            return f"={value_expr}"
+        resolved_expr = quoted_main_cell(boundary_row, 16)
+        if end_name == "end" and is_resolved_wse_segment(seg) and junction_row_lookup:
+            lookup_key = (seg["name"], "Downstream")
+            if lookup_key in junction_row_lookup:
+                junction_sheet, junction_row, _ = junction_row_lookup[lookup_key]
+                junction_wse_expr = f"{quoted_sheet_name(junction_sheet)}!$M${junction_row}"
+                return f"={safe_positive_expr(junction_wse_expr, safe_positive_expr(resolved_expr, value_expr))}"
+        return f"={safe_positive_expr(resolved_expr, value_expr)}"
+    stage_ref = node_stage_ref(node_name, resolved=resolved)
+    return f"={stage_ref}" if stage_ref else ""
+
+
+def segment_inflow_formula(seg, summary_row, junction_row_lookup):
+    base_expr = quoted_main_cell(summary_row, SUM_QIN)
+    lookup_key = (seg["name"], "Downstream")
+    if lookup_key not in junction_row_lookup:
+        return f"={base_expr}"
+    junction_sheet, junction_row, resolve_discharge = junction_row_lookup[lookup_key]
+    if not resolve_discharge:
+        return f"={base_expr}"
+    resolved_expr = f"{quoted_sheet_name(junction_sheet)}!$L${junction_row}"
+    return f"={safe_positive_expr(resolved_expr, base_expr)}"
+
+
+def segment_type_label(seg):
+    end_type = default_boundary_type(seg, "end")
+    start_type = default_boundary_type(seg, "start")
+    if end_type in {"Dead End", "None", "Spill End"}:
+        return "Dead End" if end_type == "None" else end_type
+    if start_type == "Spill Zero":
+        return "Spill Zero"
+    return "Normal"
+
+
+def write_segment_header_info(ws, seg, summary_row, boundary_rows, rows, junction_row_lookup):
+    info_headers = [
+        "Reset", "Channel", "Type", "Length", "US Condition", "US Discharge",
+        "US Boundary Condition", "US Boundary Value", "US Boundary Resolved Value",
+        "DS Condition", "DS Discharge", "DS Boundary Condition",
+        "DS Boundary Value", "DS Boundary Resolved Value",
+    ]
+    info_values = [
+        0,
+        f"={quoted_main_cell(summary_row, SUM_SEG)}",
+        segment_type_label(seg),
+        f"={quoted_main_cell(summary_row, SUM_LEN)}",
+        endpoint_condition_formula(summary_row, SUM_FROM),
+        segment_inflow_formula(seg, summary_row, junction_row_lookup),
+        endpoint_boundary_formula(seg, "start", boundary_rows),
+        endpoint_value_formula(seg, "start", boundary_rows, resolved=False, junction_row_lookup=junction_row_lookup),
+        endpoint_value_formula(seg, "start", boundary_rows, resolved=True, junction_row_lookup=junction_row_lookup),
+        endpoint_condition_formula(summary_row, SUM_TO),
+        f"={quoted_main_cell(summary_row, SUM_QOUT)}",
+        endpoint_boundary_formula(seg, "end", boundary_rows),
+        endpoint_value_formula(seg, "end", boundary_rows, resolved=False, junction_row_lookup=junction_row_lookup),
+        endpoint_value_formula(seg, "end", boundary_rows, resolved=True, junction_row_lookup=junction_row_lookup),
+    ]
+    for col_idx, value in enumerate(info_headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=value)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    for col_idx, value in enumerate(info_values, start=1):
+        cell = ws.cell(row=SEGMENT_INFO_ROW, column=col_idx, value=value)
+        if isinstance(value, str) and value.startswith("="):
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    data_start = SEGMENT_TABLE_DATA_START_ROW
+    data_end = rows["local_rows"]
+    wse_rows = [
+        (SEGMENT_WSE_HEADER_ROW, ["Water Surface Elevation (WSE)", "Initial", "Forward Pass", "Backward Pass", "Final", "Final EG", "", f"{seg['name']} Done"]),
+        (SEGMENT_WSE_HEADER_ROW + 1, ["Upstream", "=$H$2", f"={a1(data_start, TABLE_WSF)}", f"={a1(data_start, TABLE_WSB)}", f"={a1(data_start, TABLE_WS)}", f"={a1(data_start, TABLE_EG)}", "", f"=IFERROR(MIN({a1(data_start, TABLE_DONEF)}:{a1(data_end, TABLE_DONEF)},{a1(data_start, TABLE_DONEB)}:{a1(data_end, TABLE_DONEB)}),0)"]),
+        (SEGMENT_WSE_HEADER_ROW + 2, ["Downstream", "=$M$2", f"={a1(data_end, TABLE_WSF)}", f"={a1(data_end, TABLE_WSB)}", f"={a1(data_end, TABLE_WS)}", f"={a1(data_end, TABLE_EG)}"]),
+    ]
+    for row_idx, values in wse_rows:
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            if row_idx == SEGMENT_WSE_HEADER_ROW:
+                cell.font = Font(bold=True)
+            if isinstance(value, str) and value.startswith("="):
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    reset_validation = DataValidation(type="whole", operator="between", formula1="0", formula2="1", allow_blank=False)
+    reset_validation.prompt = "Use 0 to reset/seed this channel sheet, then 1 to evaluate it."
+    reset_validation.promptTitle = "Channel Reset"
+    reset_validation.error = "Enter 0 or 1."
+    reset_validation.errorTitle = "Invalid Reset Flag"
+    ws.add_data_validation(reset_validation)
+    reset_validation.add(SEGMENT_RESET_REF.replace("$", ""))
+
+
+def channel_sheet_ref(sheet_name, row_idx, col_idx, absolute=False):
+    cell_ref = a1(row_idx, col_idx)
+    if absolute:
+        cell_ref = f"${col_letter(col_idx)}${row_idx}"
+    return f"{quoted_sheet_name(sheet_name)}!{cell_ref}"
+
+
+def is_dead_end_segment(seg):
+    return str(seg.get("to_node", "")).strip().lower() == "outlet" and default_boundary_type(seg, "end") in {"Dead End", "None"}
+
+
+def is_resolved_wse_segment(seg):
+    return str(seg.get("to_node", "")).strip().lower() == "outlet" and default_boundary_type(seg, "end") in {"Dead End", "None", "Spill End"}
+
+
+def write_junction_sheet(ws, spec, sheet_maps):
+    node = spec["node"]
+    sheet = spec["sheet"]
+    if sheet == "J1":
+        current_ref = safe_positive_expr(f"{quoted_sheet_name(WORKSHEET_NAME)}!$I$13", f"{quoted_sheet_name(WORKSHEET_NAME)}!$D$21")
+    elif sheet == "J2":
+        current_ref = safe_positive_expr(f"{quoted_sheet_name(WORKSHEET_NAME)}!$I$14", f"{quoted_sheet_name(WORKSHEET_NAME)}!$D$22")
+    else:
+        current_ref = "0"
+
+    headers = ["To Modify", "Current Junction WSE", "Current Junction EG", "Revised Junction WSE", "Revised Junction EG"]
+    for col_idx, value in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=value)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+    first_row = 5
+    last_row = first_row + len(spec["segments"]) - 1
+    bed_refs = []
+    downstream_normal_count = sum(
+        1 for seg, location in spec["segments"]
+        if location == "Downstream" and not is_dead_end_segment(seg)
+    )
+    for seg, location in spec["segments"]:
+        rows = sheet_maps[seg["name"]]
+        endpoint_row = rows["local_rows"] if location == "Upstream" else SEGMENT_TABLE_DATA_START_ROW
+        bed_refs.append(channel_sheet_ref(seg["name"], endpoint_row, TABLE_BED))
+    bed_floor_expr = f"MIN({','.join(bed_refs)})+{quoted_sheet_name(WORKSHEET_NAME)}!$D$16" if bed_refs else f"{quoted_sheet_name(WORKSHEET_NAME)}!$D$16"
+    ready_expr = f"MIN($F${first_row}:$F${last_row})"
+    up_weight_expr = f'SUMPRODUCT(($C${first_row}:$C${last_row}="Upstream")*$G${first_row}:$G${last_row})'
+    dn_weight_expr = f'SUMPRODUCT(($C${first_row}:$C${last_row}="Downstream")*($B${first_row}:$B${last_row}<>"Dead End")*$G${first_row}:$G${last_row})'
+    up_energy_expr = (
+        f'IFERROR(SUMPRODUCT(($C${first_row}:$C${last_row}="Upstream")'
+        f'*$G${first_row}:$G${last_row}*$J${first_row}:$J${last_row})'
+        f'/MAX(({up_weight_expr}),0.000001),$B$2)'
+    )
+    dn_energy_expr = (
+        f'IFERROR(SUMPRODUCT(($C${first_row}:$C${last_row}="Downstream")'
+        f'*($B${first_row}:$B${last_row}<>"Dead End")'
+        f'*$G${first_row}:$G${last_row}*$J${first_row}:$J${last_row})'
+        f'/MAX(({dn_weight_expr}),0.000001),({up_energy_expr}))'
+    )
+    energy_error_expr = f"IF(({dn_weight_expr})<=0,0,({dn_energy_expr})-({up_energy_expr}))"
+
+    ws["A2"] = 0
+    ws["B2"] = f"={current_ref}"
+    ws["C2"] = f"=IF({ready_expr}<1,$B$2,IFERROR(SUMPRODUCT($G${first_row}:$G${last_row},$J${first_row}:$J${last_row})/MAX(SUM($G${first_row}:$G${last_row}),0.000001),$B$2))"
+    ws["D2"] = f"=IF(OR($A$2=0,{ready_expr}<1),$B$2,IFERROR(IF(ABS({energy_error_expr})<{quoted_sheet_name(WORKSHEET_NAME)}!$D$19,$B$2,MAX({bed_floor_expr},$B$2+({quoted_sheet_name(WORKSHEET_NAME)}!$D$13*({energy_error_expr})))),$B$2))"
+    ws["E2"] = f"=IF(OR($A$2=0,{ready_expr}<1),$C$2,IFERROR($C$2+($D$2-$B$2),$C$2))"
+
+    table_headers = [
+        "Channel", "Type", "Location", "Resolve Discharge", "Resolve WSE",
+        "Done Status", "Discharge", "Other End WSE", "Junction WSE Individual",
+        "Junction EG Individual", "Discrepancy", "Resolved Discharge",
+        "Resolved Other End WSE",
+    ]
+    for col_idx, value in enumerate(table_headers, start=1):
+        cell = ws.cell(row=4, column=col_idx, value=value)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+    for offset, (seg, location) in enumerate(spec["segments"]):
+        row_idx = first_row + offset
+        rows = sheet_maps[seg["name"]]
+        endpoint_row = rows["local_rows"] if location == "Upstream" else SEGMENT_TABLE_DATA_START_ROW
+        other_end_row = SEGMENT_TABLE_DATA_START_ROW if location == "Upstream" else rows["local_rows"]
+        resolve_discharge = "Yes" if location == "Downstream" and downstream_normal_count > 1 and not is_dead_end_segment(seg) else "No"
+        resolve_wse = "Yes" if location == "Downstream" and is_resolved_wse_segment(seg) else "No"
+        other_end_wse_ref = channel_sheet_ref(seg["name"], 5 if location == "Upstream" else 6, 5)
+        junction_wse_ref = channel_sheet_ref(seg["name"], 6 if location == "Upstream" else 5, 5)
+        junction_eg_ref = channel_sheet_ref(seg["name"], 6 if location == "Upstream" else 5, 6)
+        discharge_ref = channel_sheet_ref(seg["name"], 2, 11 if location == "Upstream" else 6)
+        other_bed = channel_sheet_ref(seg["name"], other_end_row, TABLE_BED)
+
+        values = [
+            f"={channel_sheet_ref(seg['name'], 2, 2)}",
+            f"={channel_sheet_ref(seg['name'], 2, 3)}",
+            location,
+            resolve_discharge,
+            resolve_wse,
+            f"={channel_sheet_ref(seg['name'], 5, 8)}",
+            f"={discharge_ref}",
+            f"={other_end_wse_ref}",
+            f"={junction_wse_ref}",
+            f"={junction_eg_ref}",
+            f'=IF(OR($A$2=0,{ready_expr}<1),"",J{row_idx}-$C$2)',
+            f'=IF(OR($A$2=0,{ready_expr}<1),G{row_idx},IF(D{row_idx}="Yes",MAX(0,G{row_idx}+({quoted_sheet_name(WORKSHEET_NAME)}!$D$14*ABS(G{row_idx})*(($C$2-J{row_idx})/MAX(ABS($C$2),1)))),G{row_idx}))',
+            f'=IF(OR($A$2=0,{ready_expr}<1),H{row_idx},IF(E{row_idx}="Yes",MAX({other_bed}+{quoted_sheet_name(WORKSHEET_NAME)}!$D$16,H{row_idx}+({quoted_sheet_name(WORKSHEET_NAME)}!$D$13*($D$2-I{row_idx}))),H{row_idx}))',
+        ]
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            if isinstance(value, str) and value.startswith("="):
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    yes_no_validation = DataValidation(type="list", formula1='"Yes,No"', allow_blank=False)
+    ws.add_data_validation(yes_no_validation)
+    yes_no_validation.add(f"D{first_row}:E{last_row}")
+
+
+def apply_junction_excel_layout(ws, last_row):
+    ws.sheet_view.showGridLines = True
+    ws.auto_filter.ref = f"A4:M{last_row}"
+    title_fill = fill_rgb(0.85, 0.91, 0.97)
+    header_fill = fill_rgb(0.96, 0.94, 0.88)
+    apply_fill(ws, 1, 1, 1, 5, title_fill, bold=True, font_size=11)
+    apply_fill(ws, 4, 4, 1, 13, title_fill, bold=True, font_size=11)
+    widths = [12, 20, 20, 20, 20, 13, 13, 22, 22, 22, 14, 18, 24]
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[col_letter(col_idx)].width = width
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[4].height = 24
+
+
+def write_main_sheet(ws, grid, total_cols, main_end_row, sheet_maps):
+    for row_idx in range(1, main_end_row + 1):
+        for col_idx in range(1, total_cols + 1):
+            set_prepared_cell(ws, row_idx, col_idx, grid[row_idx - 1][col_idx - 1], WORKSHEET_NAME, sheet_maps)
+
+
+def write_segment_sheet(ws, grid, total_cols, sheet_name, rows, sheet_maps):
+    for old_row in range(rows["old_start"] + 1, rows["old_end"] + 1):
+        local_row = old_row - rows["old_start"] + SEGMENT_TABLE_HEADER_ROW - 1
+        for col_idx in range(1, total_cols + 1):
+            set_prepared_cell(ws, local_row, col_idx, grid[old_row - 1][col_idx - 1], sheet_name, sheet_maps)
 
 
 def apply_boundary_dropdowns_excel(ws):
@@ -1420,20 +1873,9 @@ def apply_boundary_dropdowns_excel(ws):
 
 
 def apply_excel_layout(ws, total_cols):
-    ws.freeze_panes = "A30"
     ws.sheet_view.showGridLines = True
     ws.auto_filter.ref = f"A{SUMMARY_HEADER_ROW}:{col_letter(24)}{SUMMARY_START_ROW + 5}"
-
-    for col_idx in range(1, total_cols + 1):
-        letter = get_column_letter(col_idx)
-        if col_idx in (1, 2, 3, 4):
-            ws.column_dimensions[letter].width = 14
-        elif col_idx <= 10:
-            ws.column_dimensions[letter].width = 12
-        elif col_idx <= 17:
-            ws.column_dimensions[letter].width = 18
-        else:
-            ws.column_dimensions[letter].width = 13
+    apply_column_widths(ws, total_cols)
 
     title_fill = fill_rgb(0.85, 0.91, 0.97)
     panel_fill = fill_rgb(0.96, 0.96, 0.96)
@@ -1449,27 +1891,86 @@ def apply_excel_layout(ws, total_cols):
         apply_fill(ws, SOLVER_HEADER_ROW, SOLVER_HEADER_ROW, 1, 42, solver_fill, bold=True)
 
 
+def apply_segment_excel_layout(ws, total_cols, local_rows):
+    ws.sheet_view.showGridLines = True
+    ws.auto_filter.ref = f"A{SEGMENT_TABLE_HEADER_ROW}:{col_letter(total_cols)}{local_rows}"
+    apply_column_widths(ws, total_cols)
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[SEGMENT_WSE_HEADER_ROW].height = 22
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 16
+    ws.column_dimensions["F"].width = 15
+    ws.column_dimensions["G"].width = 24
+    ws.column_dimensions["H"].width = 18
+    ws.column_dimensions["I"].width = 16
+    ws.column_dimensions["J"].width = 15
+    ws.column_dimensions["K"].width = 24
+    ws.column_dimensions["L"].width = 24
+    ws.column_dimensions["M"].width = 18
+    ws.column_dimensions["N"].width = 18
+
+    title_fill = fill_rgb(0.85, 0.91, 0.97)
+    header_fill = fill_rgb(0.96, 0.94, 0.88)
+    units_fill = fill_rgb(0.96, 0.96, 0.96)
+
+    apply_fill(ws, 1, 1, 1, 14, title_fill, bold=True, font_size=11)
+    apply_fill(ws, SEGMENT_WSE_HEADER_ROW, SEGMENT_WSE_HEADER_ROW, 1, 8, title_fill, bold=True, font_size=11)
+    apply_fill(ws, SEGMENT_TABLE_HEADER_ROW, SEGMENT_TABLE_HEADER_ROW, 1, total_cols, header_fill, bold=True)
+    apply_fill(ws, SEGMENT_TABLE_UNITS_ROW, SEGMENT_TABLE_UNITS_ROW, 1, total_cols, units_fill)
+
+
 def configure_excel_calculation(workbook):
-    workbook.calculation = CalcProperties(
-        calcMode="auto",
-        fullCalcOnLoad=True,
-        forceFullCalc=True,
-        iterate=True,
-        iterateCount=250,
-        iterateDelta=0.001,
-    )
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.iterate = True
+    workbook.calculation.iterateCount = 1
 
 
 def write_1d_excel(output_path=DEFAULT_OUTPUT_PATH, worksheet_name=WORKSHEET_NAME):
-    grid, total_rows, total_cols = build_sheet()
+    grid, _, total_cols, metadata = build_sheet(include_metadata=True)
+    sheet_maps = segment_sheet_maps(metadata["segment_table_rows"])
+    segments_by_name = {seg["name"]: seg for seg in metadata["segments"]}
+    junction_specs = collect_junction_specs(metadata["segments"])
+    junction_row_lookup = {}
+    for spec in junction_specs:
+        downstream_normal_count = sum(
+            1 for seg, location in spec["segments"]
+            if location == "Downstream" and not is_dead_end_segment(seg)
+        )
+        for offset, (seg, location) in enumerate(spec["segments"], start=5):
+            resolve_discharge = location == "Downstream" and downstream_normal_count > 1 and not is_dead_end_segment(seg)
+            junction_row_lookup[(seg["name"], location)] = (spec["sheet"], offset, resolve_discharge)
+    main_end_row = max(SUMMARY_HEADER_ROW, max(metadata["summary_rows"].values()), 27)
 
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = worksheet_name
 
-    write_grid_to_worksheet(worksheet, grid)
+    write_main_sheet(worksheet, grid, total_cols, main_end_row, sheet_maps)
     apply_boundary_dropdowns_excel(worksheet)
     apply_excel_layout(worksheet, total_cols)
+
+    for spec in junction_specs:
+        junction_sheet = workbook.create_sheet(title=spec["sheet"])
+        write_junction_sheet(junction_sheet, spec, sheet_maps)
+        apply_junction_excel_layout(junction_sheet, 4 + len(spec["segments"]))
+
+    for segment_name in metadata["segment_order"]:
+        segment_sheet = workbook.create_sheet(title=segment_name)
+        write_segment_sheet(segment_sheet, grid, total_cols, segment_name, sheet_maps[segment_name], sheet_maps)
+        write_segment_header_info(
+            segment_sheet,
+            segments_by_name[segment_name],
+            metadata["summary_rows"][segment_name],
+            metadata["boundary_rows"],
+            sheet_maps[segment_name],
+            junction_row_lookup,
+        )
+        apply_segment_excel_layout(segment_sheet, total_cols, sheet_maps[segment_name]["local_rows"])
+
     configure_excel_calculation(workbook)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
