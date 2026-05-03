@@ -11,7 +11,7 @@ MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 SHEET_NAME = None
 
 # PROJECTS_TO_RUN: list[str] | None = None
-PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN"]
+PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN","CUKUROREN-T"]
 TARGET_RES = 0.5
 BUFFER_M = 20.0
 BLEND_TYPE = "cubic"
@@ -27,6 +27,7 @@ JUNCTION_HALF_SECTION_INTERPOLATION = True
 JUNCTION_BANK_STRUCTURE_PROTECTION_M = 1.0
 PERIMETER_OFFSET_M = 200.0
 WRITE_INTERMEDIATE_TIFS = True
+SPLIT_DISCONNECTED_COMPONENTS = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,4 +85,5 @@ if __name__ == "__main__":
         junction_bank_structure_protection_m=JUNCTION_BANK_STRUCTURE_PROTECTION_M,
         perimeter_offset_m=PERIMETER_OFFSET_M,
         write_intermediate=WRITE_INTERMEDIATE_TIFS,
+        split_disconnected_components=SPLIT_DISCONNECTED_COMPONENTS,
     )

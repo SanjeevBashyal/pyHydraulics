@@ -76,6 +76,58 @@ class DTM:
                 + "\n".join(f"- {message}" for message in missing)
             )
 
+    def group_connected_channel_inputs(self, channel_inputs, network_connections):
+        if not channel_inputs:
+            return []
+
+        parent = list(range(len(channel_inputs)))
+
+        def find(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left, right):
+            root_left = find(left)
+            root_right = find(right)
+            if root_left != root_right:
+                parent[root_right] = root_left
+
+        for connection in network_connections or []:
+            from_index = self._find_channel_input_index(channel_inputs, connection.get("from"))
+            to_index = self._find_channel_input_index(channel_inputs, connection.get("to"))
+            if from_index is None or to_index is None or from_index == to_index:
+                continue
+            union(from_index, to_index)
+
+        groups_by_root = {}
+        for index, channel in enumerate(channel_inputs):
+            groups_by_root.setdefault(find(index), []).append(channel)
+
+        groups = list(groups_by_root.values())
+        return sorted(
+            groups,
+            key=lambda group: (
+                0 if len(group) > 1 else 1,
+                self._normalize_name(group[0].get("name", "")),
+            ),
+        )
+
+    @staticmethod
+    def _find_channel_input_index(channel_inputs, network_name):
+        if not network_name:
+            return None
+        for index, channel in enumerate(channel_inputs):
+            aliases = [
+                channel.get("name", ""),
+                Path(channel.get("cross_section_csv", "")).stem,
+                Path(channel.get("bank_shp_path", "")).parent.name,
+            ]
+            if any(DTMChannelModifier._network_names_match(network_name, alias) for alias in aliases):
+                return index
+        return None
+
     def process_project_channels(
         self,
         project_name,
@@ -96,46 +148,72 @@ class DTM:
         junction_half_section_interpolation=True,
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
+        split_disconnected_components=True,
     ):
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
-        gis_output_dir = Path(self.config.get_gis_project_path(project_name)) / "DTM"
-        temp_output_dir = Path(self.config.get_temp_project_path(project_name)) / "DTM"
-        gis_output_dir.mkdir(parents=True, exist_ok=True)
-        temp_output_dir.mkdir(parents=True, exist_ok=True)
+        gis_project_dir = Path(self.config.get_gis_project_path(project_name))
+        temp_project_dir = Path(self.config.get_temp_project_path(project_name))
+        gis_project_dir.mkdir(parents=True, exist_ok=True)
+        temp_project_dir.mkdir(parents=True, exist_ok=True)
         resolved_blend_type = blend_type or self.config.BLEND_TYPE
         resolved_network_csv_path = network_csv_path or self.get_network_csv_path()
-
-        terrain_stem = (
-            f"{project_name}_channel_terrain"
-            if len(channel_inputs) == 1
-            else f"{project_name}_junction_channel_terrain"
+        network_connections = DTMChannelModifier.read_network_connections(resolved_network_csv_path)
+        connected_groups = (
+            self.group_connected_channel_inputs(channel_inputs, network_connections)
+            if split_disconnected_components
+            else [channel_inputs]
         )
 
         print(f"--- Processing DTM project {project_name}: {[item['name'] for item in channel_inputs]} ---")
-        channel_groups: dict[str, list[dict]] = {}
-        for channel in channel_inputs:
-            dtm_path = str(Path(channel.get("dtm_path") or self.config.DEM_PATH))
-            channel_groups.setdefault(dtm_path, []).append(channel)
+        if len(connected_groups) > 1:
+            print(
+                f"Project {project_name} has {len(connected_groups)} disconnected river component(s); "
+                "isolated components will be written under their sub-project GIS folders."
+            )
 
+        channel_groups: dict[str, list[dict]] = {}
+        for connected_group in connected_groups:
+            for channel in connected_group:
+                dtm_path = str(Path(channel.get("dtm_path") or self.config.DEM_PATH))
+                component_key = self._component_output_key(project_name, connected_group, len(connected_groups))
+                channel_groups.setdefault(f"{dtm_path}||{component_key}", []).append(channel)
+
+        dtm_paths = {key.split("||", 1)[0] for key in channel_groups}
+        multiple_dtms = len(dtm_paths) > 1
         results = []
-        multiple_dtms = len(channel_groups) > 1
         if multiple_dtms:
             print(
-                f"Project {project_name} uses {len(channel_groups)} DTM rasters; "
+                f"Project {project_name} uses {len(dtm_paths)} DTM rasters; "
                 "processing one shared raster window per DTM group."
             )
 
-        for dtm_path, grouped_channels in channel_groups.items():
+        for group_key, grouped_channels in channel_groups.items():
+            dtm_path, component_key = group_key.split("||", 1)
+            output_context = self._component_output_context(
+                project_name=project_name,
+                grouped_channels=grouped_channels,
+                component_key=component_key,
+                has_multiple_groups=len(channel_groups) > 1,
+            )
+            gis_output_dir = output_context["gis_output_dir"]
+            temp_output_dir = output_context["temp_output_dir"]
+            gis_output_dir.mkdir(parents=True, exist_ok=True)
+            temp_output_dir.mkdir(parents=True, exist_ok=True)
+
             group_suffix = ""
-            if multiple_dtms:
+            if multiple_dtms and not output_context["is_isolated_subproject"]:
                 group_suffix = f"_{DTMChannelModifier._safe_name(Path(dtm_path).stem)}"
 
             group_terrain_stem = (
-                f"{project_name}_channel_terrain{group_suffix}"
+                f"{output_context['stem']}_channel_terrain{group_suffix}"
                 if len(grouped_channels) == 1
-                else f"{terrain_stem}{group_suffix}"
+                else f"{output_context['stem']}_junction_channel_terrain{group_suffix}"
             )
 
+            print(
+                f"--- Processing DTM component {output_context['stem']}: "
+                f"{[item['name'] for item in grouped_channels]} -> {gis_output_dir} ---"
+            )
             result = DTMChannelModifier.process_channel_network_dtm(
                 dtm_path=dtm_path,
                 channel_inputs=grouped_channels,
@@ -148,14 +226,14 @@ class DTM:
                 transition_to_dtm_distance_m=transition_to_dtm_distance_m,
                 junction_tolerance=junction_tolerance,
                 write_intermediate=write_intermediate,
-                centerline_output_path=gis_output_dir / f"{project_name}_Centerlines{group_suffix}.shp",
-                merged_banks_output_path=gis_output_dir / f"{project_name}_Merged_Banks{group_suffix}.shp",
-                perimeter_output_path=gis_output_dir / f"{project_name}_Study_Perimeter{group_suffix}.shp",
+                centerline_output_path=gis_output_dir / f"{output_context['stem']}_Centerlines{group_suffix}.shp",
+                merged_banks_output_path=gis_output_dir / f"{output_context['stem']}_Merged_Banks{group_suffix}.shp",
+                perimeter_output_path=gis_output_dir / f"{output_context['stem']}_Study_Perimeter{group_suffix}.shp",
                 perimeter_offset_m=perimeter_offset_m,
                 intermediate_output_dir=temp_output_dir / f"intermediate_channel_tifs{group_suffix}",
                 network_csv_path=resolved_network_csv_path,
                 centerline_gap_m=centerline_gap_m,
-                connected_banks_output_dir=Path(self.config.get_gis_project_path(project_name)),
+                connected_banks_output_dir=gis_output_dir.parent if output_context["is_isolated_subproject"] else gis_project_dir,
                 junction_bank_clip_buffer_m=junction_bank_clip_buffer_m,
                 junction_clip_cross_section_count=junction_clip_cross_section_count,
                 junction_half_section_interpolation=junction_half_section_interpolation,
@@ -163,6 +241,8 @@ class DTM:
                 skewness_correction=skewness_correction,
             )
             result["dtm_path"] = str(dtm_path)
+            result["component"] = output_context["stem"]
+            result["gis_output_dir"] = str(gis_output_dir)
             results.append(result)
 
         if len(results) == 1:
@@ -171,6 +251,50 @@ class DTM:
             "project": project_name,
             "dtm_group_count": len(results),
             "dtm_group_results": results,
+        }
+
+    def _component_output_key(self, project_name, connected_group, connected_group_count):
+        if len(connected_group) == 1 and connected_group_count > 1:
+            return f"subproject:{connected_group[0]['name']}"
+        if len(connected_group) == 1:
+            return f"single:{connected_group[0]['name']}"
+        return f"project:{project_name}"
+
+    def _component_output_context(self, project_name, grouped_channels, component_key, has_multiple_groups):
+        if component_key.startswith("subproject:"):
+            sub_project_name = component_key.split(":", 1)[1]
+            return {
+                "stem": sub_project_name,
+                "gis_output_dir": Path(self.config.get_gis_sub_project_path(project_name, sub_project_name)) / "DTM",
+                "temp_output_dir": Path(self.config.get_temp_sub_project_path(project_name, sub_project_name)) / "DTM",
+                "is_isolated_subproject": True,
+            }
+
+        if component_key.startswith("single:"):
+            sub_project_name = component_key.split(":", 1)[1]
+            stem = sub_project_name if has_multiple_groups else project_name
+            gis_dir = (
+                Path(self.config.get_gis_sub_project_path(project_name, sub_project_name)) / "DTM"
+                if has_multiple_groups
+                else Path(self.config.get_gis_project_path(project_name)) / "DTM"
+            )
+            temp_dir = (
+                Path(self.config.get_temp_sub_project_path(project_name, sub_project_name)) / "DTM"
+                if has_multiple_groups
+                else Path(self.config.get_temp_project_path(project_name)) / "DTM"
+            )
+            return {
+                "stem": stem,
+                "gis_output_dir": gis_dir,
+                "temp_output_dir": temp_dir,
+                "is_isolated_subproject": has_multiple_groups,
+            }
+
+        return {
+            "stem": project_name,
+            "gis_output_dir": Path(self.config.get_gis_project_path(project_name)) / "DTM",
+            "temp_output_dir": Path(self.config.get_temp_project_path(project_name)) / "DTM",
+            "is_isolated_subproject": False,
         }
 
     def process_structure_projects(
@@ -192,6 +316,7 @@ class DTM:
         junction_half_section_interpolation=True,
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
+        split_disconnected_components=True,
     ):
         project_subprojects = self.discover_project_subprojects()
         if isinstance(projects, str):
@@ -234,6 +359,7 @@ class DTM:
                     junction_half_section_interpolation=junction_half_section_interpolation,
                     junction_bank_structure_protection_m=junction_bank_structure_protection_m,
                     skewness_correction=skewness_correction,
+                    split_disconnected_components=split_disconnected_components,
                 )
             )
 

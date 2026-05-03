@@ -42,7 +42,7 @@ SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
-PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN"]
+PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN","CUKUROREN-T"]
 
 # Optional manual pairing. If omitted, network.csv is used when available.
 # Each pair is (main reach, tributary reach).
@@ -57,6 +57,7 @@ BANK_STATION_MODE = "snap"
 RIVER_LINE_METHOD = "simple_distance"
 RETURN_PERIODS: list[str] | None = None
 ALL_FLOW_IN_SINGLE_PLAN = True
+RUN_UNCONNECTED_AS_SEPARATE_PROJECTS = True
 USE_EXISTING_PROJECT_GEOMETRY_AS_REFERENCE = False
 
 
@@ -513,7 +514,11 @@ def run_project(
         main_model = model_by_name[_normalize_name(main_name)]
         tributary_model = model_by_name[_normalize_name(tributary_name)]
         project_stem = project_name if len(pairings) == 1 else f"{project_name}_{tributary_model.sub_project_name}"
-        additional_models = unpaired_models if len(pairings) == 1 else []
+        additional_models = (
+            []
+            if RUN_UNCONNECTED_AS_SEPARATE_PROJECTS
+            else unpaired_models if len(pairings) == 1 else []
+        )
         results.append(
             guarded_run(
                 lambda main=main_model, trib=tributary_model, extras=additional_models, stem=project_stem: run_junction_model(
@@ -530,6 +535,31 @@ def run_project(
                 project_name=project_name,
                 sub_projects=[main_model.sub_project_name, tributary_model.sub_project_name],
                 run_type="junction",
+                continue_on_error=continue_on_error,
+            )
+        )
+
+    if RUN_UNCONNECTED_AS_SEPARATE_PROJECTS and unpaired_models:
+        logger.info(
+            "Running %s unconnected sub-project(s) for %s as separate HEC-RAS project(s): %s",
+            len(unpaired_models),
+            project_name,
+            [model.sub_project_name for model in unpaired_models],
+        )
+    for model in (unpaired_models if RUN_UNCONNECTED_AS_SEPARATE_PROJECTS else []):
+        results.append(
+            guarded_run(
+                lambda model=model: run_single_model(
+                    hec=hec,
+                    config=config,
+                    model=model,
+                    hydrology_kmz=hydrology_kmz,
+                    projection_file=projection_file,
+                    dry_run=dry_run,
+                ),
+                project_name=project_name,
+                sub_projects=[model.sub_project_name],
+                run_type="single",
                 continue_on_error=continue_on_error,
             )
         )
