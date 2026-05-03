@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import shutil
 import sys
 import time
 import tomllib
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import geopandas as gpd
+import h5py
 import numpy as np
 import pandas as pd
 from shapely.geometry import LineString, Point, box
@@ -34,14 +36,6 @@ if str(REPO_ROOT) not in sys.path:
 from ras_commander import init_ras_project, RasCmdr
 from ras_commander.geom import GeomBridge, GeomCrossSection, GeomCulvert, GeomParser
 from ras_commander.hdf import HdfResultsPlan
-
-try:
-    from Automation.DTM import DTMChannelModifier
-except ImportError:
-    try:
-        from DTM import DTMChannelModifier
-    except ImportError:
-        DTMChannelModifier = None
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -76,6 +70,8 @@ class SectionData:
     left_reach_length: float = 0.0
     channel_reach_length: float = 0.0
     right_reach_length: float = 0.0
+    hdf_left_bank_station: Optional[float] = None
+    hdf_right_bank_station: Optional[float] = None
 
 
 @dataclass
@@ -90,6 +86,7 @@ class BuildResult:
     reach: str
     section_count: int
     downstream_friction_slope: float
+    upstream_friction_slope: float
     flow_cms: float
     skipped_source_stations: list[int]
 
@@ -221,20 +218,16 @@ class HECRAS:
        set.
     """
 
-    LOWER_REACH_SUFFIX = "-L"
-    LEGACY_LOWER_REACH_SUFFIX = "-Lower"
-    BANK_LINE_OFFSET_M = 0.2
-
     def __init__(
         self,
-        hecras_version: str = "RAS67.HECRASController",
+        hecras_version: str = "RAS66.HECRASController",
         ras_exe_path: Optional[str | Path] = None,
     ) -> None:
         self.hecras_version = hecras_version
         self.ras_exe_path = (
             Path(ras_exe_path)
             if ras_exe_path is not None
-            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\Ras.exe")
+            else Path(r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\Ras.exe")
         )
         self.hec = None
         self.project_path: Optional[Path] = None
@@ -345,7 +338,6 @@ class HECRAS:
         """
         Build a minimal steady 1D HEC-RAS project in `project_folder`.
         """
-        self._set_target_projection_crs(projection_file)
         geometry_context = self._prepare_geometry_context(
             cross_section_csv=cross_section_csv,
             bank_lines_shp=bank_lines_shp,
@@ -406,7 +398,6 @@ class HECRAS:
             else ["Q1000", "Q500", "Q100", "Q50", "Q25", "Q10", "Q5"]
         )
 
-        self._set_target_projection_crs(projection_file)
         geometry_context = self._prepare_geometry_context(
             cross_section_csv=cross_section_csv,
             bank_lines_shp=bank_lines_shp,
@@ -514,6 +505,7 @@ class HECRAS:
                 project_folder=run_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
             )
             out_of_bank = None
             max_bank_excess_m = None
@@ -596,6 +588,7 @@ class HECRAS:
                 project_folder=project_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
             )
             final_compute_success = bool(final_compute_info["compute_success"])
             final_solution = str(final_compute_info["solution"])
@@ -739,6 +732,7 @@ class HECRAS:
             project_folder=project_folder,
             project_stem=project_stem,
             plan_number="01",
+            geometry_context=geometry_context,
         )
         flow_lookup = dict(flow_profiles)
         for return_period in requested_return_periods:
@@ -867,7 +861,6 @@ class HECRAS:
         main_structure_csv: Optional[str | Path] = None,
         tributary_structure_csv: Optional[str | Path] = None,
         combined_bank_lines_shp: Optional[str | Path] = None,
-        additional_reaches: Optional[list[dict[str, Any]]] = None,
         reference_geometry_file: Optional[str | Path] = None,
         projection_file: Optional[str | Path] = None,
         profile_name: str = "PF 1",
@@ -882,7 +875,6 @@ class HECRAS:
         return_periods: Optional[list[str]] = None,
         bank_station_mode: str = "snap",
         river_line_method: str = "simple_distance",
-        all_flows_in_single_plan: bool = False,
     ) -> FlowScreeningResult:
         project_folder = Path(project_folder)
         project_folder.mkdir(parents=True, exist_ok=True)
@@ -894,7 +886,6 @@ class HECRAS:
             else ["Q1000", "Q500", "Q100", "Q50", "Q25", "Q10", "Q5"]
         )
 
-        self._set_target_projection_crs(projection_file)
         geometry_context = self._prepare_junction_geometry_context(
             main_cross_section_csv=main_cross_section_csv,
             main_bank_lines_shp=main_bank_lines_shp,
@@ -903,7 +894,6 @@ class HECRAS:
             main_structure_csv=main_structure_csv,
             tributary_structure_csv=tributary_structure_csv,
             combined_bank_lines_shp=combined_bank_lines_shp,
-            additional_reaches=additional_reaches,
             reference_geometry_file=reference_geometry_file,
             min_section_spacing=min_section_spacing,
             river_station_step=river_station_step,
@@ -954,63 +944,6 @@ class HECRAS:
             or lower_selection.point_id == tributary_selection.point_id
         ):
             lower_selection = None
-        independent_selections: list[tuple[dict[str, Any], HydrologyPointSelection]] = []
-        missing_independent_reaches: list[str] = []
-        for independent_reach in geometry_context.get("independent_reaches", []):
-            independent_selection = self._select_hydrology_point(
-                hydrology_kmz=hydrology_kmz,
-                centerline_line=independent_reach["centerline_line"],
-                buffer_distance=buffer_distance,
-            )
-            if independent_selection is None:
-                missing_independent_reaches.append(
-                    str(
-                        independent_reach.get("selection_label")
-                        or f"{independent_reach['river']}/{independent_reach['reach']}"
-                    )
-                )
-                continue
-            independent_selections.append((independent_reach, independent_selection))
-
-        if missing_independent_reaches:
-            message = (
-                "No hydrology point fell within "
-                f"{self._format_number(buffer_distance, decimals=2)} m of the "
-                "independent river line(s): "
-                f"{', '.join(missing_independent_reaches)}."
-            )
-            self._write_flow_screening_csv(report_csv=report_csv, run_results=[])
-            report_txt.write_text(message, encoding="utf-8")
-            return FlowScreeningResult(
-                master_folder=str(project_folder),
-                report_csv=str(report_csv),
-                report_txt=str(report_txt),
-                message=message,
-                candidate_point_count=0,
-                tested_return_periods=[],
-            )
-
-        if all_flows_in_single_plan:
-            return self._screen_steady_junction_flows_in_single_plan(
-                project_folder=project_folder,
-                project_stem=project_stem,
-                project_title=project_title,
-                projection_file=projection_file,
-                geometry_context=geometry_context,
-                main_selection=main_selection,
-                tributary_selection=tributary_selection,
-                lower_selection=lower_selection,
-                independent_selections=independent_selections,
-                requested_return_periods=requested_return_periods,
-                report_csv=report_csv,
-                report_txt=report_txt,
-                buffer_distance=buffer_distance,
-                channel_mannings_n=channel_mannings_n,
-                overbank_mannings_n=overbank_mannings_n,
-                expansion_coeff=expansion_coeff,
-                contraction_coeff=contraction_coeff,
-                outflow_tolerance_m=outflow_tolerance_m,
-            )
 
         run_root = project_folder / "runs"
         run_root.mkdir(parents=True, exist_ok=True)
@@ -1049,46 +982,6 @@ class HECRAS:
                             f"hydrology points at {return_period}."
                         ),
                     )
-                )
-                continue
-
-            independent_flow_values: dict[str, float] = {}
-            independent_flow_notes: list[dict[str, Any]] = []
-            missing_independent_flows: list[str] = []
-            for independent_reach, independent_selection in independent_selections:
-                independent_flow = independent_selection.q_values.get(return_period)
-                label = str(
-                    independent_reach.get("selection_label")
-                    or independent_selection.point_name
-                )
-                if independent_flow is None or not np.isfinite(independent_flow):
-                    missing_independent_flows.append(label)
-                    continue
-                flow_key = str(independent_reach["flow_key"])
-                independent_flow_values[flow_key] = float(independent_flow)
-                independent_flow_notes.append(
-                    {
-                        "label": label,
-                        "point": independent_selection.point_name,
-                        "flow_key": flow_key,
-                        "flow": float(independent_flow),
-                    }
-                )
-            if missing_independent_flows:
-                missing_results[return_period] = FlowRunResult(
-                    return_period=return_period,
-                    discharge_cms=np.nan,
-                    run_folder="",
-                    project_file="",
-                    plan_hdf_file="",
-                    compute_success=False,
-                    solution="",
-                    out_of_bank=None,
-                    max_bank_excess_m=None,
-                    note=(
-                        "Missing discharge value for independent reach(es) "
-                        f"{', '.join(missing_independent_flows)} at {return_period}."
-                    ),
                 )
                 continue
 
@@ -1143,6 +1036,7 @@ class HECRAS:
                 project_folder=run_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
             )
             out_of_bank = None
             max_bank_excess_m = None
@@ -1237,6 +1131,7 @@ class HECRAS:
                 project_folder=project_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
             )
             final_compute_success = bool(final_compute_info["compute_success"])
             final_solution = str(final_compute_info["solution"])
@@ -1274,10 +1169,6 @@ class HECRAS:
                 main_selection.candidate_count
                 + tributary_selection.candidate_count
                 + (lower_selection.candidate_count if lower_selection is not None else 0)
-                + sum(
-                    selection.candidate_count
-                    for _, selection in independent_selections
-                )
             ),
             selected_point={
                 "main": main_selection.to_dict(),
@@ -1285,14 +1176,6 @@ class HECRAS:
                 "lower": (
                     lower_selection.to_dict() if lower_selection is not None else None
                 ),
-                "independent": [
-                    {
-                        "river": reach["river"],
-                        "reach": reach["reach"],
-                        "selection": selection.to_dict(),
-                    }
-                    for reach, selection in independent_selections
-                ],
             },
             tested_return_periods=executed_return_periods,
             overflow_return_periods=overflow_return_periods,
@@ -1315,396 +1198,75 @@ class HECRAS:
             final_solution=final_solution,
         )
 
-    def _screen_steady_junction_flows_in_single_plan(
-        self,
-        project_folder: Path,
-        project_stem: str,
-        project_title: str,
-        projection_file: Optional[str | Path],
-        geometry_context: dict[str, Any],
-        main_selection: HydrologyPointSelection,
-        tributary_selection: HydrologyPointSelection,
-        lower_selection: Optional[HydrologyPointSelection],
-        independent_selections: list[tuple[dict[str, Any], HydrologyPointSelection]],
-        requested_return_periods: list[str],
-        report_csv: Path,
-        report_txt: Path,
-        buffer_distance: float,
-        channel_mannings_n: float,
-        overbank_mannings_n: float,
-        expansion_coeff: float,
-        contraction_coeff: float,
-        outflow_tolerance_m: float,
-    ) -> FlowScreeningResult:
-        flow_profiles: list[tuple[str, dict[str, float]]] = []
-        flow_lookup: dict[str, dict[str, Any]] = {}
-        missing_results: dict[str, FlowRunResult] = {}
-
-        for return_period in requested_return_periods:
-            main_flow = main_selection.q_values.get(return_period)
-            tributary_flow = tributary_selection.q_values.get(return_period)
-            lower_point_flow = (
-                lower_selection.q_values.get(return_period)
-                if lower_selection is not None
-                else None
-            )
-            if (
-                main_flow is None
-                or tributary_flow is None
-                or not np.isfinite(main_flow)
-                or not np.isfinite(tributary_flow)
-            ):
-                missing_results[return_period] = FlowRunResult(
-                    return_period=return_period,
-                    discharge_cms=np.nan,
-                    run_folder="",
-                    project_file="",
-                    plan_hdf_file="",
-                    compute_success=False,
-                    solution="",
-                    out_of_bank=None,
-                    max_bank_excess_m=None,
-                    note=(
-                        "Missing discharge value for one or both upstream "
-                        f"hydrology points at {return_period}."
-                    ),
-                )
-                continue
-
-            independent_flow_values: dict[str, float] = {}
-            independent_flow_notes: list[dict[str, Any]] = []
-            missing_independent_flows: list[str] = []
-            for independent_reach, independent_selection in independent_selections:
-                independent_flow = independent_selection.q_values.get(return_period)
-                label = str(
-                    independent_reach.get("selection_label")
-                    or independent_selection.point_name
-                )
-                if independent_flow is None or not np.isfinite(independent_flow):
-                    missing_independent_flows.append(label)
-                    continue
-                flow_key = str(independent_reach["flow_key"])
-                independent_flow_values[flow_key] = float(independent_flow)
-                independent_flow_notes.append(
-                    {
-                        "label": label,
-                        "point": independent_selection.point_name,
-                        "flow_key": flow_key,
-                        "flow": float(independent_flow),
-                    }
-                )
-            if missing_independent_flows:
-                missing_results[return_period] = FlowRunResult(
-                    return_period=return_period,
-                    discharge_cms=np.nan,
-                    run_folder="",
-                    project_file="",
-                    plan_hdf_file="",
-                    compute_success=False,
-                    solution="",
-                    out_of_bank=None,
-                    max_bank_excess_m=None,
-                    note=(
-                        "Missing discharge value for independent reach(es) "
-                        f"{', '.join(missing_independent_flows)} at {return_period}."
-                    ),
-                )
-                continue
-
-            upstream_sum_flow = float(main_flow) + float(tributary_flow)
-            lower_flow_source = "sum_of_upstream"
-            lower_flow = upstream_sum_flow
-            if lower_point_flow is not None and np.isfinite(lower_point_flow):
-                lower_point_flow = float(lower_point_flow)
-                if lower_point_flow > upstream_sum_flow:
-                    lower_flow = lower_point_flow
-                    lower_flow_source = "downstream_main_point"
-
-            flow_profile = {
-                "main": float(main_flow),
-                "tributary": float(tributary_flow),
-                "lower": float(lower_flow),
-                **independent_flow_values,
-            }
-            flow_profiles.append((return_period, flow_profile))
-            flow_lookup[return_period] = {
-                **flow_profile,
-                "upstream_sum": float(upstream_sum_flow),
-                "lower_point": lower_point_flow,
-                "lower_source": lower_flow_source,
-                "independent": independent_flow_notes,
-            }
-            logger.info(
-                "Junction flow profile %s | main=%s cms | tributary=%s cms | "
-                "sum=%s cms | downstream_point=%s | chosen_lower=%s cms | "
-                "source=%s",
-                return_period,
-                self._format_number(main_flow, 3),
-                self._format_number(tributary_flow, 3),
-                self._format_number(upstream_sum_flow, 3),
-                (
-                    f"{self._format_number(lower_point_flow, 3)} cms"
-                    if lower_point_flow is not None and np.isfinite(lower_point_flow)
-                    else "NA"
-                ),
-                self._format_number(lower_flow, 3),
-                lower_flow_source,
-            )
-
-        run_results: list[FlowRunResult] = []
-        if not flow_profiles:
-            for return_period in requested_return_periods:
-                run_results.append(missing_results[return_period])
-            message = (
-                f"Selected main hydrology point {main_selection.point_name} and "
-                f"tributary point {tributary_selection.point_name}, but no usable "
-                "coupled design discharge values were available."
-            )
-            self._write_flow_screening_csv(report_csv=report_csv, run_results=run_results)
-            self._write_junction_flow_screening_text_report(
-                report_txt=report_txt,
-                message=message,
-                buffer_distance=buffer_distance,
-                main_selection=main_selection,
-                tributary_selection=tributary_selection,
-                lower_selection=lower_selection,
-                run_results=run_results,
-                max_safe_run=None,
-            )
-            return FlowScreeningResult(
-                master_folder=str(project_folder),
-                report_csv=str(report_csv),
-                report_txt=str(report_txt),
-                message=message,
-                candidate_point_count=(
-                    main_selection.candidate_count
-                    + tributary_selection.candidate_count
-                    + (lower_selection.candidate_count if lower_selection is not None else 0)
-                    + sum(
-                        selection.candidate_count
-                        for _, selection in independent_selections
-                    )
-                ),
-                selected_point={
-                    "main": main_selection.to_dict(),
-                    "tributary": tributary_selection.to_dict(),
-                    "lower": (
-                        lower_selection.to_dict() if lower_selection is not None else None
-                    ),
-                    "independent": [
-                        {
-                            "river": reach["river"],
-                            "reach": reach["reach"],
-                            "selection": selection.to_dict(),
-                        }
-                        for reach, selection in independent_selections
-                    ],
-                },
-                tested_return_periods=requested_return_periods,
-                run_results=[result.to_dict() for result in run_results],
-            )
-
-        first_profile, first_flow_profile = flow_profiles[0]
-        build_result = self._write_model_files(
-            project_folder=project_folder,
-            project_stem=project_stem,
-            project_title=project_title,
-            projection_file=projection_file,
-            profile_name=first_profile,
-            flow_cms=first_flow_profile["lower"],
-            channel_mannings_n=channel_mannings_n,
-            overbank_mannings_n=overbank_mannings_n,
-            expansion_coeff=expansion_coeff,
-            contraction_coeff=contraction_coeff,
-            geometry_context=geometry_context,
-            flow_profile=first_flow_profile,
-            return_period=first_profile,
-            flow_profiles=flow_profiles,
-        )
-        compute_info = self.compute_project(
-            project_folder=project_folder,
-            project_stem=project_stem,
-            plan_number="01",
-        )
-
-        for return_period in requested_return_periods:
-            if return_period in missing_results:
-                run_results.append(missing_results[return_period])
-                continue
-
-            flow_info = flow_lookup[return_period]
-            lower_point_flow = flow_info["lower_point"]
-            note = (
-                "main="
-                f"{self._format_number(flow_info['main'], 3)} cms | tributary="
-                f"{self._format_number(flow_info['tributary'], 3)} cms | upstream_sum="
-                f"{self._format_number(flow_info['upstream_sum'], 3)} cms | downstream_point="
-                f"{self._format_number(lower_point_flow, 3) if lower_point_flow is not None and np.isfinite(lower_point_flow) else 'NA'}"
-                " cms"
-                " | lower_source="
-                f"{flow_info['lower_source']} | lower="
-                f"{self._format_number(flow_info['lower'], 3)} cms"
-            )
-            for independent_info in flow_info.get("independent", []):
-                note = (
-                    f"{note} | {independent_info['label']}="
-                    f"{self._format_number(independent_info['flow'], 3)} cms"
-                )
-            out_of_bank = None
-            max_bank_excess_m = None
-            overflow_sections: list[str] = []
-            if compute_info["compute_success"] and compute_info["plan_hdf_file"]:
-                try:
-                    overflow_info = self._evaluate_steady_outflow(
-                        plan_hdf_path=Path(compute_info["plan_hdf_file"]),
-                        sections=geometry_context["all_sections"],
-                        profile_name=return_period,
-                        tolerance_m=outflow_tolerance_m,
-                    )
-                    out_of_bank = overflow_info["out_of_bank"]
-                    max_bank_excess_m = overflow_info["max_bank_excess_m"]
-                    overflow_sections = overflow_info["overflow_sections"]
-                    note = f"{note} | {overflow_info['note']}"
-                except Exception as exc:
-                    note = f"{note} | Could not evaluate profile {return_period}: {exc}"
-            else:
-                note = f"{note} | HEC-RAS compute did not produce steady results."
-
-            run_results.append(
-                FlowRunResult(
-                    return_period=return_period,
-                    discharge_cms=float(flow_info["lower"]),
-                    run_folder=str(project_folder),
-                    project_file=build_result.project_file,
-                    plan_hdf_file=str(compute_info["plan_hdf_file"]),
-                    compute_success=bool(compute_info["compute_success"]),
-                    solution=str(compute_info["solution"]),
-                    out_of_bank=out_of_bank,
-                    max_bank_excess_m=max_bank_excess_m,
-                    overflow_sections=overflow_sections,
-                    note=note,
-                )
-            )
-
-        max_safe_run = next(
-            (
-                result
-                for result in run_results
-                if result.compute_success and result.out_of_bank is False
-            ),
-            None,
-        )
-        final_model_run = max_safe_run
-        final_model_reason = "max_safe_flow" if max_safe_run is not None else None
-        if final_model_run is None:
-            successful_runs = [
-                result for result in run_results if result.compute_success
-            ]
-            if successful_runs:
-                final_model_run = successful_runs[-1]
-                final_model_reason = "lowest_successful_flow_for_review"
-
-        overflow_return_periods = [
-            result.return_period
-            for result in run_results
-            if result.out_of_bank is True
-        ]
-        message = self._build_junction_flow_screening_message(
-            main_selection=main_selection,
-            tributary_selection=tributary_selection,
-            lower_selection=lower_selection,
-            max_safe_run=max_safe_run,
-            buffer_distance=buffer_distance,
-            screening_stopped_early=False,
-            all_flows_in_single_plan=True,
-        )
-        self._write_flow_screening_csv(report_csv=report_csv, run_results=run_results)
-        self._write_junction_flow_screening_text_report(
-            report_txt=report_txt,
-            message=message,
-            buffer_distance=buffer_distance,
-            main_selection=main_selection,
-            tributary_selection=tributary_selection,
-            lower_selection=lower_selection,
-            run_results=run_results,
-            max_safe_run=max_safe_run,
-        )
-        return FlowScreeningResult(
-            master_folder=str(project_folder),
-            report_csv=str(report_csv),
-            report_txt=str(report_txt),
-            message=message,
-            candidate_point_count=(
-                main_selection.candidate_count
-                + tributary_selection.candidate_count
-                + (lower_selection.candidate_count if lower_selection is not None else 0)
-                + sum(
-                    selection.candidate_count
-                    for _, selection in independent_selections
-                )
-            ),
-            selected_point={
-                "main": main_selection.to_dict(),
-                "tributary": tributary_selection.to_dict(),
-                "lower": (
-                    lower_selection.to_dict() if lower_selection is not None else None
-                ),
-                "independent": [
-                    {
-                        "river": reach["river"],
-                        "reach": reach["reach"],
-                        "selection": selection.to_dict(),
-                    }
-                    for reach, selection in independent_selections
-                ],
-            },
-            tested_return_periods=requested_return_periods,
-            overflow_return_periods=overflow_return_periods,
-            run_results=[result.to_dict() for result in run_results],
-            max_safe_return_period=(
-                max_safe_run.return_period if max_safe_run is not None else None
-            ),
-            max_safe_flow_cms=(
-                max_safe_run.discharge_cms if max_safe_run is not None else None
-            ),
-            final_model_return_period=(
-                final_model_run.return_period if final_model_run is not None else None
-            ),
-            final_model_flow_cms=(
-                final_model_run.discharge_cms if final_model_run is not None else None
-            ),
-            final_model_reason=final_model_reason,
-            final_build=build_result.to_dict(),
-            final_compute_success=bool(compute_info["compute_success"]),
-            final_solution=str(compute_info["solution"]),
-        )
-
     def compute_project(
         self,
         project_folder: str | Path,
         project_stem: str,
         plan_number: str = "01",
+        geometry_context: Optional[dict[str, Any]] = None,
+        prepare_geometry_hdf: bool = True,
     ) -> dict[str, Any]:
         project_folder = Path(project_folder)
-        normalized_plan_number = self._normalize_plan_number(plan_number)
-        data_error_path = project_folder / f"{project_stem}.p{normalized_plan_number}.data_errors.txt"
-        if data_error_path.exists():
-            try:
-                data_error_path.unlink()
-            except OSError:
-                logger.warning("Could not remove stale HEC-RAS data error file: %s", data_error_path)
         init_ras_project(
             project_folder,
             str(self.ras_exe_path),
             load_results_summary=False,
         )
+        normalized_plan_number = self._normalize_plan_number(plan_number)
+        geometry_hdf_prepared = False
+        if (
+            prepare_geometry_hdf
+            and normalized_plan_number == "01"
+            and geometry_context is not None
+        ):
+            self._prepare_corrected_geometry_hdf(
+                project_folder=project_folder,
+                project_stem=project_stem,
+                geometry_context=geometry_context,
+            )
+            init_ras_project(
+                project_folder,
+                str(self.ras_exe_path),
+                load_results_summary=False,
+            )
+            geometry_hdf_prepared = True
         compute_result = RasCmdr.compute_plan(
             plan_number,
-            clear_geompre=True,
+            clear_geompre=not geometry_hdf_prepared,
             force_rerun=True,
             verify=True,
         )
         plan_hdf_path = project_folder / f"{project_stem}.p{normalized_plan_number}.hdf"
+        if geometry_hdf_prepared and geometry_context is not None:
+            geometry_hdf_path = project_folder / f"{project_stem}.g01.hdf"
+            self._patch_geometry_hdf_bank_lines(
+                geometry_hdf_path,
+                raw_bank_lines=geometry_context.get("hdf_bank_lines_raw"),
+                projected_bank_lines=geometry_context.get("hdf_bank_lines_projected"),
+                left_bank_line=geometry_context["left_bank_line"],
+                right_bank_line=geometry_context["right_bank_line"],
+                centerline_line=geometry_context.get("centerline_line"),
+            )
+            self._patch_geometry_hdf_cross_sections(
+                geometry_hdf_path,
+                geometry_context["sections"],
+            )
+            if plan_hdf_path.exists():
+                self._patch_geometry_hdf_bank_lines(
+                    plan_hdf_path,
+                    raw_bank_lines=geometry_context.get("hdf_bank_lines_raw"),
+                    projected_bank_lines=geometry_context.get(
+                        "hdf_bank_lines_projected"
+                    ),
+                    left_bank_line=geometry_context["left_bank_line"],
+                    right_bank_line=geometry_context["right_bank_line"],
+                    centerline_line=geometry_context.get("centerline_line"),
+                )
+                self._patch_geometry_hdf_cross_sections(
+                    plan_hdf_path,
+                    geometry_context["sections"],
+                )
+
         solution = ""
         if plan_hdf_path.exists():
             try:
@@ -1728,6 +1290,587 @@ class HECRAS:
             "plan_hdf_file": str(plan_hdf_path) if plan_hdf_path.exists() else "",
             "solution": solution,
         }
+
+    def _prepare_corrected_geometry_hdf(
+        self,
+        project_folder: Path,
+        project_stem: str,
+        geometry_context: dict[str, Any],
+        dummy_plan_number: str = "99",
+    ) -> None:
+        if geometry_context.get("junction"):
+            logger.info(
+                "Skipping dummy geometry-HDF bank-line correction for junction models."
+            )
+            return
+        if "left_bank_line" not in geometry_context or "right_bank_line" not in geometry_context:
+            logger.info("Skipping geometry-HDF bank-line correction; bank lines missing.")
+            return
+
+        geometry_hdf_path = project_folder / f"{project_stem}.g01.hdf"
+        init_ras_project(
+            project_folder,
+            str(self.ras_exe_path),
+            load_results_summary=False,
+        )
+        RasCmdr.compute_plan(
+            "01",
+            clear_geompre=True,
+            force_geompre=True,
+            force_rerun=True,
+            verify=False,
+        )
+        self._delete_plan_compute_outputs(
+            project_folder=project_folder,
+            project_stem=project_stem,
+            plan_number="01",
+            keep_geometry_hdf=True,
+        )
+        if geometry_hdf_path.exists():
+            self._patch_geometry_hdf_bank_lines(
+                geometry_hdf_path=geometry_hdf_path,
+                raw_bank_lines=geometry_context.get("hdf_bank_lines_raw"),
+                projected_bank_lines=geometry_context.get("hdf_bank_lines_projected"),
+                left_bank_line=geometry_context["left_bank_line"],
+                right_bank_line=geometry_context["right_bank_line"],
+                centerline_line=geometry_context.get("centerline_line"),
+            )
+            logger.info(
+                "Created and patched geometry HDF bank lines using p01 pre-run: %s",
+                geometry_hdf_path,
+            )
+        else:
+            logger.warning(
+                "Plan p01 pre-run did not create geometry HDF: %s",
+                geometry_hdf_path,
+            )
+
+    def _create_dummy_compute_plan(
+        self,
+        project_folder: Path,
+        project_stem: str,
+        dummy_plan_number: str,
+    ) -> None:
+        dummy_plan_number = self._normalize_plan_number(dummy_plan_number)
+        source_flow = project_folder / f"{project_stem}.f01"
+        source_plan = project_folder / f"{project_stem}.p01"
+        dummy_flow = project_folder / f"{project_stem}.f{dummy_plan_number}"
+        dummy_plan = project_folder / f"{project_stem}.p{dummy_plan_number}"
+        project_path = project_folder / f"{project_stem}.prj"
+
+        if not source_flow.exists() or not source_plan.exists() or not project_path.exists():
+            raise FileNotFoundError(
+                "Cannot create dummy geometry-HDF plan; required p01/f01/prj "
+                "files are missing."
+            )
+
+        self._write_dummy_steady_flow_file(
+            source_flow=source_flow,
+            dummy_flow=dummy_flow,
+            flow_value=15.0,
+        )
+        plan_text = source_plan.read_text(encoding="utf-8", errors="ignore")
+        plan_text = plan_text.replace("Flow File=f01", f"Flow File=f{dummy_plan_number}")
+        plan_text = re.sub(
+            r"^Plan Title=.*$",
+            f"Plan Title=Dummy Geometry HDF p{dummy_plan_number}",
+            plan_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        plan_text = re.sub(
+            r"^Short Identifier=.*$",
+            f"Short Identifier={'Dummy Geometry HDF'[:64]:<64}",
+            plan_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        dummy_plan.write_text(plan_text, encoding="utf-8")
+
+        project_lines = project_path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ).splitlines(keepends=True)
+        updated_lines: list[str] = []
+        inserted = False
+        for line in project_lines:
+            if line.startswith("Current Plan="):
+                updated_lines.append(f"Current Plan=p{dummy_plan_number}\n")
+                continue
+            updated_lines.append(line)
+            if line.startswith("Plan File=p01") and not inserted:
+                updated_lines.append(f"Flow File=f{dummy_plan_number}\n")
+                updated_lines.append(f"Plan File=p{dummy_plan_number}\n")
+                inserted = True
+        if not inserted:
+            updated_lines.extend(
+                [
+                    f"Flow File=f{dummy_plan_number}\n",
+                    f"Plan File=p{dummy_plan_number}\n",
+                ]
+            )
+        project_path.write_text("".join(updated_lines), encoding="utf-8")
+
+    @staticmethod
+    def _write_dummy_steady_flow_file(
+        source_flow: Path,
+        dummy_flow: Path,
+        flow_value: float = 15.0,
+    ) -> None:
+        source_text = source_flow.read_text(encoding="utf-8", errors="ignore")
+        river_line = re.search(r"^River Rch & RM=(.+)$", source_text, flags=re.MULTILINE)
+        boundary_line = re.search(
+            r"^Boundary for River Rch & Prof#=(.+)$",
+            source_text,
+            flags=re.MULTILINE,
+        )
+        up_slope = re.search(r"^Up Slope=(.+)$", source_text, flags=re.MULTILINE)
+        dn_slope = re.search(r"^Dn Slope=(.+)$", source_text, flags=re.MULTILINE)
+        if not river_line or not boundary_line:
+            raise ValueError(f"Could not parse required flow metadata from {source_flow}")
+
+        content = [
+            "Flow Title=Dummy_Geometry_HDF\n",
+            "Program Version=6.60\n",
+            "Number of Profiles= 1 \n",
+            "Profile Names=Dummy\n",
+            f"River Rch & RM={river_line.group(1).rstrip()}\n",
+            f"{HECRAS._format_number(flow_value, decimals=3):>8}\n",
+            f"Boundary for River Rch & Prof#={boundary_line.group(1).rstrip()}\n",
+            "Up Type= 3 \n",
+            f"Up Slope={(up_slope.group(1).strip() if up_slope else '0.001')}\n",
+            "Dn Type= 3 \n",
+            f"Dn Slope={(dn_slope.group(1).strip() if dn_slope else '0.001')}\n",
+            "DSS Import StartDate=\n",
+            "DSS Import StartTime=\n",
+            "DSS Import EndDate=\n",
+            "DSS Import EndTime=\n",
+            "DSS Import GetInterval= 0 \n",
+            "DSS Import Interval=\n",
+            "DSS Import GetPeak= 0 \n",
+            "DSS Import FillOption= 0 \n",
+        ]
+        dummy_flow.write_text("".join(content), encoding="utf-8")
+
+    @staticmethod
+    def _delete_dummy_compute_plan_outputs(
+        project_folder: Path,
+        project_stem: str,
+        dummy_plan_number: str,
+    ) -> None:
+        dummy_plan_number = HECRAS._normalize_plan_number(dummy_plan_number)
+        suffixes = [
+            f".p{dummy_plan_number}",
+            f".f{dummy_plan_number}",
+            f".p{dummy_plan_number}.hdf",
+            f".p{dummy_plan_number}.tmp.hdf",
+            f".b{dummy_plan_number}",
+            f".c{dummy_plan_number}",
+            f".O{dummy_plan_number}",
+            f".o{dummy_plan_number}",
+            f".r{dummy_plan_number}",
+            f".comp_msgs{dummy_plan_number}.txt",
+        ]
+        for suffix in suffixes:
+            path = project_folder / f"{project_stem}{suffix}"
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning("Could not delete dummy output %s: %s", path, exc)
+
+    @staticmethod
+    def _delete_plan_compute_outputs(
+        project_folder: Path,
+        project_stem: str,
+        plan_number: str,
+        keep_geometry_hdf: bool = True,
+    ) -> None:
+        plan_number = HECRAS._normalize_plan_number(plan_number)
+        suffixes = [
+            f".p{plan_number}.hdf",
+            f".p{plan_number}.tmp.hdf",
+            f".b{plan_number}",
+            f".c{plan_number}",
+            f".O{plan_number}",
+            f".o{plan_number}",
+            f".r{plan_number}",
+            f".comp_msgs{plan_number}.txt",
+        ]
+        if not keep_geometry_hdf:
+            suffixes.append(f".g{plan_number}.hdf")
+        for suffix in suffixes:
+            path = project_folder / f"{project_stem}{suffix}"
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning("Could not delete pre-run output %s: %s", path, exc)
+
+    @staticmethod
+    def _patch_geometry_hdf_bank_lines(
+        geometry_hdf_path: Path,
+        left_bank_line: LineString,
+        right_bank_line: LineString,
+        raw_bank_lines: Optional[list[LineString]] = None,
+        projected_bank_lines: Optional[list[LineString]] = None,
+        centerline_line: Optional[LineString] = None,
+        outward_offset_m: float = 0.1,
+    ) -> None:
+        projected_lines = list(projected_bank_lines or [left_bank_line, right_bank_line])
+        raw_lines = list(raw_bank_lines or [])
+        if not projected_lines:
+            return
+        if centerline_line is not None and outward_offset_m:
+            projected_lines = [
+                HECRAS._offset_line_away_from_centerline(
+                    line=line,
+                    centerline_line=centerline_line,
+                    offset_distance=float(outward_offset_m),
+                )
+                for line in projected_lines
+            ]
+            raw_lines = []
+
+        def polyline_arrays(
+            lines: list[LineString],
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            coords_by_line = [
+                np.asarray(
+                    [(float(x), float(y)) for x, y in line.coords],
+                    dtype=np.float64,
+                )
+                for line in lines
+                if line is not None and not line.is_empty and len(line.coords) >= 2
+            ]
+            if not coords_by_line:
+                return (
+                    np.empty((0, 2), dtype=np.float64),
+                    np.empty((0, 4), dtype=np.int32),
+                    np.empty((0, 2), dtype=np.int32),
+                )
+            all_points = np.vstack(coords_by_line)
+            polyline_info = np.zeros((len(coords_by_line), 4), dtype=np.int32)
+            polyline_parts = np.zeros((len(coords_by_line), 2), dtype=np.int32)
+            start = 0
+            for idx, coords in enumerate(coords_by_line):
+                count = int(len(coords))
+                polyline_info[idx] = [start, count, idx, 1]
+                polyline_parts[idx] = [0, count]
+                start += count
+            return all_points, polyline_info, polyline_parts
+
+        if raw_lines:
+            bank_line_groups = raw_lines + projected_lines
+        else:
+            bank_line_groups = projected_lines
+        bank_points, bank_info, bank_parts = polyline_arrays(bank_line_groups)
+        flow_points, flow_info, flow_parts = polyline_arrays(projected_lines)
+
+        dataset_attrs = {
+            "info": {
+                "Column": np.asarray(
+                    [
+                        b"Point Starting Index",
+                        b"Point Count",
+                        b"Part Starting Index",
+                        b"Part Count",
+                    ],
+                    dtype="S20",
+                ),
+                "Feature Type": np.bytes_("Polyline"),
+                "Row": np.bytes_("Feature"),
+            },
+            "parts": {
+                "Column": np.asarray(
+                    [b"Point Starting Index", b"Point Count"],
+                    dtype="S20",
+                ),
+                "Row": np.bytes_("Part"),
+            },
+            "points": {
+                "Column": np.asarray([b"X", b"Y"], dtype="S1"),
+                "Row": np.bytes_("Points"),
+            },
+        }
+
+        def replace_dataset(group, dataset_name: str, values: np.ndarray, attrs: dict):
+            if dataset_name in group:
+                del group[dataset_name]
+            dataset = HECRAS._create_hecras_hdf_dataset(
+                group,
+                dataset_name,
+                values,
+            )
+            for key, value in attrs.items():
+                dataset.attrs[key] = value
+
+        with h5py.File(geometry_hdf_path, "r+") as hdf:
+            bank_group = hdf.require_group("Geometry/River Bank Lines")
+            replace_dataset(
+                bank_group,
+                "Polyline Points",
+                bank_points,
+                dataset_attrs["points"],
+            )
+            replace_dataset(
+                bank_group,
+                "Polyline Info",
+                bank_info,
+                dataset_attrs["info"],
+            )
+            replace_dataset(
+                bank_group,
+                "Polyline Parts",
+                bank_parts,
+                dataset_attrs["parts"],
+            )
+
+            flow_group = hdf.require_group("Geometry/River Flow Paths")
+            replace_dataset(
+                flow_group,
+                "Flow Path Lines Points",
+                flow_points,
+                dataset_attrs["points"],
+            )
+            replace_dataset(
+                flow_group,
+                "Flow Path Lines Info",
+                flow_info,
+                dataset_attrs["info"],
+            )
+            replace_dataset(
+                flow_group,
+                "Flow Path Lines Parts",
+                flow_parts,
+                dataset_attrs["parts"],
+            )
+
+    @staticmethod
+    def _offset_line_away_from_centerline(
+        line: LineString,
+        centerline_line: LineString,
+        offset_distance: float,
+    ) -> LineString:
+        if (
+            line is None
+            or line.is_empty
+            or centerline_line is None
+            or centerline_line.is_empty
+            or not offset_distance
+        ):
+            return line
+
+        shifted_coords: list[tuple[float, float]] = []
+        for x_value, y_value in line.coords:
+            point = Point(float(x_value), float(y_value))
+            center_measure = float(centerline_line.project(point))
+            center_point = centerline_line.interpolate(center_measure)
+            dx = float(point.x - center_point.x)
+            dy = float(point.y - center_point.y)
+            length = math.hypot(dx, dy)
+            if length <= 1e-9:
+                shifted_coords.append((float(point.x), float(point.y)))
+                continue
+            scale = float(offset_distance) / length
+            shifted_coords.append(
+                (
+                    float(point.x + dx * scale),
+                    float(point.y + dy * scale),
+                )
+            )
+
+        if len(shifted_coords) < 2:
+            return line
+        return LineString(shifted_coords)
+
+    @staticmethod
+    def _hecras_hdf_bank_station(value: float) -> float:
+        return round(float(value), 1)
+
+    @staticmethod
+    def _hecras_hdf_chunks(values: np.ndarray) -> Optional[tuple[int, ...]]:
+        if values.shape == ():
+            return None
+        if values.ndim == 1:
+            return (max(int(values.shape[0]), 1),)
+        if values.ndim == 2:
+            columns = max(int(values.shape[1]), 1)
+            if columns == 2:
+                return (min(max(int(values.shape[0]), 1), 8192), columns)
+            if columns == 4:
+                return (max(int(values.shape[0]), 1), columns)
+            return (max(int(values.shape[0]), 1), columns)
+        return tuple(max(int(size), 1) for size in values.shape)
+
+    @staticmethod
+    def _create_hecras_hdf_dataset(group, dataset_name: str, values: np.ndarray):
+        chunks = HECRAS._hecras_hdf_chunks(values)
+        if chunks is None:
+            return group.create_dataset(dataset_name, data=values)
+        maxshape = tuple(None for _ in values.shape)
+        return group.create_dataset(
+            dataset_name,
+            data=values,
+            chunks=chunks,
+            maxshape=maxshape,
+            compression="gzip",
+        )
+
+    @staticmethod
+    def _insert_hdf_station_elevation_points(
+        station_elevation: np.ndarray,
+        required_stations: list[float],
+    ) -> np.ndarray:
+        if station_elevation.size == 0:
+            return station_elevation.astype(np.float32)
+
+        rows = [
+            (float(station), float(elevation))
+            for station, elevation in station_elevation
+        ]
+        existing_stations = [station for station, _ in rows]
+        source_stations = list(existing_stations)
+        source_elevations = [elevation for _, elevation in rows]
+
+        for station in required_stations:
+            station = float(station)
+            if any(
+                math.isclose(station, existing, abs_tol=0.0015)
+                or (
+                    station >= existing
+                    and math.isclose(station, existing, abs_tol=0.005)
+                )
+                for existing in existing_stations
+            ):
+                continue
+            elevation = HECRAS._interpolate_profile_elevation(
+                source_stations,
+                source_elevations,
+                station,
+            )
+            rows.append((station, elevation))
+            existing_stations.append(station)
+
+        rows.sort(key=lambda item: item[0])
+        return np.asarray(rows, dtype=np.float32)
+
+    @staticmethod
+    def _patch_geometry_hdf_cross_sections(
+        geometry_hdf_path: Path,
+        sections: list[SectionData],
+    ) -> None:
+        if not sections:
+            return
+
+        with h5py.File(geometry_hdf_path, "r+") as hdf:
+            cross_sections_path = "Geometry/Cross Sections"
+            if cross_sections_path not in hdf:
+                return
+            group = hdf[cross_sections_path]
+            required_datasets = {
+                "Attributes",
+                "Station Elevation Info",
+                "Station Elevation Values",
+                "Manning's n Values",
+            }
+            if not required_datasets.issubset(group.keys()):
+                return
+
+            attrs = group["Attributes"][()]
+            station_info = group["Station Elevation Info"][()]
+            station_values = group["Station Elevation Values"][()]
+            mann_values = group["Manning's n Values"][()]
+
+            updated_station_values: list[np.ndarray] = []
+            updated_station_info = np.zeros_like(station_info)
+            station_start = 0
+            for idx, section in enumerate(sections[: len(station_info)]):
+                rounded_left = HECRAS._hecras_hdf_bank_station(
+                    section.hdf_left_bank_station
+                    if section.hdf_left_bank_station is not None
+                    else section.left_bank_station
+                )
+                rounded_right = HECRAS._hecras_hdf_bank_station(
+                    section.hdf_right_bank_station
+                    if section.hdf_right_bank_station is not None
+                    else section.right_bank_station
+                )
+                source_start = int(station_info[idx][0])
+                source_count = int(station_info[idx][1])
+                section_values = station_values[
+                    source_start : source_start + source_count
+                ]
+                patched_values = HECRAS._insert_hdf_station_elevation_points(
+                    section_values,
+                    [rounded_left, rounded_right],
+                )
+                updated_station_values.append(patched_values)
+                updated_station_info[idx] = [station_start, len(patched_values)]
+                station_start += len(patched_values)
+
+                for field_name, field_value in (
+                    ("Left Bank", rounded_left),
+                    ("Right Bank", rounded_right),
+                    ("Left Levee Sta", rounded_left),
+                    ("Right Levee Sta", rounded_right),
+                    (
+                        "Left Levee Elev",
+                        HECRAS._interpolate_profile_elevation(
+                            patched_values[:, 0].astype(float).tolist(),
+                            patched_values[:, 1].astype(float).tolist(),
+                            rounded_left,
+                        ),
+                    ),
+                    (
+                        "Right Levee Elev",
+                        HECRAS._interpolate_profile_elevation(
+                            patched_values[:, 0].astype(float).tolist(),
+                            patched_values[:, 1].astype(float).tolist(),
+                            rounded_right,
+                        ),
+                    ),
+                ):
+                    if field_name in attrs.dtype.names:
+                        attrs[idx][field_name] = field_value
+
+                mann_idx = idx * 3
+                if mann_idx + 2 < len(mann_values):
+                    mann_values[mann_idx + 1][0] = rounded_left
+                    mann_values[mann_idx + 2][0] = rounded_right
+
+            if len(sections) < len(station_info):
+                for idx in range(len(sections), len(station_info)):
+                    source_start = int(station_info[idx][0])
+                    source_count = int(station_info[idx][1])
+                    section_values = station_values[
+                        source_start : source_start + source_count
+                    ].astype(np.float32)
+                    updated_station_values.append(section_values)
+                    updated_station_info[idx] = [station_start, len(section_values)]
+                    station_start += len(section_values)
+
+            concatenated_station_values = (
+                np.vstack(updated_station_values).astype(np.float32)
+                if updated_station_values
+                else np.empty((0, 2), dtype=np.float32)
+            )
+
+            for dataset_name, values in (
+                ("Attributes", attrs),
+                ("Station Elevation Info", updated_station_info),
+                ("Station Elevation Values", concatenated_station_values),
+                ("Manning's n Values", mann_values),
+            ):
+                existing_attrs = dict(group[dataset_name].attrs)
+                del group[dataset_name]
+                dataset = HECRAS._create_hecras_hdf_dataset(
+                    group,
+                    dataset_name,
+                    values,
+                )
+                for key, value in existing_attrs.items():
+                    dataset.attrs[key] = value
 
     def smoke_test(
         self,
@@ -1809,6 +1952,9 @@ class HECRAS:
             cross_section_df,
             bank_lines_shp,
         )
+        hdf_bank_lines_raw, hdf_bank_lines_projected = (
+            self._load_bank_line_features_for_hdf(bank_lines_shp)
+        )
         filtered_inputs, skipped_stations = self._filter_near_duplicate_sections(
             section_inputs,
             min_section_spacing=min_section_spacing,
@@ -1838,7 +1984,7 @@ class HECRAS:
             sections=sections,
             centerline_line=centerline_line,
         )
-        friction_slope = self._estimate_downstream_friction_slope(sections)
+        friction_slopes = self._estimate_terminal_friction_slopes(sections)
         return {
             "river": river,
             "reach": reach,
@@ -1847,10 +1993,13 @@ class HECRAS:
             "filtered_inputs": filtered_inputs,
             "left_bank_line": left_bank_line,
             "right_bank_line": right_bank_line,
+            "hdf_bank_lines_raw": hdf_bank_lines_raw,
+            "hdf_bank_lines_projected": hdf_bank_lines_projected,
             "centerline_points": centerline_points,
             "centerline_measures": centerline_measures,
             "centerline_line": centerline_line,
-            "friction_slope": friction_slope,
+            "friction_slope": friction_slopes["downstream"],
+            "friction_slopes": friction_slopes,
             "skipped_source_stations": skipped_stations,
             "bank_station_mode": bank_station_mode,
             "river_line_method": river_line_method,
@@ -1865,7 +2014,6 @@ class HECRAS:
         main_structure_csv: Optional[str | Path],
         tributary_structure_csv: Optional[str | Path],
         combined_bank_lines_shp: Optional[str | Path],
-        additional_reaches: Optional[list[dict[str, Any]]],
         reference_geometry_file: Optional[str | Path],
         min_section_spacing: float,
         river_station_step: float,
@@ -1925,42 +2073,14 @@ class HECRAS:
                 bank_lines=combined_bank_lines,
                 local_box=local_box,
             )
-            grouped_tributary_lines = self._offset_bank_lines_with_dtm(
-                bank_lines=grouped_tributary_lines,
-                fallback_centerline=tributary_context["centerline_line"],
-            )
         else:
             snapped_tributary_lines = self._remap_opening_pair(
                 bank_lines=tributary_original_lines,
                 source_pair=tributary_opening,
                 target_pair=main_opening,
             )
-            candidate_tributary_lines = snapped_tributary_lines
-            if DTMChannelModifier is not None:
-                try:
-                    snapped_gdf = gpd.GeoDataFrame(
-                        geometry=snapped_tributary_lines,
-                        crs=self.source_crs if self.source_crs != "UNKNOWN" else None,
-                    )
-                    candidate_tributary_lines = self._line_strings_from_geometry(
-                        DTMChannelModifier.clean_and_merge_banklines(
-                            snapped_gdf,
-                            bridge_junctions=True,
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "DTM cleanup of remapped junction bank lines failed; "
-                        "using selected raw remapped lines: %s",
-                        exc,
-                    )
-            grouped_tributary_lines = self._select_reach_bank_line_pair(
-                cross_section_df=tributary_df,
-                bank_lines=candidate_tributary_lines,
-            )
-            grouped_tributary_lines = self._offset_bank_lines_with_dtm(
-                bank_lines=grouped_tributary_lines,
-                fallback_centerline=tributary_context["centerline_line"],
+            grouped_tributary_lines = self._group_bank_lines_by_connectivity(
+                snapped_tributary_lines
             )
         tributary_inputs, tributary_left_bank, tributary_right_bank = (
             self._build_section_inputs_from_selected_bank_lines(
@@ -2020,6 +2140,10 @@ class HECRAS:
             section_centerline_measures=tributary_section_measures,
         )
         self._assign_river_stations(tributary_sections)
+        tributary_sections = self._offset_reach_river_stations(
+            tributary_sections,
+            offset=2000.0,
+        )
         self._validate_reach_lengths(
             tributary_sections,
             river=tributary_context["river"],
@@ -2036,14 +2160,15 @@ class HECRAS:
             "centerline_points": tributary_centerline_points,
             "centerline_measures": tributary_centerline_measures,
             "centerline_line": LineString(tributary_centerline_points),
-            "friction_slope": self._estimate_downstream_friction_slope(
+            "friction_slope": self._estimate_terminal_friction_slopes(
+                tributary_sections
+            )["downstream"],
+            "friction_slopes": self._estimate_terminal_friction_slopes(
                 tributary_sections
             ),
             "skipped_source_stations": tributary_skipped,
             "left_bank_line": tributary_left_bank,
             "right_bank_line": tributary_right_bank,
-            "flow_key": "tributary",
-            "boundary_role": "junction_upstream",
         }
 
         main_upper = self._build_reach_context_from_existing_context(
@@ -2051,17 +2176,15 @@ class HECRAS:
             start_index=0,
             end_index=main_split["upstream_end_index"],
             reach_name=main_context["reach"],
-            river_station_offset=0.0,
-            preserve_river_stations=True,
+            river_station_offset=4000.0,
         )
-        lower_reach_name = self._lower_reach_name(main_context["reach"])
+        lower_reach_name = f"{main_context['reach']}-Lower"
         lower_context = self._build_reach_context_from_existing_context(
             geometry_context=main_context,
             start_index=main_split["downstream_start_index"],
             end_index=len(main_context["sections"]) - 1,
             reach_name=lower_reach_name,
             river_station_offset=0.0,
-            preserve_river_stations=True,
         )
         main_upper, lower_context = self._split_main_centerline_at_junction(
             main_context=main_context,
@@ -2100,35 +2223,16 @@ class HECRAS:
         tributary_context["centerline_line"] = LineString(
             tributary_context["centerline_points"]
         )
-        main_upper["flow_key"] = "main"
-        main_upper["boundary_role"] = "junction_upstream"
-        lower_context["flow_key"] = "lower"
-        lower_context["boundary_role"] = "junction_downstream"
-
-        independent_reaches = self._prepare_independent_reach_contexts(
-            additional_reaches=additional_reaches or [],
-            min_section_spacing=min_section_spacing,
-            river_station_step=river_station_step,
-            centerline_samples_per_segment=centerline_samples_per_segment,
-            bank_station_mode=bank_station_mode,
-            river_line_method=river_line_method,
-            existing_reaches=[tributary_context, main_upper, lower_context],
-        )
 
         reaches = [
             tributary_context,
             main_upper,
             lower_context,
-        ] + independent_reaches
+        ]
         all_sections = (
             tributary_context["sections"]
             + main_upper["sections"]
             + lower_context["sections"]
-            + [
-                section
-                for independent_reach in independent_reaches
-                for section in independent_reach["sections"]
-            ]
         )
         return {
             "junction": {
@@ -2144,7 +2248,6 @@ class HECRAS:
                     (tributary_context["river"], tributary_context["reach"]),
                     (main_upper["river"], main_upper["reach"]),
                 ],
-                "downstream_river": lower_context["river"],
                 "downstream_reach": lower_context["reach"],
                 "junction_lengths_angles": (
                     list(naming_template.junction_lengths_angles)
@@ -2157,7 +2260,6 @@ class HECRAS:
             "main_reach": main_upper,
             "tributary_reach": tributary_context,
             "lower_reach": lower_context,
-            "independent_reaches": independent_reaches,
             "all_sections": all_sections,
             "local_box": local_box,
             "combined_bank_lines": combined_bank_lines,
@@ -2167,95 +2269,8 @@ class HECRAS:
             "skipped_source_stations": sorted(
                 set(main_context.get("skipped_source_stations", []))
                 | set(tributary_context.get("skipped_source_stations", []))
-                | {
-                    station
-                    for independent_reach in independent_reaches
-                    for station in independent_reach.get("skipped_source_stations", [])
-                }
             ),
         }
-
-    def _prepare_independent_reach_contexts(
-        self,
-        additional_reaches: list[dict[str, Any]],
-        min_section_spacing: float,
-        river_station_step: float,
-        centerline_samples_per_segment: int,
-        bank_station_mode: str,
-        river_line_method: str,
-        existing_reaches: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        prepared_reaches: list[dict[str, Any]] = []
-        used_names = {
-            (str(reach["river"]), str(reach["reach"]))
-            for reach in existing_reaches
-        }
-
-        for index, reach_input in enumerate(additional_reaches, start=1):
-            cross_section_csv = reach_input.get("cross_section_csv")
-            bank_lines_shp = reach_input.get("bank_lines_shp")
-            if cross_section_csv is None or bank_lines_shp is None:
-                continue
-
-            reach_context = self._prepare_geometry_context(
-                cross_section_csv=cross_section_csv,
-                bank_lines_shp=bank_lines_shp,
-                structure_csv=reach_input.get("structure_csv"),
-                min_section_spacing=min_section_spacing,
-                river_station_step=river_station_step,
-                centerline_samples_per_segment=centerline_samples_per_segment,
-                bank_station_mode=bank_station_mode,
-                river_line_method=river_line_method,
-            )
-            river, reach = self._unique_reach_identity(
-                river=str(reach_context["river"]),
-                reach=str(reach_context["reach"]),
-                used_names=used_names,
-                suffix=f"I{index}",
-            )
-            used_names.add((river, reach))
-            prepared_reaches.append(
-                {
-                    **reach_context,
-                    "river": river,
-                    "reach": reach,
-                    "flow_key": f"independent_{index}",
-                    "boundary_role": "independent",
-                    "selection_label": str(
-                        reach_input.get("name")
-                        or reach_input.get("project_stem")
-                        or f"{river}/{reach}"
-                    ),
-                }
-            )
-
-        return prepared_reaches
-
-    @staticmethod
-    def _unique_reach_identity(
-        river: str,
-        reach: str,
-        used_names: set[tuple[str, str]],
-        suffix: str,
-    ) -> tuple[str, str]:
-        base_river = river or "RIVER"
-        base_reach = reach or base_river
-        if (base_river, base_reach) not in used_names:
-            return base_river, base_reach
-
-        counter = 1
-        while True:
-            river_candidate = HECRAS._hecras_identifier(
-                f"{base_river}-{suffix}{counter}",
-                default=base_river,
-            )
-            reach_candidate = HECRAS._hecras_identifier(
-                f"{base_reach}-{suffix}{counter}",
-                default=base_reach,
-            )
-            if (river_candidate, reach_candidate) not in used_names:
-                return river_candidate, reach_candidate
-            counter += 1
 
     @staticmethod
     def _replace_reach_identity(
@@ -2292,10 +2307,7 @@ class HECRAS:
             lower_context = self._replace_reach_identity(
                 lower_context,
                 river=downstream_reach[0],
-                reach=self._normalize_lower_reach_name(
-                    main_reach=main_upper["reach"],
-                    candidate_reach=downstream_reach[1],
-                ),
+                reach=downstream_reach[1],
             )
         return tributary_context, main_upper, lower_context
 
@@ -2306,7 +2318,6 @@ class HECRAS:
         end_index: int,
         reach_name: str,
         river_station_offset: float,
-        preserve_river_stations: bool = False,
     ) -> dict[str, Any]:
         subset = [self._clone_section(section) for section in geometry_context["sections"][start_index : end_index + 1]]
         if len(subset) < 2:
@@ -2335,9 +2346,8 @@ class HECRAS:
             float(section.centerline_measure) for section in subset
         ]
         self._populate_reach_lengths(subset, section_centerline_measures)
-        if not preserve_river_stations:
-            self._assign_river_stations(subset)
-            subset = self._offset_reach_river_stations(subset, river_station_offset)
+        self._assign_river_stations(subset)
+        subset = self._offset_reach_river_stations(subset, river_station_offset)
         self._validate_reach_lengths(
             subset,
             river=geometry_context["river"],
@@ -2352,12 +2362,15 @@ class HECRAS:
                     geometry_context.get("structures", []),
                     subset,
                 ),
-                0.0 if preserve_river_stations else river_station_offset,
+                river_station_offset,
             ),
             "centerline_points": centerline_points,
             "centerline_measures": centerline_measures,
             "centerline_line": LineString(centerline_points),
-            "friction_slope": self._estimate_downstream_friction_slope(subset),
+            "friction_slope": self._estimate_terminal_friction_slopes(subset)[
+                "downstream"
+            ],
+            "friction_slopes": self._estimate_terminal_friction_slopes(subset),
         }
 
     @staticmethod
@@ -2535,227 +2548,61 @@ class HECRAS:
         }
 
     def _load_bank_lines(self, bank_lines_shp: str | Path) -> list[LineString]:
-        bank_gdf = self._load_bank_gdf(bank_lines_shp)
+        bank_gdf = gpd.read_file(bank_lines_shp)
+        bank_gdf = self._project_bank_gdf_to_model_crs(bank_gdf)
         return [
             self._coerce_line_string(geom)
             for geom in bank_gdf.geometry
             if geom is not None and not geom.is_empty
         ]
 
-    def _load_bank_gdf(self, bank_lines_shp: str | Path) -> gpd.GeoDataFrame:
-        bank_gdf = gpd.read_file(bank_lines_shp)
-        return self._project_bank_gdf_to_model_crs(bank_gdf)
-
-    def _prepare_dtm_bank_lines_for_reach(
+    def _load_bank_line_features_for_hdf(
         self,
-        cross_section_df: pd.DataFrame,
         bank_lines_shp: str | Path,
-    ) -> Optional[list[LineString]]:
-        if DTMChannelModifier is None:
-            return None
+    ) -> tuple[list[LineString], list[LineString]]:
+        """Return source-CRS and model-CRS bank line features for HDF GIS layers."""
+        raw_gdf = gpd.read_file(bank_lines_shp)
+        # HEC-RAS stores imported bank-line GIS features in reverse feature order
+        # in the geometry HDF. Preserve that convention so generated HDF layers
+        # match models opened/saved through the HEC-RAS UI.
+        raw_feature_gdf = raw_gdf.iloc[::-1]
+        raw_lines = [
+            self._coerce_line_string(geom)
+            for geom in raw_feature_gdf.geometry
+            if geom is not None and not geom.is_empty
+        ]
+        projected_gdf = self._project_bank_gdf_to_model_crs(raw_gdf)
+        projected_feature_gdf = projected_gdf.iloc[::-1]
+        projected_lines = [
+            self._coerce_line_string(geom)
+            for geom in projected_feature_gdf.geometry
+            if geom is not None and not geom.is_empty
+        ]
 
-        try:
-            bank_gdf = self._load_bank_gdf(bank_lines_shp)
-            prepared_gdf = DTMChannelModifier.clean_and_merge_banklines(
-                bank_gdf,
-                bridge_junctions=True,
-            )
-            prepared_lines = self._line_strings_from_geometry(prepared_gdf)
-            selected_lines = self._select_reach_bank_line_pair(
-                cross_section_df=cross_section_df,
-                bank_lines=prepared_lines,
-            )
-            return self._offset_bank_lines_with_dtm(
-                bank_lines=selected_lines,
-                fallback_centerline=None,
-            )
-        except Exception as exc:
-            logger.warning(
-                "DTM bank-line preparation failed for %s; falling back to raw "
-                "SEV_USTU grouping: %s",
-                bank_lines_shp,
-                exc,
-            )
-            return None
-
-    def _offset_bank_lines_with_dtm(
-        self,
-        bank_lines: list[LineString],
-        fallback_centerline: Optional[LineString],
-        offset_m: float | None = None,
-    ) -> list[LineString]:
-        if not bank_lines:
-            return []
-        if DTMChannelModifier is None:
-            return bank_lines
-
-        offset_distance = self.BANK_LINE_OFFSET_M if offset_m is None else float(offset_m)
-        if abs(offset_distance) <= 1e-9:
-            return bank_lines
-
-        try:
-            centerline = fallback_centerline
-            if centerline is None:
-                banks_gdf = gpd.GeoDataFrame(
-                    geometry=bank_lines[:2],
-                    crs=self.source_crs if self.source_crs != "UNKNOWN" else None,
-                )
-                centerline = DTMChannelModifier.generate_centerline_from_banks(
-                    banks_gdf
-                ).geometry.iloc[0]
-
-            if hasattr(DTMChannelModifier, "_get_outward_offset_line"):
-                offset_lines = [
-                    DTMChannelModifier._get_outward_offset_line(
-                        bank_line,
-                        centerline,
-                        offset_distance,
-                    )
-                    for bank_line in bank_lines[:2]
-                    if bank_line is not None and not bank_line.is_empty
-                ]
-            else:
-                offset_lines = DTMChannelModifier._offset_bank_lines_outward(
-                    bank_lines,
-                    centerline=centerline,
-                    offset_m=offset_distance,
-                )
-            if len(offset_lines) >= 2:
-                return offset_lines[:2]
-        except Exception as exc:
-            logger.warning(
-                "Could not apply DTM %.3f m outward bank offset; using "
-                "prepared bank lines without offset: %s",
-                offset_distance,
-                exc,
-            )
-        return bank_lines[:2]
-
-    @staticmethod
-    def _line_strings_from_geometry(geometry_input: Any) -> list[LineString]:
-        if DTMChannelModifier is not None:
-            return DTMChannelModifier._line_strings(geometry_input)
-
-        geometries = (
-            geometry_input.geometry
-            if isinstance(geometry_input, gpd.GeoDataFrame)
-            else [geometry_input]
-        )
-        lines: list[LineString] = []
-        for geom in geometries:
-            if geom is None or geom.is_empty:
-                continue
-            if geom.geom_type == "LineString":
-                lines.append(geom)
-            elif geom.geom_type == "MultiLineString":
-                lines.extend(list(geom.geoms))
-        return sorted(lines, key=lambda item: item.length, reverse=True)
-
-    def _select_reach_bank_line_pair(
-        self,
-        cross_section_df: pd.DataFrame,
-        bank_lines: list[LineString],
-    ) -> list[LineString]:
-        if len(bank_lines) < 2:
-            raise ValueError("Bank line preparation produced fewer than two lines.")
-        if len(bank_lines) == 2:
-            return list(bank_lines)
-
-        section_lines: list[LineString] = []
-        for _, group in cross_section_df.groupby("Station", sort=True):
-            if len(group) < 2:
-                continue
-            section_line = LineString(list(zip(group["X"], group["Y"])))
-            if section_line.length > 0.0:
-                section_lines.append(section_line)
-        if not section_lines:
-            raise ValueError("No usable cross sections were available for bank selection.")
-
-        median_section_length = float(np.median([line.length for line in section_lines]))
-        near_tolerance = max(2.0, min(10.0, median_section_length * 0.25))
-        pair_scores: list[tuple[tuple[float, ...], int, int]] = []
-        for left_index in range(len(bank_lines)):
-            for right_index in range(left_index + 1, len(bank_lines)):
-                left_line = bank_lines[left_index]
-                right_line = bank_lines[right_index]
-                near_count = 0
-                widths = []
-                bank_distances = []
-                for section_line in section_lines:
-                    left_distance = float(section_line.distance(left_line))
-                    right_distance = float(section_line.distance(right_line))
-                    if left_distance <= near_tolerance and right_distance <= near_tolerance:
-                        near_count += 1
-                    left_point = self._line_to_bank_point(section_line, left_line)
-                    right_point = self._line_to_bank_point(section_line, right_line)
-                    width = abs(
-                        self._project_distance(section_line, left_point)
-                        - self._project_distance(section_line, right_point)
-                    )
-                    if width > 1e-6:
-                        widths.append(float(width))
-                        bank_distances.append(left_distance + right_distance)
-
-                if not widths:
-                    continue
-
-                mean_width = float(np.mean(widths))
-                width_variation = float(np.std(widths) / max(mean_width, 1e-6))
-                mean_bank_distance = float(np.mean(bank_distances)) if bank_distances else np.inf
-                pair_scores.append(
-                    (
-                        (
-                            float(near_count),
-                            float(len(widths)),
-                            -mean_bank_distance,
-                            -width_variation,
-                            mean_width,
-                        ),
-                        left_index,
-                        right_index,
-                    )
-                )
-
-        if not pair_scores:
-            raise ValueError("Could not identify a bank-line pair for the cross sections.")
-
-        _, left_index, right_index = max(pair_scores, key=lambda item: item[0])
-        logger.info(
-            "Selected bank-line pair %s/%s from %s prepared SEV_USTU lines.",
-            left_index + 1,
-            right_index + 1,
-            len(bank_lines),
-        )
-        return [bank_lines[left_index], bank_lines[right_index]]
+        if raw_gdf.crs is None or raw_gdf.crs == projected_gdf.crs:
+            return [], projected_lines
+        return raw_lines, projected_lines
 
     def _load_model_projection_crs(self) -> str:
         if self.target_projection_crs:
             return self.target_projection_crs
 
-        return ""
+        projection_dir = Path(__file__).resolve().parent / "0 Proj"
+        projection_files = sorted(projection_dir.glob("*.prj"))
+        if len(projection_files) != 1:
+            names = ", ".join(path.name for path in projection_files) or "none"
+            raise FileNotFoundError(
+                f"Expected exactly one projection .prj file in {projection_dir}; "
+                f"found {len(projection_files)}: {names}"
+            )
 
-    def _set_target_projection_crs(
-        self,
-        projection_file: Optional[str | Path],
-    ) -> None:
-        if projection_file is None:
-            return
-
-        projection_path = Path(projection_file)
-        if not projection_path.exists():
-            return
-
-        target_projection_crs = projection_path.read_text(encoding="utf-8").strip()
-        if target_projection_crs:
-            self.target_projection_crs = target_projection_crs
+        self.target_projection_crs = projection_files[0].read_text().strip()
+        if not self.target_projection_crs:
+            raise ValueError(f"Projection file is empty: {projection_files[0]}")
+        return self.target_projection_crs
 
     def _project_bank_gdf_to_model_crs(self, bank_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         target_crs = self._load_model_projection_crs()
-        if not target_crs:
-            if bank_gdf.crs:
-                self.source_crs = str(bank_gdf.crs)
-            return bank_gdf
-
         if bank_gdf.crs is None:
             logger.warning(
                 "Bank line shapefile has no CRS; assigning model projection without "
@@ -2811,12 +2658,9 @@ class HECRAS:
                 )
 
         if len(feature_infos) < 2:
-            logger.info(
-                "Combined junction shapefile did not expose two direct "
-                "cross-section-intersecting bank features; selecting by reach "
-                "cross-section proximity."
+            raise ValueError(
+                "Could not select two bank lines from the combined junction shapefile."
             )
-            return self._select_reach_bank_line_pair(cross_section_df, bank_lines)
 
         last_station = station_values[-1]
         penultimate_station = station_values[-2] if len(station_values) >= 2 else last_station
@@ -2833,12 +2677,10 @@ class HECRAS:
             and info["count"] <= 3
         ]
         if not full_candidates or not junction_candidates:
-            logger.info(
+            raise ValueError(
                 "Could not separate full tributary banks from junction-local bank "
-                "segments in the combined shapefile; selecting by reach "
-                "cross-section proximity."
+                "segments in the combined junction shapefile."
             )
-            return self._select_reach_bank_line_pair(cross_section_df, bank_lines)
 
         full_candidates.sort(
             key=lambda info: (-info["count"], info["min_station"], info["index"])
@@ -2862,11 +2704,10 @@ class HECRAS:
             None,
         )
         if junction_bank is None:
-            logger.info(
+            raise ValueError(
                 "Could not find a distinct junction-local bank segment in the "
-                "combined shapefile; selecting by reach cross-section proximity."
+                "combined junction shapefile."
             )
-            return self._select_reach_bank_line_pair(cross_section_df, bank_lines)
 
         self._last_combined_bank_selection = {
             "full_bank": full_bank,
@@ -3243,30 +3084,6 @@ class HECRAS:
         return f"{compact}_junc"
 
     @classmethod
-    def _lower_reach_name(cls, main_reach: str) -> str:
-        reach = str(main_reach).strip()
-        if reach.endswith(cls.LOWER_REACH_SUFFIX):
-            return reach
-        if reach.endswith(cls.LEGACY_LOWER_REACH_SUFFIX):
-            reach = reach[: -len(cls.LEGACY_LOWER_REACH_SUFFIX)]
-        return f"{reach}{cls.LOWER_REACH_SUFFIX}"
-
-    @classmethod
-    def _normalize_lower_reach_name(
-        cls,
-        main_reach: str,
-        candidate_reach: Optional[str] = None,
-    ) -> str:
-        reach = str(candidate_reach).strip() if candidate_reach else ""
-        if not reach:
-            return cls._lower_reach_name(main_reach)
-        if reach.endswith(cls.LEGACY_LOWER_REACH_SUFFIX):
-            return cls._lower_reach_name(
-                reach[: -len(cls.LEGACY_LOWER_REACH_SUFFIX)]
-            )
-        return reach
-
-    @classmethod
     def _infer_junction_naming_template(
         cls,
         main_river: str,
@@ -3287,7 +3104,7 @@ class HECRAS:
                 (tributary_river, tributary_reach),
                 (main_river, main_reach),
             ],
-            downstream_reach=(main_river, cls._lower_reach_name(main_reach)),
+            downstream_reach=(main_river, f"{main_reach}-Lower"),
         )
 
     @staticmethod
@@ -3386,13 +3203,7 @@ class HECRAS:
         max_safe_run: Optional[FlowRunResult],
         buffer_distance: float,
         screening_stopped_early: bool,
-        all_flows_in_single_plan: bool = False,
     ) -> str:
-        single_plan_text = (
-            " All tested flows were computed as profiles in one plan."
-            if all_flows_in_single_plan
-            else ""
-        )
         lower_text = (
             f" A distinct downstream main-reach point ({lower_selection.point_name}) "
             "was also available for lower-reach flow checks."
@@ -3403,16 +3214,9 @@ class HECRAS:
             return (
                 "No coupled junction run stayed within bank for the tested "
                 f"return periods using a {self._format_number(buffer_distance, 2)} m "
-                f"hydrology search buffer.{single_plan_text}{lower_text}"
+                f"hydrology search buffer.{lower_text}"
             )
-        if all_flows_in_single_plan:
-            suffix = "with all tested flows computed as profiles in one plan."
-        else:
-            suffix = (
-                "and screening stopped early."
-                if screening_stopped_early
-                else "after testing all return periods."
-            )
+        suffix = "and screening stopped early." if screening_stopped_early else "after testing all return periods."
         return (
             f"Selected main hydrology point {main_selection.point_name} and "
             f"tributary point {tributary_selection.point_name}. "
@@ -3543,7 +3347,7 @@ class HECRAS:
         geometry_context: dict[str, Any],
         flow_profile: Optional[dict[str, float]] = None,
         return_period: Optional[str] = None,
-        flow_profiles: Optional[list[tuple[str, Any]]] = None,
+        flow_profiles: Optional[list[tuple[str, float]]] = None,
     ) -> BuildResult:
         project_folder = Path(project_folder)
         project_folder.mkdir(parents=True, exist_ok=True)
@@ -3592,7 +3396,6 @@ class HECRAS:
                 junction=geometry_context["junction"],
                 profile_name=naming["profile_name"],
                 flow_profile=flow_profile or {},
-                flow_profiles=flow_profiles,
             )
             self._write_junction_sdf_file(
                 sdf_path=sdf_path,
@@ -3602,6 +3405,10 @@ class HECRAS:
             reach = geometry_context["junction"]["downstream_reach"]
             sections = geometry_context["all_sections"]
             friction_slope = geometry_context["lower_reach"]["friction_slope"]
+            friction_slopes = geometry_context["lower_reach"].get(
+                "friction_slopes",
+                {"upstream": friction_slope, "downstream": friction_slope},
+            )
             centerline_points = geometry_context["lower_reach"]["centerline_points"]
         else:
             river = geometry_context["river"]
@@ -3611,6 +3418,10 @@ class HECRAS:
             centerline_points = geometry_context["centerline_points"]
             centerline_measures = geometry_context["centerline_measures"]
             friction_slope = geometry_context["friction_slope"]
+            friction_slopes = geometry_context.get(
+                "friction_slopes",
+                {"upstream": friction_slope, "downstream": friction_slope},
+            )
 
             self._write_geometry_file(
                 geometry_path=geometry_path,
@@ -3635,6 +3446,8 @@ class HECRAS:
                 flow_cms=flow_cms,
                 profile_name=naming["profile_name"],
                 friction_slope=friction_slope,
+                upstream_friction_slope=friction_slopes["upstream"],
+                downstream_friction_slope=friction_slopes["downstream"],
                 flow_profiles=flow_profiles,
             )
             self._write_sdf_file(
@@ -3671,6 +3484,7 @@ class HECRAS:
             reach=reach,
             section_count=len(sections),
             downstream_friction_slope=friction_slope,
+            upstream_friction_slope=friction_slopes["upstream"],
             flow_cms=flow_cms,
             skipped_source_stations=list(
                 geometry_context.get("skipped_source_stations", [])
@@ -3711,10 +3525,9 @@ class HECRAS:
                     row = dict(entry)
                     row.setdefault("structure_type", section_name)
                     rows.append(row)
-            return self._normalize_structure_table(pd.DataFrame(rows))
+            return pd.DataFrame(rows)
 
-        structure_df = pd.read_csv(structure_path, sep=None, engine="python")
-        return self._normalize_structure_table(structure_df)
+        return pd.read_csv(structure_path)
 
     @staticmethod
     def _normalize_structure_type(structure_type: str) -> str:
@@ -3724,10 +3537,6 @@ class HECRAS:
             "box_culvert": "box",
             "rectangular": "box",
             "rectangular_culvert": "box",
-            "arch": "box",
-            "conspan_arch": "box",
-            "conspan": "box",
-            "kemer": "box",
             "circular": "circular",
             "circular_culvert": "circular",
             "circle": "circular",
@@ -3738,165 +3547,8 @@ class HECRAS:
             "bridge_deck": "bridge_deck",
             "deck": "bridge_deck",
             "deck_bridge": "bridge_deck",
-            "deck_with_peir": "bridge_deck",
-            "deck_with_pier": "bridge_deck",
         }
         return aliases.get(normalized, normalized)
-
-    def _normalize_structure_table(self, structure_df: pd.DataFrame) -> pd.DataFrame:
-        if structure_df.empty:
-            return structure_df
-
-        structure_df = structure_df.copy()
-        structure_df.columns = [str(column).strip() for column in structure_df.columns]
-        source_columns = set(structure_df.columns)
-
-        def is_blank(series: pd.Series) -> pd.Series:
-            return series.isna() | series.astype(str).str.strip().eq("")
-
-        def coalesce(target: str, *sources: str) -> None:
-            if target in structure_df.columns:
-                values = structure_df[target].copy()
-            else:
-                values = pd.Series(pd.NA, index=structure_df.index, dtype="object")
-            for source in sources:
-                if source not in structure_df.columns:
-                    continue
-                values = values.where(~is_blank(values), structure_df[source])
-            structure_df[target] = values
-
-        coalesce("structure_name", "structure_id", "name")
-        coalesce("structure_type", "type")
-        coalesce("upstream_invert_elevation", "upstream_invert")
-        coalesce("downstream_invert_elevation", "downstream_invert")
-        coalesce("culvert_length", "culvert_len")
-        coalesce("upstream_point_1_x", "upstream_x1")
-        coalesce("upstream_point_1_y", "upstream_y1")
-        coalesce("upstream_point_2_x", "upstream_x2")
-        coalesce("upstream_point_2_y", "upstream_y2")
-        coalesce("downstream_point_1_x", "downstream_x1")
-        coalesce("downstream_point_1_y", "downstream_y1")
-        coalesce("downstream_point_2_x", "downstream_x2")
-        coalesce("downstream_point_2_y", "downstream_y2")
-        coalesce("deck_weir_coefficient", "deck_weir")
-        coalesce("culvert_mannings_n", "culvert_mannings")
-        coalesce("culvert_bottom_n", "culvert_bottom_mannings")
-        coalesce("culvert_chart_number", "culvert_chart")
-        coalesce("opening_offset_from_left_bank", "opening_offset")
-        coalesce("opening_station_method", "opening_strategy")
-        coalesce("diameter", "Diameter", "min_span", "min_rise", "span_upstream", "rise_upstream")
-
-        essentials_style = {
-            "structure_id",
-            "upstream_x1",
-            "downstream_x1",
-            "deck_max",
-        }.issubset(source_columns)
-        if essentials_style:
-            if "deck_distance" in source_columns:
-                mask = is_blank(structure_df["culvert_length"])
-                structure_df.loc[mask, "culvert_length"] = structure_df.loc[
-                    mask,
-                    "deck_distance",
-                ]
-            if "deck_width" in source_columns:
-                source_deck_width = structure_df["deck_width"].copy()
-                mask = is_blank(structure_df["culvert_length"])
-                structure_df.loc[mask, "culvert_length"] = source_deck_width.loc[mask]
-                structure_df["deck_distance"] = source_deck_width.where(
-                    ~is_blank(source_deck_width),
-                    0.1,
-                )
-            if "min_span" in structure_df.columns:
-                mask = is_blank(structure_df["culvert_length"])
-                structure_df.loc[mask, "culvert_length"] = structure_df.loc[
-                    mask,
-                    "min_span",
-                ]
-            if "deck_weir_coefficient" in structure_df.columns:
-                mask = is_blank(structure_df["deck_weir_coefficient"])
-                structure_df.loc[mask, "deck_weir_coefficient"] = 1.4
-            else:
-                structure_df["deck_weir_coefficient"] = 1.4
-            structure_df["deck_max_submerge"] = 0.98
-            structure_df["use_bank_point_station"] = True
-            if "preserve_endpoint_order" not in structure_df.columns:
-                structure_df["preserve_endpoint_order"] = True
-
-        for left, right in (
-            ("upstream_point_1_x", "downstream_point_1_x"),
-            ("upstream_point_1_y", "downstream_point_1_y"),
-            ("upstream_point_2_x", "downstream_point_2_x"),
-            ("upstream_point_2_y", "downstream_point_2_y"),
-        ):
-            if left in structure_df.columns and right in structure_df.columns:
-                left_blank = is_blank(structure_df[left])
-                right_blank = is_blank(structure_df[right])
-                structure_df.loc[left_blank & ~right_blank, left] = structure_df.loc[
-                    left_blank & ~right_blank,
-                    right,
-                ]
-                structure_df.loc[right_blank & ~left_blank, right] = structure_df.loc[
-                    right_blank & ~left_blank,
-                    left,
-                ]
-
-        normalized_types = structure_df["structure_type"].apply(
-            lambda value: self._normalize_structure_type(str(value or ""))
-        )
-        structure_df["structure_type"] = normalized_types
-
-        def fill_from_sum(target: str, base: str, addend: str) -> None:
-            if target not in structure_df.columns:
-                structure_df[target] = pd.NA
-            target_mask = is_blank(structure_df[target])
-            if base not in structure_df.columns or addend not in structure_df.columns:
-                return
-            base_values = pd.to_numeric(structure_df[base], errors="coerce")
-            addend_values = pd.to_numeric(structure_df[addend], errors="coerce")
-            summed = base_values + addend_values
-            valid_mask = target_mask & summed.notna()
-            structure_df.loc[valid_mask, target] = summed.loc[valid_mask]
-
-        def set_bridge_sum(target: str, base: str, addend: str) -> None:
-            if target not in structure_df.columns:
-                structure_df[target] = pd.NA
-            if base not in structure_df.columns or addend not in structure_df.columns:
-                return
-            base_values = pd.to_numeric(structure_df[base], errors="coerce")
-            addend_values = pd.to_numeric(structure_df[addend], errors="coerce")
-            summed = base_values + addend_values
-            valid_mask = normalized_types.eq("bridge_deck") & summed.notna()
-            structure_df.loc[valid_mask, target] = summed.loc[valid_mask]
-
-        for target in (
-            "low_chord_upstream_left_bank",
-            "low_chord_upstream_right_bank",
-        ):
-            coalesce(target, "upstream_invert_elevation")
-            set_bridge_sum(target, "upstream_invert_elevation", "rise_upstream")
-        for target in (
-            "low_chord_downstream_left_bank",
-            "low_chord_downstream_right_bank",
-        ):
-            coalesce(target, "downstream_invert_elevation")
-            set_bridge_sum(target, "downstream_invert_elevation", "rise_downstream")
-
-        for target in (
-            "high_chord_upstream_left_bank",
-            "high_chord_upstream_right_bank",
-        ):
-            coalesce(target, "upstream_elev", "deck_max")
-            fill_from_sum(target, "upstream_invert_elevation", "rise_upstream")
-        for target in (
-            "high_chord_downstream_left_bank",
-            "high_chord_downstream_right_bank",
-        ):
-            coalesce(target, "downstream_elev", "deck_max")
-            fill_from_sum(target, "downstream_invert_elevation", "rise_downstream")
-
-        coalesce("bridge_width", "culvert_length")
-        return structure_df
 
     def _build_structures(
         self,
@@ -3939,6 +3591,7 @@ class HECRAS:
             structure_type = self._normalize_structure_type(
                 self._row_string(row, "structure_type", default="")
             )
+            num_barrels = self._row_int(row, "num_barrels", default=1)
             if structure_type == "box":
                 if "culvert_length" not in structure_df.columns:
                     raise ValueError(
@@ -3971,19 +3624,13 @@ class HECRAS:
                         "Circular structure table is missing required column: "
                         "['culvert_length']"
                     )
-                if not any(
-                    column in structure_df.columns
-                    for column in ("Diameter", "diameter", "min_span", "min_rise")
-                ):
+                if "Diameter" not in structure_df.columns and "diameter" not in structure_df.columns:
                     raise ValueError(
                         "Circular structure table must include a Diameter column."
                     )
                 culvert_shape_code = 1
                 culvert_shape_name = "CIRCULAR"
-                culvert_rise = self._row_float_any(
-                    row,
-                    ("Diameter", "diameter", "min_span", "min_rise"),
-                )
+                culvert_rise = self._row_float_any(row, ("Diameter", "diameter"))
                 culvert_span = culvert_rise
                 default_inlet_type = 1
                 default_outlet_type = 1
@@ -4038,33 +3685,6 @@ class HECRAS:
                     section.centerline_measure - downstream_target_measure
                 ),
             )
-            if upstream_section is downstream_section and len(sections) > 1:
-                section_index = next(
-                    index
-                    for index, section in enumerate(sections)
-                    if section is upstream_section
-                )
-                if section_index == 0:
-                    upstream_section = sections[0]
-                    downstream_section = sections[1]
-                elif section_index == len(sections) - 1:
-                    upstream_section = sections[section_index - 1]
-                    downstream_section = sections[section_index]
-                else:
-                    target_measure = 0.5 * (
-                        upstream_target_measure + downstream_target_measure
-                    )
-                    upstream_candidate = sections[section_index - 1]
-                    downstream_candidate = sections[section_index + 1]
-                    if (
-                        abs(upstream_candidate.centerline_measure - target_measure)
-                        <= abs(downstream_candidate.centerline_measure - target_measure)
-                    ):
-                        upstream_section = upstream_candidate
-                        downstream_section = sections[section_index]
-                    else:
-                        upstream_section = sections[section_index]
-                        downstream_section = downstream_candidate
             preserve_endpoint_order = self._row_bool(
                 row,
                 "preserve_endpoint_order",
@@ -4144,19 +3764,13 @@ class HECRAS:
                     section=upstream_section,
                     other_section=downstream_section,
                     centerline_line=centerline_line,
-                    culvert_length=self._row_float_any(
-                        row,
-                        ("culvert_length", "bridge_width"),
-                    ),
+                    culvert_length=self._row_float(row, "culvert_length"),
                 )
                 downstream_opening_station = self._opening_station_from_centerline_face(
                     section=downstream_section,
                     other_section=upstream_section,
                     centerline_line=centerline_line,
-                    culvert_length=self._row_float_any(
-                        row,
-                        ("culvert_length", "bridge_width"),
-                    ),
+                    culvert_length=self._row_float(row, "culvert_length"),
                 )
             elif opening_station_method not in {"bank_offset", "csv_override"}:
                 raise ValueError(
@@ -4192,39 +3806,52 @@ class HECRAS:
             )
 
             if structure_type in {"circular", "circle", "pipe", "round"}:
-                upstream_channel_stations = self._profile_stations_between_banks(
-                    upstream_section
-                )
-                downstream_channel_stations = self._profile_stations_between_banks(
-                    downstream_section
-                )
-                upstream_opening_station = self._barrel_center_station_from_profile(
-                    upstream_channel_stations,
-                    upstream_section,
-                )
-                downstream_opening_station = self._barrel_center_station_from_profile(
-                    downstream_channel_stations,
-                    downstream_section,
-                )
-                try:
-                    upstream_invert = self._row_float(
-                        row,
-                        "upstream_invert_elevation",
+                if num_barrels <= 1:
+                    upstream_opening_station = 0.5 * (
+                        float(upstream_section.left_bank_station)
+                        + float(upstream_section.right_bank_station)
                     )
-                except ValueError:
+                    downstream_opening_station = 0.5 * (
+                        float(downstream_section.left_bank_station)
+                        + float(downstream_section.right_bank_station)
+                    )
+                else:
+                    upstream_channel_stations = self._profile_stations_between_banks(
+                        upstream_section
+                    )
+                    downstream_channel_stations = self._profile_stations_between_banks(
+                        downstream_section
+                    )
+                    upstream_opening_station = self._barrel_center_station_from_profile(
+                        upstream_channel_stations,
+                        upstream_section,
+                    )
+                    downstream_opening_station = self._barrel_center_station_from_profile(
+                        downstream_channel_stations,
+                        downstream_section,
+                    )
+                use_bank_point_for_invert = self._row_bool(
+                    row,
+                    "use_bank_point_for_invert",
+                    default=True,
+                )
+                if use_bank_point_for_invert:
                     upstream_invert = (
                         self._minimum_elevation_between_banks(upstream_section)
                         + culvert_rise
                     )
-                try:
-                    downstream_invert = self._row_float(
-                        row,
-                        "downstream_invert_elevation",
-                    )
-                except ValueError:
                     downstream_invert = (
                         self._minimum_elevation_between_banks(downstream_section)
                         + culvert_rise
+                    )
+                else:
+                    upstream_invert = self._row_float(
+                        row,
+                        "upstream_invert_elevation",
+                    )
+                    downstream_invert = self._row_float(
+                        row,
+                        "downstream_invert_elevation",
                     )
             else:
                 upstream_invert = self._row_float(
@@ -4300,6 +3927,20 @@ class HECRAS:
                     "low_chord_downstream_right_bank",
                 )
             else:
+                use_bank_point_for_elevation = self._row_bool(
+                    row,
+                    "use_bank_point_for_elevation",
+                    default=True,
+                )
+                if not use_bank_point_for_elevation:
+                    upstream_deck_elevations = [
+                        self._row_float(row, "high_chord_upstream_left_bank"),
+                        self._row_float(row, "high_chord_upstream_right_bank"),
+                    ]
+                    downstream_deck_elevations = [
+                        self._row_float(row, "high_chord_downstream_left_bank"),
+                        self._row_float(row, "high_chord_downstream_right_bank"),
+                    ]
                 upstream_right_low_chord = upstream_low_chord
                 downstream_right_low_chord = downstream_low_chord
             structure_name = self._row_string(
@@ -4307,7 +3948,6 @@ class HECRAS:
                 "structure_name",
                 default=f"Structure_{idx + 1}",
             )
-            structure_name = re.sub(r"[,/\\]+", "_", structure_name).strip() or f"Structure_{idx + 1}"
 
             structures.append(
                 StructureData(
@@ -4331,7 +3971,7 @@ class HECRAS:
                     deck_weir_coefficient=self._row_float(
                         row,
                         "deck_weir_coefficient",
-                        default=1.4,
+                        default=0.0,
                     ),
                     deck_skew=self._row_float(row, "deck_skew", default=0.0),
                     deck_max_submerge=self._row_float(
@@ -4366,7 +4006,7 @@ class HECRAS:
                         "culvert_chart_number",
                         default=0,
                     ),
-                    num_barrels=self._row_int(row, "num_barrels", default=1),
+                    num_barrels=num_barrels,
                     barrel_center_spacing=self._row_float_any(
                         row,
                         ("pipe_sepration", "pipe_separation", "barrel_center_spacing"),
@@ -4389,12 +4029,7 @@ class HECRAS:
                         default=max(
                             upstream_deck_elevations
                             + downstream_deck_elevations
-                            + [
-                                upstream_low_chord,
-                                upstream_right_low_chord,
-                                downstream_low_chord,
-                                downstream_right_low_chord,
-                            ]
+                            + [upstream_low_chord, downstream_low_chord]
                         )
                         + 0.09,
                     ),
@@ -5038,7 +4673,10 @@ class HECRAS:
 
     @staticmethod
     def _normalize_river_name(value: Any) -> str:
-        return HECRAS._hecras_identifier(value, default="RIVER")
+        text = str(value).strip()
+        if not text:
+            return "RIVER"
+        return text
 
     @staticmethod
     def _normalize_reach_name(
@@ -5046,25 +4684,10 @@ class HECRAS:
         river_name: str,
         raw_river_name: Optional[str] = None,
     ) -> str:
-        return HECRAS._hecras_identifier(value, default=river_name)
-
-    @staticmethod
-    def _hecras_identifier(value: Any, default: str = "RIVER", max_length: int = 16) -> str:
-        text = re.sub(r"\s+", "-", str(value or "").strip())
-        text = text.strip("-_")
+        text = str(value).strip()
         if not text:
-            text = str(default or "RIVER").strip() or "RIVER"
-        if len(text) <= max_length:
-            return text
-
-        chunks = [chunk for chunk in re.split(r"[-_\s]+", text) if chunk]
-        for chunk_count in range(1, len(chunks) + 1):
-            candidate = "-".join(chunks[-chunk_count:])
-            if len(candidate) <= max_length:
-                return candidate
-
-        compact = re.sub(r"[^0-9A-Za-z]+", "", text)
-        return (compact[-max_length:] or text[-max_length:] or str(default))[:max_length]
+            return river_name
+        return text
 
     @staticmethod
     def _normalize_plan_number(plan_number: str | int) -> str:
@@ -5082,16 +4705,6 @@ class HECRAS:
         cross_section_df: pd.DataFrame,
         bank_lines_shp: str | Path,
     ) -> tuple[list[dict[str, Any]], LineString, LineString]:
-        prepared_bank_lines = self._prepare_dtm_bank_lines_for_reach(
-            cross_section_df=cross_section_df,
-            bank_lines_shp=bank_lines_shp,
-        )
-        if prepared_bank_lines is not None:
-            return self._build_section_inputs_from_selected_bank_lines(
-                cross_section_df,
-                prepared_bank_lines,
-            )
-
         bank_lines = self._load_bank_lines(bank_lines_shp)
         if len(bank_lines) < 2:
             raise ValueError("Bank line shapefile must contain at least two lines.")
@@ -5210,6 +4823,7 @@ class HECRAS:
         self._orient_sections(section_inputs)
         self._ensure_upstream_to_downstream_section_order(section_inputs)
         self._assign_bank_sides(section_inputs)
+        self._repair_terminal_bank_station_collapse(section_inputs)
         left_bank_line = self._orient_bank_line(section_inputs, side_key="left")
         right_bank_line = self._orient_bank_line(section_inputs, side_key="right")
         return section_inputs, left_bank_line, right_bank_line
@@ -6014,6 +5628,102 @@ class HECRAS:
         return left_bank_index, right_bank_index
 
     @staticmethod
+    def _repair_terminal_bank_station_collapse(
+        section_inputs: list[dict[str, Any]],
+        min_neighbor_width_ratio: float = 0.75,
+        station_tol: float = 1e-6,
+    ) -> None:
+        """Extend collapsed terminal bank stations from the adjacent section.
+
+        Some supplied bank polylines taper or stop short at a reach end. In that
+        case nearest-point projection can place both terminal bank stations close
+        together, making the bank line visibly stop before the river reach end in
+        HEC-RAS. The interior sections are left untouched; only an endpoint whose
+        bank width is much smaller than its adjacent section is adjusted.
+        """
+        if len(section_inputs) < 2:
+            return
+
+        def bank_width(section: dict[str, Any]) -> float:
+            return float(
+                section["right_bank_entry"]["station"]
+                - section["left_bank_entry"]["station"]
+            )
+
+        def channel_station(section: dict[str, Any]) -> float:
+            return HECRAS._project_distance(
+                section["line"],
+                section["channel_point"],
+            )
+
+        def repair_endpoint(endpoint_idx: int, neighbor_idx: int) -> None:
+            endpoint = section_inputs[endpoint_idx]
+            neighbor = section_inputs[neighbor_idx]
+            endpoint_width = bank_width(endpoint)
+            neighbor_width = bank_width(neighbor)
+            if neighbor_width <= station_tol:
+                return
+            if endpoint_width >= neighbor_width * float(min_neighbor_width_ratio):
+                return
+
+            neighbor_channel_station = channel_station(neighbor)
+            endpoint_channel_station = channel_station(endpoint)
+            left_offset = (
+                float(neighbor["left_bank_entry"]["station"])
+                - neighbor_channel_station
+            )
+            right_offset = (
+                float(neighbor["right_bank_entry"]["station"])
+                - neighbor_channel_station
+            )
+
+            line = endpoint["line"]
+            left_station = max(
+                0.0,
+                min(float(line.length), endpoint_channel_station + left_offset),
+            )
+            right_station = max(
+                0.0,
+                min(float(line.length), endpoint_channel_station + right_offset),
+            )
+            if right_station - left_station <= endpoint_width + station_tol:
+                return
+
+            endpoint["hdf_left_bank_station"] = float(
+                endpoint["left_bank_entry"]["station"]
+            )
+            endpoint["hdf_right_bank_station"] = float(
+                endpoint["right_bank_entry"]["station"]
+            )
+            left_point = line.interpolate(left_station)
+            right_point = line.interpolate(right_station)
+            endpoint["left_bank_entry"] = {
+                **endpoint["left_bank_entry"],
+                "point": Point(left_point),
+                "station": float(left_station),
+            }
+            endpoint["right_bank_entry"] = {
+                **endpoint["right_bank_entry"],
+                "point": Point(right_point),
+                "station": float(right_station),
+            }
+            endpoint["terminal_bank_station_repair"] = True
+            endpoint["channel_point"] = Point(
+                (left_point.x + right_point.x) / 2.0,
+                (left_point.y + right_point.y) / 2.0,
+            )
+            logger.info(
+                "Extended terminal bank stations at source station %s "
+                "from %.3f m to %.3f m using adjacent section offsets.",
+                endpoint["source_station"],
+                endpoint_width,
+                right_station - left_station,
+            )
+
+        repair_endpoint(0, 1)
+        repair_endpoint(len(section_inputs) - 1, len(section_inputs) - 2)
+
+    @staticmethod
     def _orient_bank_line(
         section_inputs: list[dict[str, Any]],
         side_key: str,
@@ -6124,16 +5834,29 @@ class HECRAS:
         for section in filtered_inputs:
             raw_left_bank_station = float(section["left_bank_entry"]["station"])
             raw_right_bank_station = float(section["right_bank_entry"]["station"])
+            has_terminal_bank_repair = bool(
+                section.get("terminal_bank_station_repair", False)
+            )
             station_elevation = HECRAS._build_station_elevation(
                 section["points"],
                 section["z_values"],
                 required_stations=(
                     [raw_left_bank_station, raw_right_bank_station]
                     if bank_station_mode == "interpolate"
+                    or has_terminal_bank_repair
                     else None
                 ),
             )
             if bank_station_mode == "interpolate":
+                left_bank_station = HECRAS._snap_station_to_profile_value(
+                    raw_left_bank_station,
+                    station_elevation,
+                )
+                right_bank_station = HECRAS._snap_station_to_profile_value(
+                    raw_right_bank_station,
+                    station_elevation,
+                )
+            elif has_terminal_bank_repair:
                 left_bank_station = HECRAS._snap_station_to_profile_value(
                     raw_left_bank_station,
                     station_elevation,
@@ -6186,6 +5909,16 @@ class HECRAS:
                     channel_point=Point(section["channel_point"]),
                     left_bank_measure=float(section["left_bank_measure"]),
                     right_bank_measure=float(section["right_bank_measure"]),
+                    hdf_left_bank_station=(
+                        float(section["hdf_left_bank_station"])
+                        if "hdf_left_bank_station" in section
+                        else None
+                    ),
+                    hdf_right_bank_station=(
+                        float(section["hdf_right_bank_station"])
+                        if "hdf_right_bank_station" in section
+                        else None
+                    ),
                 )
             )
 
@@ -6707,7 +6440,7 @@ class HECRAS:
         )
         lines = [
             f"Geom Title={geom_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             (
                 "Viewing Rectangle= "
                 f"{xmin:.4f} , {xmax:.4f} , {ymax:.3f} , {ymin:.3f} \n"
@@ -6723,9 +6456,7 @@ class HECRAS:
         for river, reach in junction["upstream_reaches"]:
             lines.append(f"Up River,Reach={river:<16},{reach:<16}\n")
         lines.append(
-            "Dn River,Reach="
-            f"{junction.get('downstream_river', reaches[-1]['river']):<16},"
-            f"{junction['downstream_reach']:<16}\n"
+            f"Dn River,Reach={reaches[-1]['river']:<16},{junction['downstream_reach']:<16}\n"
         )
         junction_lengths_angles = junction.get("junction_lengths_angles") or []
         if junction_lengths_angles:
@@ -6866,6 +6597,42 @@ class HECRAS:
         slope = abs(float(np.polyfit(x, y, 1)[0]))
         return max(slope, 1e-4)
 
+    @staticmethod
+    def _estimate_terminal_friction_slopes(
+        sections: list[SectionData],
+    ) -> dict[str, float]:
+        if len(sections) < 2:
+            return {"upstream": 0.001, "downstream": 0.001}
+
+        upstream_slope = HECRAS._estimate_pair_friction_slope(
+            upstream_section=sections[-2],
+            downstream_section=sections[-1],
+            river_length=sections[-2].channel_reach_length,
+        )
+        downstream_slope = HECRAS._estimate_pair_friction_slope(
+            upstream_section=sections[0],
+            downstream_section=sections[1],
+            river_length=sections[0].channel_reach_length,
+        )
+        upstream_terminal_min = HECRAS._minimum_elevation_between_banks(sections[-1])
+        downstream_terminal_min = HECRAS._minimum_elevation_between_banks(sections[0])
+        if downstream_terminal_min > upstream_terminal_min:
+            upstream_slope, downstream_slope = downstream_slope, upstream_slope
+        return {"upstream": upstream_slope, "downstream": downstream_slope}
+
+    @staticmethod
+    def _estimate_pair_friction_slope(
+        upstream_section: SectionData,
+        downstream_section: SectionData,
+        river_length: float,
+    ) -> float:
+        if float(river_length) <= 1e-6:
+            return 0.001
+        upstream_min = HECRAS._minimum_elevation_between_banks(upstream_section)
+        downstream_min = HECRAS._minimum_elevation_between_banks(downstream_section)
+        slope = abs(float(upstream_min - downstream_min)) / float(river_length)
+        return max(slope, 1e-4)
+
     def _write_geometry_file(
         self,
         geometry_path: Path,
@@ -6890,7 +6657,7 @@ class HECRAS:
 
         lines = [
             f"Geom Title={geom_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             (
                 "Viewing Rectangle= "
                 f"{xmin:.4f} , {xmax:.4f} , {ymax:.3f} , {ymin:.3f} \n"
@@ -7256,8 +7023,20 @@ class HECRAS:
         flow_cms: float,
         profile_name: str,
         friction_slope: float,
+        upstream_friction_slope: Optional[float] = None,
+        downstream_friction_slope: Optional[float] = None,
         flow_profiles: Optional[list[tuple[str, float]]] = None,
     ) -> None:
+        upstream_slope = (
+            float(friction_slope)
+            if upstream_friction_slope is None
+            else float(upstream_friction_slope)
+        )
+        downstream_slope = (
+            float(friction_slope)
+            if downstream_friction_slope is None
+            else float(downstream_friction_slope)
+        )
         profiles = (
             [(profile_name, float(flow_cms))]
             if flow_profiles is None
@@ -7270,7 +7049,7 @@ class HECRAS:
         )
         content = [
             f"Flow Title={flow_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             f"Number of Profiles= {len(profiles)} \n",
             f"Profile Names={profile_names}\n",
             (
@@ -7284,9 +7063,9 @@ class HECRAS:
                 f"{river},{reach:<16}, 1 \n"
             ),
             "Up Type= 3 \n",
-            f"Up Slope={HECRAS._format_number(friction_slope, decimals=5)}\n",
+            f"Up Slope={HECRAS._format_number(upstream_slope, decimals=5)}\n",
             "Dn Type= 3 \n",
-            f"Dn Slope={HECRAS._format_number(friction_slope, decimals=5)}\n",
+            f"Dn Slope={HECRAS._format_number(downstream_slope, decimals=5)}\n",
             "DSS Import StartDate=\n",
             "DSS Import StartTime=\n",
             "DSS Import EndDate=\n",
@@ -7306,38 +7085,16 @@ class HECRAS:
         junction: dict[str, Any],
         profile_name: str,
         flow_profile: dict[str, float],
-        flow_profiles: Optional[list[tuple[str, Any]]] = None,
     ) -> None:
-        profiles = (
-            [(profile_name, dict(flow_profile))]
-            if flow_profiles is None
-            else [
-                (str(name), dict(values))
-                for name, values in flow_profiles
-            ]
-        )
-        profile_names = ",".join(name for name, _ in profiles)
         content = [
             f"Flow Title={flow_title}\n",
-            "Program Version=6.70\n",
-            f"Number of Profiles= {len(profiles)} \n",
-            f"Profile Names={profile_names}\n",
+            "Program Version=6.60\n",
+            "Number of Profiles= 1 \n",
+            f"Profile Names={profile_name}\n",
         ]
         reach_flow_keys = ["tributary", "main", "lower"]
-        for reach_index, reach_context in enumerate(reaches):
+        for reach_context, flow_key in zip(reaches, reach_flow_keys):
             upstream_station = reach_context["sections"][0].river_station
-            flow_key = str(
-                reach_context.get(
-                    "flow_key",
-                    reach_flow_keys[reach_index]
-                    if reach_index < len(reach_flow_keys)
-                    else f"independent_{reach_index - len(reach_flow_keys) + 1}",
-                )
-            )
-            flow_values_line = "".join(
-                f"{HECRAS._format_number(values.get(flow_key, 0.0), decimals=3):>8}"
-                for _, values in profiles
-            )
             content.extend(
                 [
                     (
@@ -7345,60 +7102,39 @@ class HECRAS:
                         f"{reach_context['river']},{reach_context['reach']:<16},"
                         f"{HECRAS._format_river_station(upstream_station):<8}\n"
                     ),
-                    f"{flow_values_line}\n",
+                    f"{HECRAS._format_number(flow_profile.get(flow_key, 0.0), decimals=3):>8}\n",
                 ]
             )
 
-        for reach_index, reach_context in enumerate(reaches):
-            flow_key = str(
-                reach_context.get(
-                    "flow_key",
-                    reach_flow_keys[reach_index] if reach_index < len(reach_flow_keys) else "independent",
-                )
-            )
-            boundary_role = str(
-                reach_context.get(
-                    "boundary_role",
-                    (
-                        "junction_downstream"
-                        if flow_key == "lower"
-                        else "junction_upstream"
-                        if flow_key in {"main", "tributary"}
-                        else "independent"
-                    ),
-                )
-            )
+        for reach_context, flow_key in zip(reaches, reach_flow_keys):
             content.append(
                 "Boundary for River Rch & Prof#="
                 f"{reach_context['river']},{reach_context['reach']:<16}, 1 \n"
             )
-            if boundary_role == "junction_downstream":
+            if flow_key == "lower":
+                downstream_slope = reach_context.get(
+                    "friction_slopes",
+                    {"downstream": reach_context["friction_slope"]},
+                )["downstream"]
                 content.extend(
                     [
                         "Up Type= 0 \n",
                         "Dn Type= 3 \n",
                         "Dn Slope="
-                        f"{HECRAS._format_number(reach_context['friction_slope'], decimals=5)}\n",
-                    ]
-                )
-            elif boundary_role == "junction_upstream":
-                content.extend(
-                    [
-                        "Up Type= 3 \n",
-                        "Up Slope="
-                        f"{HECRAS._format_number(reach_context['friction_slope'], decimals=5)}\n",
-                        "Dn Type= 0 \n",
+                        f"{HECRAS._format_number(downstream_slope, decimals=5)}\n",
                     ]
                 )
             else:
+                upstream_slope = reach_context.get(
+                    "friction_slopes",
+                    {"upstream": reach_context["friction_slope"]},
+                )["upstream"]
                 content.extend(
                     [
                         "Up Type= 3 \n",
                         "Up Slope="
-                        f"{HECRAS._format_number(reach_context['friction_slope'], decimals=5)}\n",
-                        "Dn Type= 3 \n",
-                        "Dn Slope="
-                        f"{HECRAS._format_number(reach_context['friction_slope'], decimals=5)}\n",
+                        f"{HECRAS._format_number(upstream_slope, decimals=5)}\n",
+                        "Dn Type= 0 \n",
                     ]
                 )
         content.extend(
@@ -7423,7 +7159,7 @@ class HECRAS:
     ) -> None:
         content = [
             f"Plan Title={plan_title}\n",
-            "Program Version=6.70\n",
+            "Program Version=6.60\n",
             f"Short Identifier={plan_title[:64]:<64}\n",
             "Simulation Date=,,,\n",
             "Geom File=g01\n",

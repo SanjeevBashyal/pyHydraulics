@@ -1,0 +1,119 @@
+[bridge_deck]
+is_present = true
+
+[[bridge_deck.structures]]
+structure_name = "1500_571_1"
+
+high_chord_upstream_left_bank = 1287.20
+low_chord_upstream_left_bank = 1286.93
+high_chord_upstream_right_bank = 1287.20
+low_chord_upstream_right_bank = 1286.93
+
+high_chord_downstream_left_bank = 1287.20
+low_chord_downstream_left_bank = 1286.70
+high_chord_downstream_right_bank = 1287.20
+low_chord_downstream_right_bank = 1286.70
+
+bridge_width = 9.98
+
+upstream_point_1_x = 536728.47
+upstream_point_1_y = 4168022.57
+upstream_point_2_x = 536726.90
+upstream_point_2_y = 4168022.56
+downstream_point_1_x = 536728.71
+downstream_point_1_y = 4168012.58
+downstream_point_2_x = 536727.20
+downstream_point_2_y = 4168012.59
+
+deck_distance = 0.1
+deck_weir_coefficient = 1.4
+deck_skew = 0.0
+deck_max_submerge = 0.98
+htab_hwmax = 1287.29
+htab_max_flow = 50.0
+preserve_endpoint_order = true
+opening_station_method = "csv_override"
+use_bank_point_station = true
+
+[circular_culvert]
+is_present = true
+
+[[circular_culvert.structures]]
+structure_name = "1500_571_2"
+Diameter = 0.80
+culvert_length = 6.97
+high_chord_upstream_left_bank = 1256.00
+high_chord_upstream_right_bank = 1256.00
+high_chord_downstream_left_bank = 1256.00
+high_chord_downstream_right_bank = 1256.00
+upstream_invert_elevation = 1255.30
+downstream_invert_elevation = 1254.00
+upstream_point_1_x = 536679.28
+upstream_point_1_y = 4167751.08
+upstream_point_2_x = 536678.08
+upstream_point_2_y = 4167751.32
+downstream_point_1_x = 536676.35
+downstream_point_1_y = 4167744.55
+downstream_point_2_x = 536675.57
+downstream_point_2_y = 4167745.02
+deck_distance = 0.1
+deck_width = 1.1
+deck_weir_coefficient = 1.4
+deck_skew = 0.0
+deck_max_submerge = 0.98
+culvert_mannings_n = 0.02
+culvert_bottom_n = 0.025
+entrance_loss = 0.5
+exit_loss = 1.0
+inlet_type = 1
+outlet_type = 1
+culvert_chart_number = 0
+num_barrels = 1
+opening_offset_from_left_bank = 0.5
+minimum_deck_cover = 0.2
+barrel_center_spacing = 1.2
+preserve_endpoint_order = true
+opening_station_method = "centerline_half_length"
+use_bank_station_points = true
+use_bank_point_for_elevation = false
+use_bank_point_for_invert = false
+
+[[circular_culvert.structures]]
+structure_name = "1500_571_3"
+Diameter = 1.20
+culvert_length = 39.06
+high_chord_upstream_left_bank = 1250.14
+high_chord_upstream_right_bank = 1250.25
+high_chord_downstream_left_bank = 1247.31
+high_chord_downstream_right_bank = 1247.42
+upstream_invert_elevation = 1247.24
+downstream_invert_elevation = 1246.17
+upstream_point_1_x = 536637.84
+upstream_point_1_y = 4167666.12
+upstream_point_2_x = 536636.76
+upstream_point_2_y = 4167667.58
+downstream_point_1_x = 536617.66
+downstream_point_1_y = 4167633.21
+downstream_point_2_x = 536616.22
+downstream_point_2_y = 4167633.82
+deck_distance = 0.1
+deck_width = 1.05
+deck_weir_coefficient = 1.4
+deck_skew = 0.0
+deck_max_submerge = 0.98
+culvert_mannings_n = 0.02
+culvert_bottom_n = 0.025
+entrance_loss = 0.5
+exit_loss = 1.0
+inlet_type = 1
+outlet_type = 1
+culvert_chart_number = 0
+num_barrels = 1
+opening_offset_from_left_bank = 0.5
+minimum_deck_cover = 0.2
+barrel_center_spacing = 1.2
+preserve_endpoint_order = true
+opening_station_method = "centerline_half_length"
+use_bank_station_points = true
+use_bank_point_for_elevation = false
+use_bank_point_for_invert = false

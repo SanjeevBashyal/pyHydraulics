@@ -7,7 +7,7 @@
   "perimeter_name": "Perimeter/Ataturk.shp",
   "breakline_name": "Breaklines/BUR-BUR-MER-ATATURK-T_SEV_USTU_V1.shp",
   "dss_name": "Boundary/Burdur_Debiler.dss",
-  "cross_section_name": "CrossSections/BUR-BUR-MER-ATATURK-T_KESIT_TESLIM_V1.csv",
+  "cross_section_name": "CrossSections/BUR-BUR-MER-ATATURK-T.csv",
   "junction_bc_csv_name": null,
   "landcover_name": "LandCover/Ataturk_LC.shp",
   "existing_landcover_tif_name": "inputs/NativeLandCover/LC_At_clip_V1.tif",

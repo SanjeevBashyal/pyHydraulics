@@ -329,7 +329,12 @@ class DTM:
         print(f"--- STEP 4: Generating Study Perimeter (Offset: {offset_m}m) ---")
         perimeter_shp = Path(getattr(self.config, "GIS_SUB_PROJECT_PATH", self.config.OUTPUT_PATH)) / output_filename
         perimeter_shp.parent.mkdir(parents=True, exist_ok=True)
-        DTMChannelModifier.export_study_perimeter(self.config.BANK_LINE_FILE_PATH, str(perimeter_shp), offset_m)
+        DTMChannelModifier.export_study_perimeter(
+            self.config.BANK_LINE_FILE_PATH,
+            str(perimeter_shp),
+            offset_m,
+            cross_section_csv=getattr(self.config, "CROSS_SECTION_FILE_PATH", None),
+        )
         return str(perimeter_shp)
 
     @staticmethod

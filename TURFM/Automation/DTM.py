@@ -11,7 +11,7 @@ from rasterio.transform import Affine
 from rasterio.features import geometry_mask, rasterize
 from scipy.ndimage import distance_transform_edt
 from shapely.geometry import Polygon, LineString, Point, MultiLineString
-from shapely.ops import linemerge, nearest_points, unary_union
+from shapely.ops import linemerge, nearest_points, split, unary_union
 
 
 class DTMChannelModifier:
@@ -1247,6 +1247,7 @@ class DTMChannelModifier:
                 network["channels"],
                 perimeter_path,
                 offset_m=perimeter_offset_m,
+                network=network,
             )
 
         connected_bank_products = []
@@ -2596,16 +2597,238 @@ class DTMChannelModifier:
         gpd.GeoDataFrame(rows, crs=crs).to_file(output_path)
 
     @staticmethod
-    def _export_network_perimeter(channels, output_path, offset_m=500.0):
+    def _export_network_perimeter(channels, output_path, offset_m=500.0, network=None):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        centerlines = [channel["processing_centerline"] for channel in channels]
-        perimeter = unary_union(centerlines).buffer(offset_m)
+        perimeter = DTMChannelModifier._build_clipped_network_perimeter(
+            channels=channels,
+            offset_m=offset_m,
+            network=network,
+        )
         crs = channels[0]["processing_banks_gdf"].crs if channels else None
         gpd.GeoDataFrame(
             [{"Name": f"Network Study Perimeter {offset_m}m", "geometry": perimeter}],
             crs=crs,
         ).to_file(output_path)
+
+    @staticmethod
+    def _build_clipped_network_perimeter(channels, offset_m=500.0, network=None):
+        if not channels:
+            raise ValueError("At least one channel is required to export a study perimeter.")
+
+        network = network or {"channels": channels, "junctions": []}
+        junctions = network.get("junctions", [])
+        main_indices = {int(junction["main_index"]) for junction in junctions}
+        tributary_by_index = {
+            int(junction["tributary_index"]): junction
+            for junction in junctions
+        }
+
+        clipped_polygons = []
+        for channel in channels:
+            centerline = channel.get("processing_centerline") or channel["centerline"]
+            if centerline is None or centerline.is_empty:
+                continue
+
+            channel_perimeter = centerline.buffer(offset_m)
+            if channel_perimeter.is_empty:
+                continue
+
+            bank_lines = DTMChannelModifier._line_strings(channel["banks_gdf"])
+            sections = DTMChannelModifier._cross_sections_in_file_order(
+                cross_section_csv=channel["cross_section_csv"],
+                centerline=channel["centerline"],
+                bank_lines=bank_lines,
+            )
+            if not sections:
+                clipped_polygons.append(channel_perimeter)
+                continue
+
+            channel_index = int(channel.get("index", len(clipped_polygons)))
+            is_main = channel_index in main_indices
+            tributary_junction = tributary_by_index.get(channel_index)
+
+            if not junctions or is_main or tributary_junction is None:
+                channel_perimeter = DTMChannelModifier._clip_perimeter_between_cross_sections(
+                    polygon=channel_perimeter,
+                    channel_centerline=channel["centerline"],
+                    start_section=sections[0],
+                    end_section=sections[-1],
+                )
+            else:
+                junction_point = Point(
+                    float(tributary_junction["x"]),
+                    float(tributary_junction["y"]),
+                )
+                channel_perimeter = DTMChannelModifier._clip_perimeter_at_cross_section(
+                    polygon=channel_perimeter,
+                    cut_section=sections[-1],
+                    keep_point=junction_point,
+                )
+
+            if not channel_perimeter.is_empty:
+                clipped_polygons.append(channel_perimeter)
+
+        if not clipped_polygons:
+            centerlines = [channel["processing_centerline"] for channel in channels]
+            return unary_union(centerlines).buffer(offset_m)
+
+        return unary_union(clipped_polygons)
+
+    @staticmethod
+    def _cross_sections_in_file_order(cross_section_csv, centerline, bank_lines=None):
+        df = DTMChannelModifier._read_csv_auto(
+            cross_section_csv,
+            required_columns=("X", "Y"),
+        )
+        group_cols = [column for column in ["River", "Reach", "Station"] if column in df.columns]
+        if not group_cols:
+            group_cols = ["Station"] if "Station" in df.columns else []
+
+        grouped = df.groupby(group_cols, sort=False) if group_cols else [(None, df)]
+        sections = []
+        for name, group in grouped:
+            if len(group) < 2:
+                continue
+            coord_columns = ["X", "Y", "Z"] if "Z" in group.columns else ["X", "Y"]
+            line = LineString(group[coord_columns].to_numpy(dtype=float))
+            if line.length <= 0:
+                continue
+            station_name = str(name if not isinstance(name, tuple) else name[-1])
+            center_point = DTMChannelModifier._cross_section_center_point_from_centerline(
+                line,
+                centerline,
+                label=station_name,
+                bank_lines=bank_lines,
+            )
+            sections.append(
+                {
+                    "station": station_name,
+                    "line": line,
+                    "center_point": center_point,
+                    "centerline_measure": float(centerline.project(center_point)),
+                }
+            )
+        return sections
+
+    @staticmethod
+    def _clip_perimeter_between_cross_sections(
+        polygon,
+        channel_centerline,
+        start_section,
+        end_section,
+    ):
+        if polygon.is_empty:
+            return polygon
+
+        start_measure = float(start_section["centerline_measure"])
+        end_measure = float(end_section["centerline_measure"])
+        if abs(end_measure - start_measure) <= 1e-6:
+            return polygon
+
+        start_keep = DTMChannelModifier._centerline_point_toward_measure(
+            channel_centerline,
+            from_measure=start_measure,
+            toward_measure=end_measure,
+        )
+        end_keep = DTMChannelModifier._centerline_point_toward_measure(
+            channel_centerline,
+            from_measure=end_measure,
+            toward_measure=start_measure,
+        )
+
+        clipped = DTMChannelModifier._clip_perimeter_at_cross_section(
+            polygon=polygon,
+            cut_section=start_section,
+            keep_point=start_keep,
+        )
+        clipped = DTMChannelModifier._clip_perimeter_at_cross_section(
+            polygon=clipped,
+            cut_section=end_section,
+            keep_point=end_keep,
+        )
+        return clipped
+
+    @staticmethod
+    def _centerline_point_toward_measure(centerline, from_measure, toward_measure):
+        length = max(float(centerline.length), 0.0)
+        from_measure = float(np.clip(from_measure, 0.0, length))
+        toward_measure = float(np.clip(toward_measure, 0.0, length))
+        direction = 1.0 if toward_measure >= from_measure else -1.0
+        step = min(max(length * 0.01, 0.5), 5.0)
+        target_measure = from_measure + direction * step
+        if direction > 0:
+            target_measure = min(target_measure, toward_measure, length)
+        else:
+            target_measure = max(target_measure, toward_measure, 0.0)
+        if abs(target_measure - from_measure) <= 1e-9:
+            target_measure = toward_measure
+        return centerline.interpolate(target_measure)
+
+    @staticmethod
+    def _clip_perimeter_at_cross_section(polygon, cut_section, keep_point):
+        if polygon.is_empty:
+            return polygon
+
+        extended_line = DTMChannelModifier._extended_cross_section_line(
+            cut_section["line"],
+            polygon,
+        )
+        if extended_line is None or extended_line.is_empty:
+            return polygon
+
+        try:
+            pieces = list(split(polygon, extended_line).geoms)
+        except Exception:
+            return polygon
+
+        polygonal_pieces = [
+            piece
+            for piece in pieces
+            if piece.geom_type in {"Polygon", "MultiPolygon"} and not piece.is_empty
+        ]
+        if len(polygonal_pieces) <= 1:
+            return polygon
+
+        keep_point = Point(float(keep_point.x), float(keep_point.y))
+        tolerance = max(polygon.length * 1e-9, 1e-6)
+        selected = [
+            piece
+            for piece in polygonal_pieces
+            if piece.buffer(tolerance).contains(keep_point)
+            or piece.buffer(tolerance).touches(keep_point)
+        ]
+        if not selected:
+            nearest_piece = min(polygonal_pieces, key=lambda piece: piece.distance(keep_point))
+            selected = [nearest_piece]
+
+        return unary_union(selected)
+
+    @staticmethod
+    def _extended_cross_section_line(cross_section_line, polygon):
+        coords = list(cross_section_line.coords)
+        if len(coords) < 2:
+            return None
+
+        start = np.asarray(coords[0][:2], dtype=float)
+        end = np.asarray(coords[-1][:2], dtype=float)
+        vector = end - start
+        norm = np.linalg.norm(vector)
+        if norm <= 0:
+            return None
+        unit = vector / norm
+
+        minx, miny, maxx, maxy = polygon.bounds
+        diagonal = float(np.hypot(maxx - minx, maxy - miny))
+        extension = max(diagonal * 3.0, float(cross_section_line.length) * 3.0, 100.0)
+        extended_start = start - unit * extension
+        extended_end = end + unit * extension
+        return LineString(
+            [
+                (float(extended_start[0]), float(extended_start[1])),
+                (float(extended_end[0]), float(extended_end[1])),
+            ]
+        )
 
     @staticmethod
     def _export_connected_bank_products(
@@ -3865,14 +4088,36 @@ class DTMChannelModifier:
         return poly_gdf
 
     @staticmethod
-    def export_study_perimeter(bank_shp_path: str, output_shp_path: str, offset_m: float = 500.0):
+    def export_study_perimeter(
+        bank_shp_path: str,
+        output_shp_path: str,
+        offset_m: float = 500.0,
+        cross_section_csv: str = None,
+    ):
         print(f"\nExporting study perimeter (buffered by {offset_m}m) to: {output_shp_path}...")
         
-        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(bank_shp_path)
+        banks_gdf = DTMChannelModifier.clean_and_merge_banklines(bank_shp_path)
+        centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(banks_gdf)
         centerline = centerline_gdf.geometry.iloc[0]
-        
-        # Buffer the centerline by offset_m on both sides, creating a polygon.
-        study_polygon = centerline.buffer(offset_m)
+
+        if cross_section_csv:
+            channel = {
+                "index": 0,
+                "name": Path(cross_section_csv).stem,
+                "cross_section_csv": Path(cross_section_csv),
+                "bank_shp_path": Path(bank_shp_path),
+                "banks_gdf": banks_gdf,
+                "centerline": centerline,
+                "processing_banks_gdf": banks_gdf,
+                "processing_centerline": centerline,
+            }
+            study_polygon = DTMChannelModifier._build_clipped_network_perimeter(
+                channels=[channel],
+                offset_m=offset_m,
+                network={"channels": [channel], "junctions": []},
+            )
+        else:
+            study_polygon = centerline.buffer(offset_m)
         
         perimeter_gdf = gpd.GeoDataFrame(
             [{"Name": f"Study Perimeter {offset_m}m", "geometry": study_polygon}], 

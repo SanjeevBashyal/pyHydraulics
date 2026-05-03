@@ -64,10 +64,10 @@ DEFAULT_WORKING_ROOT = WORKSPACE_ROOT / "projects"
 DEFAULT_RESULTS_ROOT = WORKSPACE_ROOT / "results"
 DEFAULT_FILES_ROOT = WORKSPACE_ROOT / "inputs"
 DEFAULT_RAS_EXE = Path(
-    r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\Ras.exe"
+    r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\Ras.exe"
 )
 DEFAULT_GDAL_GRID = Path(
-    r"C:\Program Files (x86)\HEC\HEC-RAS\6.6\GDAL\bin64\gdal_grid.exe"
+    r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\GDAL\bin64\gdal_grid.exe"
 )
 DEFAULT_PROJECT_NAME = "study_area_project"
 DEFAULT_EXISTING_LANDCOVER_TIF: Optional[Path] = None

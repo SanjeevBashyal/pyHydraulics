@@ -1,3 +1,3 @@
-bc_name,role,station,mean_z,interior_side,reverse_if_interior_should_be_right,reverse_if_interior_should_be_left,method,normal_depth_slope,dss_path,offset_distance,storage_area_name
-Ataturk_2D_upstream,upstream,1,952.502,left,True,False,Flow Hydrograph,,/BUR-BUR-MER-ATATURK-T/BURDUR2/DEBI/01May2025/30Minute/Q100/,1.0,AtaturkPerimeter
-Ataturk_2D_downstream,downstream,11,937.804,right,False,True,Normal Depth,0.19789524100222472,,1.0,AtaturkPerimeter
+bc_name,bc_line_name,role,branch,station,mean_z,interior_side,reverse_if_interior_should_be_right,reverse_if_interior_should_be_left,method,normal_depth_slope,dss_path,offset_distance,storage_area_name
+upstream BC,upstream BC,upstream,main,1,952.502,left,True,False,Flow Hydrograph,,/BUR-BUR-MER-ATATURK-T/BURDUR2/DEBI/01May2025/30Minute/Q100/,1.0,AtaturkPerimeter
+downstream BC,downstream BC,downstream,main,11,937.804,right,False,True,Normal Depth,0.19789524099321332,,1.0,AtaturkPerimeter
