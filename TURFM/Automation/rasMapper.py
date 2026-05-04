@@ -1649,7 +1649,9 @@ def _ensure_geometry_landcover_association(config: RasMapperConfig) -> bool:
     root = tree.getroot()
     geometries = root.find("Geometries")
     if geometries is None:
-        return False
+        geometries = ET.SubElement(root, "Geometries")
+        geometries.set("Checked", "True")
+        geometries.set("Expanded", "True")
 
     target_filename = _relative_rasmap_filename(
         config.rasmap_path,
@@ -1665,10 +1667,28 @@ def _ensure_geometry_landcover_association(config: RasMapperConfig) -> bool:
             target_layer = layer
             break
 
-    if target_layer is None:
-        return False
-
     changed = False
+    if target_layer is None:
+        target_layer = ET.SubElement(geometries, "Layer")
+        target_layer.set("Name", config.geometry_title)
+        target_layer.set("Type", "RASGeometry")
+        target_layer.set("Checked", "True")
+        target_layer.set("Expanded", "True")
+        target_layer.set("Filename", target_filename)
+        changed = True
+
+    if target_layer.get("Filename") != target_filename:
+        target_layer.set("Filename", target_filename)
+        changed = True
+    if target_layer.get("Name") != config.geometry_title:
+        target_layer.set("Name", config.geometry_title)
+        changed = True
+    if target_layer.get("Checked") != "True":
+        target_layer.set("Checked", "True")
+        changed = True
+    if target_layer.get("Expanded") != "True":
+        target_layer.set("Expanded", "True")
+        changed = True
 
     def _find_child(
         *, layer_type: Optional[str] = None, layer_name: Optional[str] = None
@@ -3763,6 +3783,7 @@ def compute_plan(
     output_dir: Optional[Path] = None,
     overwrite: bool = False,
     timeout_seconds: Optional[int] = None,
+    force_geometry_preprocess: bool = True,
 ) -> Dict[str, Any]:
     validate_inputs(config)
     if not config.project_file.exists():
@@ -3795,6 +3816,21 @@ def compute_plan(
     project_file = destination / config.project_file.name
     plan_file = destination / config.plan_path.name
     result_hdf = destination / f"{config.project_name}.p{config.plan_id}.hdf"
+    forced_geometry_preprocess_files = []
+    if force_geometry_preprocess:
+        geom_number = config.geom_path.suffix.lstrip(".g")
+        stale_patterns = [
+            f"{config.project_name}.g{geom_number}.hdf",
+            f"{config.project_name}.c{geom_number}*",
+            f"{config.project_name}.x{geom_number}",
+        ]
+        for pattern in stale_patterns:
+            for stale_path in destination.glob(pattern):
+                if not stale_path.is_file():
+                    continue
+                stale_path.unlink()
+                forced_geometry_preprocess_files.append(stale_path)
+
     command = f'"{config.ras_exe}" -c "{project_file}" "{plan_file}"'
     timeout = (
         int(timeout_seconds)
@@ -3948,6 +3984,8 @@ def compute_plan(
         "attempts": attempt_summaries,
         "source_plan_simulation_date": source_plan_simulation_date,
         "copied_result_files": copied_result_files,
+        "force_geometry_preprocess": force_geometry_preprocess,
+        "forced_geometry_preprocess_files": forced_geometry_preprocess_files,
     }
     reports_dir = destination / "Reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -4286,18 +4324,28 @@ def _aligned_grid_values(
 
 def _append_unique_point(
     points: List[Tuple[float, float]],
-    seen: set[Tuple[int, int]],
+    seen: Dict[Tuple[int, int], List[Tuple[float, float]]],
     point: Tuple[float, float],
-    precision: float = 1000.0,
-) -> None:
+    min_distance: float = 0.05,
+) -> bool:
+    cell_size = max(float(min_distance), 1e-9)
     key = (
-        int(round(point[0] * precision)),
-        int(round(point[1] * precision)),
+        int(math.floor(point[0] / cell_size)),
+        int(math.floor(point[1] / cell_size)),
     )
-    if key in seen:
-        return
-    seen.add(key)
+    min_distance_sq = min_distance * min_distance
+    for grid_x in range(key[0] - 1, key[0] + 2):
+        for grid_y in range(key[1] - 1, key[1] + 2):
+            for existing in seen.get((grid_x, grid_y), []):
+                if (
+                    (existing[0] - point[0]) ** 2
+                    + (existing[1] - point[1]) ** 2
+                    <= min_distance_sq
+                ):
+                    return False
+    seen.setdefault(key, []).append(point)
     points.append(point)
+    return True
 
 
 def _sample_polyline_points(
@@ -4330,7 +4378,8 @@ def _generate_breakline_seed_points(
     near_repeats: int,
 ) -> List[Tuple[float, float]]:
     seed_points: List[Tuple[float, float]] = []
-    seen: set[Tuple[int, int]] = set()
+    seen: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    min_distance = max(0.05, near_spacing * 0.05)
 
     for breakline in breaklines:
         for start, end in zip(breakline[:-1], breakline[1:]):
@@ -4350,16 +4399,22 @@ def _generate_breakline_seed_points(
                 px, py = point
                 for repeat in range(0, near_repeats + 1):
                     offset = repeat * near_spacing
-                    candidates = [
-                        (px, py) if repeat == 0 else None,
-                        (px + nx * offset, py + ny * offset),
-                        (px - nx * offset, py - ny * offset),
-                    ]
+                    candidates = (
+                        [(px, py)]
+                        if repeat == 0
+                        else [
+                            (px + nx * offset, py + ny * offset),
+                            (px - nx * offset, py - ny * offset),
+                        ]
+                    )
                     for candidate in candidates:
-                        if candidate is None:
-                            continue
                         if _point_in_ring(candidate, ring):
-                            _append_unique_point(seed_points, seen, candidate)
+                            _append_unique_point(
+                                seed_points,
+                                seen,
+                                candidate,
+                                min_distance=min_distance,
+                            )
     return seed_points
 
 
@@ -4374,12 +4429,21 @@ def _generate_computation_points(
     xs = _aligned_grid_values(xmin, xmax, spacing)
     ys = _aligned_grid_values(ymin, ymax, spacing, descending=True)
     points: List[Tuple[float, float]] = []
-    seen: set[Tuple[int, int]] = set()
+    seen: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    min_distance_candidates = [0.05, spacing * 0.005]
+    if breakline_near_spacing:
+        min_distance_candidates.append(breakline_near_spacing * 0.05)
+    min_distance = max(min_distance_candidates)
     for y in ys:
         for x in xs:
             point = (x, y)
             if _point_in_ring(point, ring):
-                _append_unique_point(points, seen, point)
+                _append_unique_point(
+                    points,
+                    seen,
+                    point,
+                    min_distance=min_distance,
+                )
 
     if breaklines and breakline_near_spacing and breakline_near_repeats:
         for point in _generate_breakline_seed_points(
@@ -4388,7 +4452,12 @@ def _generate_computation_points(
             breakline_near_spacing,
             breakline_near_repeats,
         ):
-            _append_unique_point(points, seen, point)
+            _append_unique_point(
+                points,
+                seen,
+                point,
+                min_distance=min_distance,
+            )
 
     if not points:
         raise ValueError(
@@ -5221,7 +5290,7 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
 
 def sync_geometry_to_source_shapes(
     config: RasMapperConfig,
-    include_breakline_seed_points: bool = True,
+    include_breakline_seed_points: bool = False,
 ) -> Dict[str, Any]:
     geom_text = config.geom_path.read_text(encoding="utf-8", errors="replace")
     lines = geom_text.splitlines(True)
@@ -5482,6 +5551,8 @@ def regenerate_geometry_hdf(
     )
 
     regenerate_kwargs = {
+        "geometry_name": config.geometry_title,
+        "flow_area_name": config.flow_area_name,
         "ras_object": ras_obj,
         "timeout": timeout,
         "close_after": True,
@@ -5573,10 +5644,12 @@ def install_reference_geometry(
 
     source_sync = sync_geometry_to_source_shapes(config)
     regen_summary = None
-    if config.geom_hdf_path.exists():
+    if not skip_regeneration and config.geom_hdf_path.exists():
         config.geom_hdf_path.unlink()
     if not skip_regeneration:
         regen_summary = regenerate_geometry_hdf(config, timeout=timeout)
+    elif not config.geom_hdf_path.exists() and config.reference_geom_hdf_src.exists():
+        copy_file(config.reference_geom_hdf_src, config.geom_hdf_path)
 
     lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
     create_landcover_raster(config)
@@ -6350,7 +6423,7 @@ class RasMapper2D:
         "prepare",
         "prepare-mannings",
         "read-dss",
-        "enforce-bank-lines",
+        "install-geometry",
         "apply-mannings",
         "check-mannings",
         "create-unsteady-plan",
@@ -6438,7 +6511,7 @@ class RasMapper2D:
         continue_on_error: bool = True,
         install_timeout: int = 420,
         compute_timeout_seconds: Optional[int] = None,
-        skip_geometry_regeneration: bool = False,
+        skip_geometry_regeneration: bool = True,
         compute_overwrite: bool = True,
         summary_path: Optional[Path] = None,
     ) -> List[Dict[str, Any]]:
@@ -6449,11 +6522,15 @@ class RasMapper2D:
                 f"({self.project_config.structure_source})."
             )
 
+        run_specs = self._expanded_project_run_specs(project_subprojects)
+
         results: List[Dict[str, Any]] = []
-        for project_name, sub_project_names in project_subprojects.items():
+        for spec in run_specs:
             result = self.run_project(
-                project_name=project_name,
-                sub_project_names=sub_project_names,
+                project_name=spec["source_project_name"],
+                sub_project_names=spec["sub_project_names"],
+                model_project_name=spec["model_project_name"],
+                dtm_result=spec.get("dtm_result"),
                 steps=steps,
                 skip_terrain=skip_terrain,
                 dry_run=dry_run,
@@ -6462,6 +6539,9 @@ class RasMapper2D:
                 skip_geometry_regeneration=skip_geometry_regeneration,
                 compute_overwrite=compute_overwrite,
             )
+            result["source_project_name"] = spec["source_project_name"]
+            result["component_name"] = spec["model_project_name"]
+            result["sub_project_names"] = list(spec["sub_project_names"])
             results.append(result)
             if not result["success"] and not continue_on_error:
                 break
@@ -6480,21 +6560,35 @@ class RasMapper2D:
         project_name: str,
         sub_project_names: Sequence[str],
         steps: Sequence[str],
+        model_project_name: Optional[str] = None,
+        dtm_result: Optional[Dict[str, Any]] = None,
         skip_terrain: bool = False,
         dry_run: bool = False,
         install_timeout: int = 420,
         compute_timeout_seconds: Optional[int] = None,
-        skip_geometry_regeneration: bool = False,
+        skip_geometry_regeneration: bool = True,
         compute_overwrite: bool = True,
     ) -> Dict[str, Any]:
         step_names = self._normalize_steps(steps)
+        display_project_name = model_project_name or project_name
         output_folder: Optional[Path] = None
         step_results: Dict[str, Any] = {}
         try:
-            ras_config = self.build_project_config(project_name, sub_project_names)
+            ras_config = self.build_project_config(
+                project_name,
+                sub_project_names,
+                model_project_name=display_project_name,
+                dtm_result=dtm_result,
+            )
             output_folder = ras_config.project_root
             require_reference_geometry = any(
-                step in {"install-geometry", "sync-geometry", "enforce-bank-lines"}
+                step
+                in {
+                    "install-geometry",
+                    "sync-geometry",
+                    "enforce-bank-lines",
+                    "file-only-bank-lines",
+                }
                 for step in step_names
             )
 
@@ -6504,7 +6598,7 @@ class RasMapper2D:
                     require_reference_geometry=require_reference_geometry,
                 )
                 return self._run_result(
-                    project_name,
+                    display_project_name,
                     output_folder,
                     True,
                     "Preflight checks passed.",
@@ -6531,6 +6625,13 @@ class RasMapper2D:
                         skip_regeneration=skip_geometry_regeneration,
                     )
                 elif step == "enforce-bank-lines":
+                    validate_inputs(ras_config, require_reference_geometry=True)
+                    step_results[step] = install_reference_geometry(
+                        ras_config,
+                        timeout=install_timeout,
+                        skip_regeneration=skip_geometry_regeneration,
+                    )
+                elif step == "file-only-bank-lines":
                     validate_inputs(ras_config, require_reference_geometry=True)
                     step_results[step] = enforce_bank_lines_file_only(ras_config)
                 elif step == "sync-geometry":
@@ -6567,17 +6668,21 @@ class RasMapper2D:
                     raise ValueError(f"Unsupported 2D workflow step: {step}")
 
             return self._run_result(
-                project_name,
+                display_project_name,
                 output_folder,
                 True,
                 "2D workflow completed.",
                 step_results,
             )
         except Exception as exc:
-            LOGGER.exception("2D workflow failed for project %s", project_name)
+            LOGGER.exception("2D workflow failed for project %s", display_project_name)
+            fallback_folder = (
+                Path(self.project_config.HEC_PATH)
+                / self.project_name_template.format(project=display_project_name)
+            )
             return self._run_result(
-                project_name,
-                output_folder or Path(self.project_config.get_hecras_project_path(project_name)),
+                display_project_name,
+                output_folder or fallback_folder,
                 False,
                 str(exc),
                 step_results or None,
@@ -6587,18 +6692,36 @@ class RasMapper2D:
         self,
         project_name: str,
         sub_project_names: Sequence[str],
+        *,
+        model_project_name: Optional[str] = None,
+        dtm_result: Optional[Dict[str, Any]] = None,
     ) -> RasMapperConfig:
-        dtm_result = self.resolve_project_dtm_result(project_name, sub_project_names)
-        prepared_dtm = self.resolve_prepared_terrain_path(project_name, dtm_result)
+        model_project_name = model_project_name or project_name
+        dtm_result = dtm_result or self.resolve_project_dtm_result(
+            project_name,
+            sub_project_names,
+            component_name=model_project_name,
+        )
+        prepared_dtm = self.resolve_prepared_terrain_path(
+            project_name,
+            dtm_result,
+            component_name=model_project_name,
+        )
         original_dtm_paths = self.resolve_original_dtm_paths(
             project_name,
             sub_project_names,
             dtm_result,
         )
         perimeter_shp = self._required_result_path(dtm_result, "perimeter_shp")
-        breakline_shp = self.resolve_breakline_source(project_name, dtm_result)
+        breakline_shp = self.resolve_breakline_source(
+            model_project_name,
+            dtm_result,
+        )
         landcover_shp = self.resolve_landcover_source(project_name, perimeter_shp)
-        junction_csv = self.write_junction_coordinate_csv(project_name, dtm_result)
+        junction_csv = self.write_junction_coordinate_csv(
+            model_project_name,
+            dtm_result,
+        )
         projection_file = self.resolve_projection_file()
         dss_file = self.resolve_dss_file()
         reference_geom = self.resolve_reference_geometry_file(".g01")
@@ -6620,7 +6743,7 @@ class RasMapper2D:
                 for sub_project_name in sub_project_names
             ]
 
-        ras_project_name = self.project_name_template.format(project=project_name)
+        ras_project_name = self.project_name_template.format(project=model_project_name)
         short_id = self._plan_short_identifier(ras_project_name)
 
         return RasMapperConfig(
@@ -6661,8 +6784,8 @@ class RasMapper2D:
             ),
             template_plan_name=str(template_plan) if template_plan else None,
             terrain_layer_name="Prepared Interpolated DTM",
-            flow_area_name=f"{project_name}_2D",
-            geometry_title=f"{project_name}_2D_CLEAN",
+            flow_area_name=f"{model_project_name}_2D",
+            geometry_title=f"{model_project_name}_2D_CLEAN",
             storage_area_name=None,
             hdf_2d_area_name=None,
             mesh_cell_size=self.mesh_cell_size,
@@ -6670,7 +6793,10 @@ class RasMapper2D:
             breakline_near_repeats=self.breakline_near_repeats,
             breakline_far_spacing=self.breakline_far_spacing,
             landcover_cell_size=self.landcover_cell_size,
-            preferred_dss_a_part=self._preferred_dss_a_part(project_name, dtm_result),
+            preferred_dss_a_part=self._preferred_dss_a_part(
+                model_project_name,
+                dtm_result,
+            ),
             preferred_dss_f_part=self.preferred_dss_f_part,
             downstream_bc_method=self.downstream_bc_method,
             unsteady_title=f"{ras_project_name}_Unsteady",
@@ -6684,37 +6810,81 @@ class RasMapper2D:
         self,
         project_name: str,
         sub_project_names: Sequence[str],
+        component_name: Optional[str] = None,
     ) -> Dict[str, Any]:
+        component_name = component_name or project_name
+        summary_results = self.load_dtm_summary()
         matches = [
             result
-            for result in self.load_dtm_summary()
-            if self._result_matches_project(result, project_name)
+            for result in summary_results
+            if self._result_matches_component(result, component_name)
         ]
+        channel_matches = self._filter_results_by_channels(
+            matches,
+            sub_project_names,
+        )
+        if channel_matches:
+            matches = channel_matches
+        elif self._has_channel_scoped_results(matches):
+            matches = []
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
             raise ValueError(
-                f"Multiple implementationDTM outputs matched {project_name}. "
+                f"Multiple implementationDTM outputs matched {component_name}. "
                 "Run projects with a single DTM group or split the 2D project names."
             )
-        return self._fallback_dtm_result(project_name, sub_project_names)
+
+        if _normalize_model_name(component_name) == _normalize_model_name(project_name):
+            matches = [
+                result
+                for result in summary_results
+                if self._result_matches_project(result, project_name)
+            ]
+            channel_matches = self._filter_results_by_channels(
+                matches,
+                sub_project_names,
+            )
+            if channel_matches:
+                matches = channel_matches
+            elif self._has_channel_scoped_results(matches):
+                matches = []
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Multiple implementationDTM outputs matched {project_name}. "
+                    "Run projects with a single DTM group or split the 2D project names."
+                )
+
+        return self._fallback_dtm_result(
+            project_name,
+            sub_project_names,
+            component_name=component_name,
+        )
 
     def resolve_prepared_terrain_path(
         self,
         project_name: str,
         dtm_result: Dict[str, Any],
+        component_name: Optional[str] = None,
     ) -> Path:
-        dtm_folder = Path(self.project_config.get_gis_project_path(project_name)) / "DTM"
-        candidates = sorted(
-            dtm_folder.glob(f"{project_name}*channel_terrain*.tif"),
-            key=lambda path: (
-                0 if "junction_channel_terrain" in path.stem else 1,
-                -path.stat().st_mtime,
-                path.name,
-            ),
-        )
-        if candidates:
-            return candidates[0]
+        result_path = self._optional_result_path(dtm_result, "output_tif")
+        if result_path is not None:
+            return result_path
+
+        component_name = component_name or project_name
+        for dtm_folder in self._component_dtm_dirs(
+            project_name,
+            component_name,
+            [],
+        ):
+            candidates = self._sorted_dtm_files(
+                dtm_folder.glob("*channel_terrain*.tif"),
+                preferred_stem=component_name,
+            )
+            if candidates:
+                return candidates[0]
         return self._required_result_path(dtm_result, "output_tif")
 
     def resolve_original_dtm_paths(
@@ -6808,11 +6978,15 @@ class RasMapper2D:
         if preferred_landcover.exists():
             return preferred_landcover
 
-        search_roots = [
-            Path(self.project_config.ESSENTIALS_PATH),
-            Path(self.project_config.get_gis_project_path(project_name)),
-            Path(self.project_config.get_project_path(project_name)),
-        ]
+        search_roots = [Path(self.project_config.ESSENTIALS_PATH)]
+        for resolver in (
+            self.project_config.get_gis_project_path,
+            self.project_config.get_project_path,
+        ):
+            try:
+                search_roots.append(Path(resolver(project_name)))
+            except (FileNotFoundError, ValueError):
+                continue
         patterns = ("*Burdur_Corine_Turef30.shp", "*LandCover*.shp", "*Land_Cover*.shp", "*LC*.shp")
         for root in search_roots:
             for pattern in patterns:
@@ -7006,36 +7180,72 @@ class RasMapper2D:
         self,
         project_name: str,
         sub_project_names: Sequence[str],
+        component_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        gis_dtm_dir = Path(self.project_config.get_gis_project_path(project_name)) / "DTM"
-        output_tifs = sorted(gis_dtm_dir.glob(f"{project_name}*channel_terrain*.tif"))
-        perimeter_shps = sorted(gis_dtm_dir.glob(f"{project_name}*Study_Perimeter*.shp"))
-        merged_bank_shps = sorted(gis_dtm_dir.glob(f"{project_name}*Merged_Banks*.shp"))
-        if not output_tifs or not perimeter_shps:
-            raise FileNotFoundError(
-                f"Prepared DTM outputs were not found for {project_name}. "
-                "Run implementationDTM.py before implementation2d.py."
+        component_name = component_name or project_name
+        dtm_dirs = self._component_dtm_dirs(
+            project_name,
+            component_name,
+            sub_project_names,
+        )
+        selected_dtm_dir: Optional[Path] = None
+        output_tifs: List[Path] = []
+        perimeter_shps: List[Path] = []
+        merged_bank_shps: List[Path] = []
+
+        for gis_dtm_dir in dtm_dirs:
+            output_tifs = self._sorted_dtm_files(
+                gis_dtm_dir.glob("*channel_terrain*.tif"),
+                preferred_stem=component_name,
             )
+            perimeter_shps = self._sorted_dtm_files(
+                gis_dtm_dir.glob("*Study_Perimeter*.shp"),
+                preferred_stem=component_name,
+            )
+            merged_bank_shps = self._sorted_dtm_files(
+                gis_dtm_dir.glob("*Merged_Banks*.shp"),
+                preferred_stem=component_name,
+            )
+            if output_tifs and perimeter_shps:
+                selected_dtm_dir = gis_dtm_dir
+                break
+
+        if not output_tifs or not perimeter_shps or selected_dtm_dir is None:
+            raise FileNotFoundError(
+                f"Prepared DTM outputs were not found for 2D component "
+                f"{component_name} (source project {project_name}). "
+                "Run implementationDTM.py before implementation2d.py. "
+                "Searched: "
+                + ", ".join(str(path) for path in dtm_dirs)
+            )
+
         channels = []
         for sub_project_name in sub_project_names:
             paths = self.project_config.get_sub_project_paths(
                 project_name,
                 sub_project_name,
+                resolve_dtm=True,
             )
             channels.append(
                 {
                     "name": paths.sub_project_name,
                     "cross_section_csv": paths.cross_section_file_path,
                     "bank_shp_path": paths.bank_line_file_path,
+                    "dtm_path": paths.dtm_path,
                 }
             )
         return {
             "project": project_name,
+            "component": component_name,
             "output_tif": str(output_tifs[0]),
             "perimeter_shp": str(perimeter_shps[0]),
             "merged_banks_shp": str(merged_bank_shps[0]) if merged_bank_shps else None,
+            "connected_bank_products": self._fallback_connected_bank_products(
+                selected_dtm_dir,
+            ),
             "channels": channels,
             "junctions": [],
+            "gis_output_dir": str(selected_dtm_dir),
         }
 
     def _filtered_project_subprojects(
@@ -7048,11 +7258,357 @@ class RasMapper2D:
         if projects is None:
             return project_subprojects
         selected = {_normalize_model_name(project) for project in projects}
-        return {
-            project: sub_projects
-            for project, sub_projects in project_subprojects.items()
-            if _normalize_model_name(project) in selected
+        filtered: Dict[str, List[str]] = {}
+        for project, sub_projects in project_subprojects.items():
+            if _normalize_model_name(project) in selected:
+                filtered[project] = sub_projects
+                continue
+            selected_subprojects = [
+                sub_project
+                for sub_project in sub_projects
+                if _normalize_model_name(sub_project) in selected
+            ]
+            if selected_subprojects:
+                filtered[project] = selected_subprojects
+        return filtered
+
+    def _expanded_project_run_specs(
+        self,
+        project_subprojects: Dict[str, List[str]],
+    ) -> List[Dict[str, Any]]:
+        specs: List[Dict[str, Any]] = []
+        for project_name, sub_project_names in project_subprojects.items():
+            specs.extend(
+                self._project_run_specs(project_name, sub_project_names)
+            )
+        return specs
+
+    def _project_run_specs(
+        self,
+        project_name: str,
+        sub_project_names: Sequence[str],
+    ) -> List[Dict[str, Any]]:
+        channel_inputs = self._project_channel_inputs(
+            project_name,
+            sub_project_names,
+        )
+        connected_groups = self._group_connected_channel_inputs(
+            channel_inputs,
+            self._read_network_connections(),
+        )
+        if not connected_groups:
+            connected_groups = [channel_inputs]
+
+        channel_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for connected_group in connected_groups:
+            component_key = self._component_output_key(
+                project_name,
+                connected_group,
+                len(connected_groups),
+            )
+            for channel in connected_group:
+                dtm_path = str(Path(channel.get("dtm_path") or ""))
+                channel_groups.setdefault((dtm_path, component_key), []).append(
+                    channel
+                )
+
+        has_multiple_groups = len(channel_groups) > 1
+        specs: List[Dict[str, Any]] = []
+        for (_, component_key), grouped_channels in channel_groups.items():
+            component_name = self._component_name_from_key(
+                project_name,
+                grouped_channels,
+                component_key,
+                has_multiple_groups,
+            )
+            if component_key.startswith("single:") and len(grouped_channels) == 1:
+                sub_project_name = str(grouped_channels[0]["name"])
+                isolated_dtm_dir = (
+                    Path(self.project_config.GIS_PATH)
+                    / project_name
+                    / sub_project_name
+                    / "DTM"
+                )
+                if isolated_dtm_dir.exists():
+                    component_name = sub_project_name
+            grouped_subprojects = [str(channel["name"]) for channel in grouped_channels]
+            dtm_result = self.resolve_project_dtm_result(
+                project_name,
+                grouped_subprojects,
+                component_name=component_name,
+            )
+            specs.append(
+                {
+                    "source_project_name": project_name,
+                    "model_project_name": component_name,
+                    "sub_project_names": grouped_subprojects,
+                    "dtm_result": dtm_result,
+                }
+            )
+
+        if len(specs) > 1:
+            LOGGER.info(
+                "Project %s split into %s disconnected 2D component(s): %s",
+                project_name,
+                len(specs),
+                ", ".join(spec["model_project_name"] for spec in specs),
+            )
+        return specs
+
+    def _project_channel_inputs(
+        self,
+        project_name: str,
+        sub_project_names: Sequence[str],
+    ) -> List[Dict[str, Any]]:
+        channels: List[Dict[str, Any]] = []
+        for sub_project_name in sub_project_names:
+            paths = self.project_config.get_sub_project_paths(
+                project_name,
+                sub_project_name,
+                resolve_dtm=True,
+            )
+            channels.append(
+                {
+                    "name": paths.sub_project_name,
+                    "cross_section_csv": paths.cross_section_file_path,
+                    "bank_shp_path": paths.bank_line_file_path,
+                    "dtm_path": paths.dtm_path,
+                }
+            )
+        return channels
+
+    def _read_network_connections(self) -> List[Dict[str, str]]:
+        network_path = self._network_csv_path()
+        if network_path is None or not network_path.exists():
+            return []
+        try:
+            data = pd.read_csv(
+                network_path,
+                sep=None,
+                engine="python",
+                encoding="utf-8-sig",
+            )
+        except UnicodeDecodeError:
+            data = pd.read_csv(
+                network_path,
+                sep=None,
+                engine="python",
+                encoding="latin1",
+            )
+        if data.empty or len(data.columns) < 2:
+            return []
+
+        normalized_columns = {
+            str(column).strip().casefold(): column for column in data.columns
         }
+        from_column = normalized_columns.get("from") or data.columns[0]
+        to_column = normalized_columns.get("to") or data.columns[1]
+
+        connections: List[Dict[str, str]] = []
+        for _, row in data.iterrows():
+            from_name = str(row[from_column]).strip()
+            to_name = str(row[to_column]).strip()
+            if (
+                not from_name
+                or not to_name
+                or from_name.lower() == "nan"
+                or to_name.lower() == "nan"
+            ):
+                continue
+            connections.append({"from": from_name, "to": to_name})
+        return connections
+
+    def _network_csv_path(self) -> Optional[Path]:
+        for filename in ("networks.csv", "network.csv"):
+            preferred = Path(self.project_config.ESSENTIALS_PATH) / filename
+            if preferred.exists():
+                return preferred
+        return None
+
+    def _group_connected_channel_inputs(
+        self,
+        channel_inputs: Sequence[Dict[str, Any]],
+        network_connections: Sequence[Dict[str, str]],
+    ) -> List[List[Dict[str, Any]]]:
+        if not channel_inputs:
+            return []
+
+        parent = list(range(len(channel_inputs)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            root_left = find(left)
+            root_right = find(right)
+            if root_left != root_right:
+                parent[root_right] = root_left
+
+        for connection in network_connections or []:
+            from_index = self._find_channel_input_index(
+                channel_inputs,
+                connection.get("from"),
+            )
+            to_index = self._find_channel_input_index(
+                channel_inputs,
+                connection.get("to"),
+            )
+            if from_index is None or to_index is None or from_index == to_index:
+                continue
+            union(from_index, to_index)
+
+        groups_by_root: Dict[int, List[Dict[str, Any]]] = {}
+        for index, channel in enumerate(channel_inputs):
+            groups_by_root.setdefault(find(index), []).append(channel)
+
+        return sorted(
+            groups_by_root.values(),
+            key=lambda group: (
+                0 if len(group) > 1 else 1,
+                _normalize_model_name(group[0].get("name", "")),
+            ),
+        )
+
+    def _find_channel_input_index(
+        self,
+        channel_inputs: Sequence[Dict[str, Any]],
+        network_name: Any,
+    ) -> Optional[int]:
+        if not network_name:
+            return None
+        for index, channel in enumerate(channel_inputs):
+            aliases = [
+                channel.get("name", ""),
+                Path(channel.get("cross_section_csv", "")).stem,
+                Path(channel.get("bank_shp_path", "")).parent.name,
+            ]
+            if any(
+                self._network_names_match(network_name, alias)
+                for alias in aliases
+            ):
+                return index
+        return None
+
+    @staticmethod
+    def _network_names_match(left: Any, right: Any) -> bool:
+        left_norm = _normalize_model_name(left)
+        right_norm = _normalize_model_name(right)
+        if not left_norm or not right_norm:
+            return False
+        return (
+            left_norm == right_norm
+            or left_norm.endswith(right_norm)
+            or right_norm.endswith(left_norm)
+        )
+
+    @staticmethod
+    def _component_output_key(
+        project_name: str,
+        connected_group: Sequence[Dict[str, Any]],
+        connected_group_count: int,
+    ) -> str:
+        if len(connected_group) == 1 and connected_group_count > 1:
+            return f"subproject:{connected_group[0]['name']}"
+        if len(connected_group) == 1:
+            return f"single:{connected_group[0]['name']}"
+        return f"project:{project_name}"
+
+    @staticmethod
+    def _component_name_from_key(
+        project_name: str,
+        grouped_channels: Sequence[Dict[str, Any]],
+        component_key: str,
+        has_multiple_groups: bool,
+    ) -> str:
+        if component_key.startswith("subproject:"):
+            return component_key.split(":", 1)[1]
+        if component_key.startswith("single:"):
+            sub_project_name = component_key.split(":", 1)[1]
+            return sub_project_name if has_multiple_groups else project_name
+        if grouped_channels:
+            return project_name
+        return project_name
+
+    def _component_dtm_dirs(
+        self,
+        project_name: str,
+        component_name: str,
+        sub_project_names: Sequence[str],
+    ) -> List[Path]:
+        gis_root = Path(self.project_config.GIS_PATH)
+        project_dir = gis_root / project_name
+        dirs: List[Path] = []
+
+        def add(path: Path) -> None:
+            if path.exists() and path.is_dir() and path not in dirs:
+                dirs.append(path)
+
+        if component_name and _normalize_model_name(component_name) != _normalize_model_name(project_name):
+            add(project_dir / component_name / "DTM")
+            add(gis_root / component_name / "DTM")
+
+        for sub_project_name in sub_project_names:
+            add(project_dir / sub_project_name / "DTM")
+
+        add(project_dir / "DTM")
+        if component_name:
+            add(gis_root / component_name / "DTM")
+
+        return dirs
+
+    @staticmethod
+    def _sorted_dtm_files(
+        paths: Iterable[Path],
+        *,
+        preferred_stem: str,
+    ) -> List[Path]:
+        preferred = _normalize_model_name(preferred_stem)
+        return sorted(
+            [Path(path) for path in paths],
+            key=lambda path: (
+                0
+                if _normalize_model_name(path.stem).startswith(preferred)
+                else 1,
+                0 if "junction_channel_terrain" in path.stem else 1,
+                -path.stat().st_mtime,
+                path.name,
+            ),
+        )
+
+    @staticmethod
+    def _fallback_connected_bank_products(dtm_dir: Path) -> List[Dict[str, str]]:
+        products: List[Dict[str, str]] = []
+        search_roots = [dtm_dir.parent]
+        for root in search_roots:
+            for path in sorted(root.glob("*.shp")):
+                stem = path.stem.lower()
+                if "junction_clipped" in stem:
+                    products.append({"junction_clipped_banks_shp": str(path)})
+                elif "combined" in stem and "sev_ustu" in stem:
+                    products.append({"merged_banks_shp": str(path)})
+        return products
+
+    def _filter_results_by_channels(
+        self,
+        results: Sequence[Dict[str, Any]],
+        sub_project_names: Sequence[str],
+    ) -> List[Dict[str, Any]]:
+        if not results:
+            return []
+        target = {_normalize_model_name(name) for name in sub_project_names}
+        target.discard("")
+        if not target:
+            return []
+
+        filtered: List[Dict[str, Any]] = []
+        for result in results:
+            channel_names = self._result_channel_names(result)
+            if channel_names and channel_names == target:
+                filtered.append(result)
+        return filtered
 
     def _normalize_steps(self, steps: Sequence[str]) -> List[str]:
         if isinstance(steps, str):
@@ -7086,9 +7642,24 @@ class RasMapper2D:
                 "enforce-bank-lines",
                 "enforce-banklines",
                 "enforce-breaklines",
-                "sync-bank-lines",
+                "enforce-mesh",
+                "mesh",
+                "install",
+                "install-geometry",
+                "v01-geometry",
             }:
-                normalized.append("enforce-bank-lines")
+                normalized.append("install-geometry")
+            elif step_name in {
+                "file-only-bank-lines",
+                "enforce-bank-lines-file-only",
+                "sync-bank-lines",
+                "sync-banklines",
+            }:
+                normalized.append("file-only-bank-lines")
+            elif step_name in {"sync-geometry", "sync"}:
+                normalized.append("sync-geometry")
+            elif step_name in {"regenerate-geometry", "regenerate-mesh"}:
+                normalized.append("regenerate-geometry")
             elif step_name in {"plan", "create-plan"}:
                 normalized.append("create-unsteady-plan")
             elif step_name in {"compute", "run"}:
@@ -7102,6 +7673,9 @@ class RasMapper2D:
         for value in (result.get("project"), result.get("project_name")):
             if _normalize_model_name(value) == target:
                 return True
+        component_value = result.get("component")
+        if component_value and _normalize_model_name(component_value) != target:
+            return False
         output_tif = result.get("output_tif")
         if output_tif:
             path = Path(output_tif)
@@ -7109,6 +7683,43 @@ class RasMapper2D:
                 return True
             return any(_normalize_model_name(part) == target for part in path.parts)
         return False
+
+    def _result_matches_component(
+        self,
+        result: Dict[str, Any],
+        component_name: str,
+    ) -> bool:
+        target = _normalize_model_name(component_name)
+        component_value = result.get("component")
+        if component_value:
+            return _normalize_model_name(component_value) == target
+
+        for value in (result.get("project"), result.get("project_name")):
+            if _normalize_model_name(value) == target:
+                return True
+
+        output_tif = result.get("output_tif")
+        if output_tif:
+            path = Path(output_tif)
+            if _normalize_model_name(path.stem).startswith(target):
+                return True
+        return False
+
+    @staticmethod
+    def _result_channel_names(result: Dict[str, Any]) -> set[str]:
+        names = {
+            _normalize_model_name(channel.get("name"))
+            for channel in result.get("channels", []) or []
+            if channel.get("name")
+        }
+        names.discard("")
+        return names
+
+    def _has_channel_scoped_results(
+        self,
+        results: Sequence[Dict[str, Any]],
+    ) -> bool:
+        return any(self._result_channel_names(result) for result in results)
 
     def _required_result_path(self, result: Dict[str, Any], key: str) -> Path:
         path = self._optional_result_path(result, key)

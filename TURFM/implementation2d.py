@@ -13,17 +13,17 @@ SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
-PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN"]
+PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
 
 # Default 2D build path. Use --step/--full/--prepare-only from the CLI to adjust.
 # prepare keeps the legacy v01 helper generation, while the named steps below
-# make landcover Manning's n, DSS, bank-line enforcement, and Manning audits
-# explicit in the project workflow before computing the plan.
+# make landcover Manning's n, DSS, v01-style geometry installation/mesh
+# regeneration, and Manning audits explicit before computing the plan.
 WORKFLOW_STEPS = (
     "prepare",
     "prepare-mannings",
     "read-dss",
-    "enforce-bank-lines",
+    "install-geometry",
     "apply-mannings",
     "check-mannings",
     "create-unsteady-plan",
@@ -41,6 +41,7 @@ PLAN_COMPUTATION_INTERVAL = "6SEC"
 SIMULATION_DURATION_HOURS = 24.0
 INSTALL_TIMEOUT_SECONDS = 420
 COMPUTE_TIMEOUT_SECONDS = 7200
+SKIP_GEOMETRY_REGENERATION = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help=(
             "Workflow step to run. Repeat for multiple steps. Common steps: "
-            "prepare, prepare-mannings, read-dss, enforce-bank-lines, "
+            "prepare, prepare-mannings, read-dss, install-geometry, "
             "apply-mannings, check-mannings, create-unsteady-plan, compute-plan."
         ),
     )
@@ -67,7 +68,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run the complete 2D workflow, including landcover Manning's n, "
-            "DSS boundary reads, bank-line enforcement, plan creation, and compute."
+            "DSS boundary reads, geometry installation/mesh regeneration, "
+            "plan creation, and compute."
         ),
     )
     parser.add_argument("--prepare-only", action="store_true", help="Only prepare the RAS Mapper project shell and helper artifacts.")
@@ -76,8 +78,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-terrain", action="store_true", default=SKIP_TERRAIN, help="Skip terrain HDF creation during prepare.")
     parser.add_argument("--continue-on-error", action="store_true", default=True, help="Continue running remaining projects after an error.")
     parser.add_argument("--stop-on-error", action="store_true", help="Stop immediately if one project fails.")
-    parser.add_argument("--skip-geometry-regeneration", action="store_true", help="Skip geometry HDF regeneration during install-geometry.")
-    parser.add_argument("--install-timeout", type=int, default=INSTALL_TIMEOUT_SECONDS, help="Timeout in seconds for GUI geometry installation/regeneration.")
+    parser.add_argument(
+        "--skip-geometry-regeneration",
+        action="store_true",
+        default=SKIP_GEOMETRY_REGENERATION,
+        help="Skip GUI geometry HDF regeneration during install-geometry.",
+    )
+    parser.add_argument(
+        "--regenerate-geometry",
+        dest="skip_geometry_regeneration",
+        action="store_false",
+        help="Run the RAS Mapper GUI mesh-regeneration step. This can hang on some projects.",
+    )
+    parser.add_argument("--install-timeout", type=int, default=INSTALL_TIMEOUT_SECONDS, help="Timeout in seconds for optional GUI geometry installation/regeneration.")
     parser.add_argument("--compute-timeout", type=int, default=COMPUTE_TIMEOUT_SECONDS, help="Timeout in seconds for compute-plan.")
     parser.add_argument(
         "--source",
