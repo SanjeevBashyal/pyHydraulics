@@ -11,6 +11,7 @@ site-specific file names and paths.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import math
 import os
@@ -664,6 +665,18 @@ def resolve_hdf_2d_area_group(
         if candidate in area_group:
             return f"{base_root}/{candidate}"
 
+    if "Attributes" in area_group and (
+        "Cell Info" in area_group or "Cell Points" in area_group
+    ):
+        attrs = area_group["Attributes"][:]
+        names = [
+            _decode_hdf_bytes(row["Name"])
+            for row in attrs
+            if "Name" in attrs.dtype.names
+        ]
+        if not names or any(name in candidates for name in names) or len(attrs) == 1:
+            return base_root
+
     available = list(area_group.keys())
     if len(available) == 1:
         return f"{base_root}/{available[0]}"
@@ -1197,11 +1210,19 @@ def _decode_hdf_bytes(value: Any) -> str:
 
 
 def normalize_dss_pathname(pathname: str) -> str:
-    parts = [part.strip() for part in str(pathname).strip().split("/")]
-    parts = [part for part in parts if part]
+    clean = str(pathname).strip().strip("/")
+    if not clean:
+        return ""
+    parts = [
+        part.strip()
+        for part in clean.split("/")
+    ]
+    if len(parts) < 6:
+        parts.extend([""] * (6 - len(parts)))
+    parts = parts[:6]
     if not parts:
         return ""
-    return "/" + "/".join(parts[:6]) + "/"
+    return "/" + "/".join(parts) + "/"
 
 
 @log_call
@@ -2405,6 +2426,43 @@ def _parse_dss_path_parts(pathname: str) -> Dict[str, str]:
     }
 
 
+def _read_dss_catalog_for_config(config: RasMapperConfig) -> pd.DataFrame:
+    for catalog_path in (config.dss_catalog_csv, config.dss_catalog_copy):
+        if catalog_path.exists():
+            if catalog_path.suffix.lower() == ".csv":
+                return pd.read_csv(catalog_path, dtype=str).fillna("")
+            return parse_dss_catalog(catalog_path)
+    return pd.DataFrame()
+
+
+def resolve_dss_path_from_catalog(
+    config: RasMapperConfig,
+    pathname: str,
+) -> str:
+    normalized = normalize_dss_pathname(pathname)
+    parts = _parse_dss_path_parts(normalized)
+    if parts["D"]:
+        return normalized
+
+    catalog = _read_dss_catalog_for_config(config)
+    required_columns = {"A", "B", "C", "D", "E", "F", "pathname"}
+    if catalog.empty or not required_columns.issubset(catalog.columns):
+        return normalized
+
+    matches = catalog[
+        (catalog["A"].astype(str) == parts["A"])
+        & (catalog["B"].astype(str) == parts["B"])
+        & (catalog["C"].astype(str) == parts["C"])
+        & (catalog["E"].astype(str).str.upper() == parts["E"].upper())
+        & (catalog["F"].astype(str).str.upper() == parts["F"].upper())
+        & (catalog["D"].astype(str).str.strip() != "")
+    ]
+    if matches.empty:
+        return normalized
+
+    return normalize_dss_pathname(str(matches.iloc[0]["pathname"]))
+
+
 def _parse_dss_d_part_date(d_part: str) -> datetime:
     clean = d_part.strip()
     for date_format in ("%d%b%Y", "%d%B%Y", "%d%b%y", "%d%B%y"):
@@ -2456,6 +2514,12 @@ def resolve_plan_simulation_date(
         }
 
     dss_parts = _parse_dss_path_parts(upstream_dss_path)
+    if not dss_parts["D"]:
+        raise ValueError(
+            "Upstream DSS path is missing the D-part date: "
+            f"{upstream_dss_path}. Rerun 'prepare' so boundary_candidates.csv "
+            "can be rebuilt from the DSS catalog."
+        )
     start_date = _parse_dss_d_part_date(dss_parts["D"])
     start_hour, start_minute = _parse_hhmm_time(config.simulation_start_time)
     start_dt = start_date.replace(
@@ -2544,7 +2608,10 @@ def _load_boundary_config_values(config: RasMapperConfig) -> Dict[str, Any]:
                 "rerun 'prepare'."
             )
         row_dict = upstream_row.to_dict()
-        row_dict["dss_path"] = normalize_dss_pathname(raw_dss_path)
+        row_dict["dss_path"] = resolve_dss_path_from_catalog(
+            config,
+            raw_dss_path,
+        )
         upstream_rows.append(row_dict)
 
     if config.downstream_friction_slope is not None:
@@ -3022,6 +3089,41 @@ def verify_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
     }
 
 
+def repair_unsteady_dss_paths(
+    config: RasMapperConfig,
+    unsteady_path: Path,
+) -> Dict[str, Any]:
+    if not unsteady_path.exists():
+        return {"updated": False, "path": unsteady_path, "replacements": []}
+
+    lines = unsteady_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    ).splitlines(True)
+    replacements: List[Dict[str, str]] = []
+    repaired_lines: List[str] = []
+    for line in lines:
+        if not line.startswith("DSS Path="):
+            repaired_lines.append(line)
+            continue
+        raw_path = line.split("=", 1)[1].strip()
+        repaired_path = resolve_dss_path_from_catalog(config, raw_path)
+        if repaired_path != raw_path:
+            replacements.append({"from": raw_path, "to": repaired_path})
+            repaired_lines.append(f"DSS Path={repaired_path}\n")
+        else:
+            repaired_lines.append(line)
+
+    if replacements:
+        unsteady_path.write_text("".join(repaired_lines), encoding="utf-8")
+
+    return {
+        "updated": bool(replacements),
+        "path": unsteady_path,
+        "replacements": replacements,
+    }
+
+
 def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
     validate_inputs(config)
     if not config.project_file.exists():
@@ -3051,6 +3153,7 @@ def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
         )
 
     unsteady_summary = create_unsteady_file(config)
+    dss_repair = repair_unsteady_dss_paths(config, config.unsteady_path)
     simulation_date_summary = resolve_plan_simulation_date(
         config,
         unsteady_summary["upstream_dss_path"],
@@ -3065,6 +3168,7 @@ def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
     summary = {
         "project_file": config.project_file,
         "unsteady": unsteady_summary,
+        "dss_repair": dss_repair,
         "plan": plan_summary,
         "simulation_date": simulation_date_summary,
         "verification": verification,
@@ -3121,6 +3225,105 @@ def _click_ras_button(window: Any, labels: Sequence[str]) -> bool:
     return False
 
 
+def _collect_win32_window_text(hwnd: int) -> List[str]:
+    import win32gui
+
+    texts: List[str] = []
+    title = win32gui.GetWindowText(hwnd).strip()
+    if title:
+        texts.append(title)
+
+    def enum_child(child_hwnd: int, _: Any) -> None:
+        text = win32gui.GetWindowText(child_hwnd).strip()
+        if text:
+            texts.append(text)
+
+    try:
+        win32gui.EnumChildWindows(hwnd, enum_child, None)
+    except Exception:
+        pass
+    return texts
+
+
+def _click_win32_button(hwnd: int, labels: Sequence[str]) -> bool:
+    import win32con
+    import win32gui
+
+    normalized = {label.lower().replace("&", "") for label in labels}
+    clicked = False
+
+    def enum_child(child_hwnd: int, _: Any) -> None:
+        nonlocal clicked
+        if clicked:
+            return
+        text = win32gui.GetWindowText(child_hwnd).strip().lower()
+        text = text.replace("&", "")
+        if text not in normalized:
+            return
+        win32gui.SendMessage(child_hwnd, win32con.BM_CLICK, 0, 0)
+        clicked = True
+
+    try:
+        enum_child(hwnd, None)
+        win32gui.EnumChildWindows(hwnd, enum_child, None)
+    except Exception:
+        return False
+    return clicked
+
+
+def _handle_compute_dialogs_win32(
+    process_id: int,
+    auto_confirm_preprocessor: bool,
+    messages: List[str],
+) -> Optional[str]:
+    try:
+        import win32gui
+        import win32process
+    except Exception:
+        return None
+
+    fatal_message: Optional[str] = None
+
+    def enum_window(hwnd: int, _: Any) -> None:
+        nonlocal fatal_message
+        try:
+            _, window_pid = win32process.GetWindowThreadProcessId(hwnd)
+            if window_pid != process_id or not win32gui.IsWindowVisible(hwnd):
+                return
+        except Exception:
+            return
+
+        texts = _collect_win32_window_text(hwnd)
+        joined = "\n".join(texts)
+        lower_joined = joined.lower()
+        if not joined:
+            return
+
+        if "geometry preprocessor output file was not found" in lower_joined:
+            if auto_confirm_preprocessor:
+                if _click_win32_button(hwnd, ("Yes", "&Yes")):
+                    messages.append(
+                        "Accepted HEC-RAS geometry preprocessor prompt."
+                    )
+            return
+
+        if "error parsing command line parameters" in lower_joined:
+            fatal_message = joined
+            _click_win32_button(hwnd, ("OK", "&OK", "Close"))
+            return
+
+        if "errors were found preparing unsteady flow data" in lower_joined:
+            fatal_message = joined
+            _click_win32_button(hwnd, ("Close", "OK", "&OK"))
+            return
+
+    try:
+        win32gui.EnumWindows(enum_window, None)
+    except Exception:
+        return fatal_message
+    return fatal_message
+
+
 def _handle_compute_dialogs(
     process_id: int,
     auto_confirm_preprocessor: bool,
@@ -3129,7 +3332,11 @@ def _handle_compute_dialogs(
     try:
         from pywinauto import Desktop
     except Exception:
-        return None
+        return _handle_compute_dialogs_win32(
+            process_id,
+            auto_confirm_preprocessor,
+            messages,
+        )
 
     fatal_message: Optional[str] = None
     try:
@@ -3288,6 +3495,8 @@ def compute_plan(
             "Run 'create-unsteady-plan' first."
         )
 
+    geometry_sync = sync_geometry_to_source_shapes(config)
+
     destination = (
         output_dir.resolve()
         if output_dir is not None
@@ -3306,6 +3515,8 @@ def compute_plan(
 
     project_file = destination / config.project_file.name
     plan_file = destination / config.plan_path.name
+    unsteady_file = destination / config.unsteady_path.name
+    dss_repair = repair_unsteady_dss_paths(config, unsteady_file)
     result_hdf = destination / f"{config.project_name}.p{config.plan_id}.hdf"
     command = f'"{config.ras_exe}" -c "{project_file}" "{plan_file}"'
     timeout = (
@@ -3450,8 +3661,10 @@ def compute_plan(
         "success": success,
         "command": command,
         "output_dir": destination,
+        "geometry_sync": geometry_sync,
         "project_file": project_file,
         "plan_file": plan_file,
+        "dss_repair": dss_repair,
         "result_hdf": result_hdf if result_hdf.exists() else None,
         "return_code": return_code,
         "elapsed_seconds": elapsed_seconds,
@@ -3476,9 +3689,32 @@ def set_geometry_title(geom_path: Path, title: str) -> None:
     geom_path.write_text("".join(lines), encoding="utf-8")
 
 
+def set_geometry_storage_area_name(geom_path: Path, storage_area_name: str) -> None:
+    lines = geom_path.read_text(encoding="utf-8", errors="replace").splitlines(True)
+    lines = _upsert_project_line(
+        lines,
+        "Storage Area=",
+        f"{storage_area_name},,",
+        insert_after_prefixes=("Viewing Rectangle=", "Program Version=", "Geom Title="),
+    )
+    lines = [
+        (
+            f"BC Line Storage Area={storage_area_name}\n"
+            if line.startswith("BC Line Storage Area=")
+            else line
+        )
+        for line in lines
+    ]
+    geom_path.write_text("".join(lines), encoding="utf-8")
+
+
 def seed_geometry_from_reference(config: RasMapperConfig) -> None:
     copy_file(config.reference_geom_src, config.geom_path)
     set_geometry_title(config.geom_path, config.geometry_title)
+    set_geometry_storage_area_name(
+        config.geom_path,
+        resolve_storage_area_name(config),
+    )
     ensure_project_has_geom_reference(config)
 
 
@@ -3812,6 +4048,42 @@ def _append_unique_point(
     points.append(point)
 
 
+def _spaced_bucket_key(
+    point: Tuple[float, float],
+    spacing: float,
+) -> Tuple[int, int]:
+    return (
+        int(math.floor(point[0] / spacing)),
+        int(math.floor(point[1] / spacing)),
+    )
+
+
+def _build_spaced_point_buckets(
+    points: Sequence[Tuple[float, float]],
+    min_spacing: float,
+) -> Dict[Tuple[int, int], List[Tuple[float, float]]]:
+    buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    for point in points:
+        buckets.setdefault(_spaced_bucket_key(point, min_spacing), []).append(point)
+    return buckets
+
+
+def _append_spaced_point(
+    points: List[Tuple[float, float]],
+    buckets: Dict[Tuple[int, int], List[Tuple[float, float]]],
+    point: Tuple[float, float],
+    min_spacing: float,
+) -> None:
+    key = _spaced_bucket_key(point, min_spacing)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for existing in buckets.get((key[0] + dx, key[1] + dy), []):
+                if math.hypot(point[0] - existing[0], point[1] - existing[1]) < min_spacing:
+                    return
+    buckets.setdefault(key, []).append(point)
+    points.append(point)
+
+
 def _sample_polyline_points(
     coords: Sequence[Tuple[float, float]],
     spacing: float,
@@ -3840,9 +4112,11 @@ def _generate_breakline_seed_points(
     breaklines: Sequence[Sequence[Tuple[float, float]]],
     near_spacing: float,
     near_repeats: int,
+    min_point_spacing: float = 0.0,
 ) -> List[Tuple[float, float]]:
     seed_points: List[Tuple[float, float]] = []
     seen: set[Tuple[int, int]] = set()
+    spaced_buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
 
     for breakline in breaklines:
         for start, end in zip(breakline[:-1], breakline[1:]):
@@ -3871,7 +4145,15 @@ def _generate_breakline_seed_points(
                         if candidate is None:
                             continue
                         if _point_in_ring(candidate, ring):
-                            _append_unique_point(seed_points, seen, candidate)
+                            if min_point_spacing > 0:
+                                _append_spaced_point(
+                                    seed_points,
+                                    spaced_buckets,
+                                    candidate,
+                                    min_point_spacing,
+                                )
+                            else:
+                                _append_unique_point(seed_points, seen, candidate)
     return seed_points
 
 
@@ -3893,14 +4175,9 @@ def _generate_computation_points(
             if _point_in_ring(point, ring):
                 _append_unique_point(points, seen, point)
 
-    if breaklines and breakline_near_spacing and breakline_near_repeats:
-        for point in _generate_breakline_seed_points(
-            ring,
-            breaklines,
-            breakline_near_spacing,
-            breakline_near_repeats,
-        ):
-            _append_unique_point(points, seen, point)
+    # Breakline refinement belongs in the BreakLine records below. Injecting
+    # dense breakline-adjacent points here can make HEC-RAS report
+    # near-duplicate points or negative-area cells during compute.
 
     if not points:
         raise ValueError(
@@ -4673,6 +4950,54 @@ def _distance_point_to_polyline(
     )
 
 
+def _read_hdf_2d_cell_count(handle: h5py.File, base: str) -> int:
+    centers_path = f"{base}/Cells Center Coordinate"
+    if centers_path in handle:
+        return int(handle[centers_path].shape[0])
+
+    attrs_path = f"{base}/Attributes"
+    if attrs_path in handle:
+        attrs = handle[attrs_path][:]
+        if len(attrs) and "Cell Count" in attrs.dtype.names:
+            return int(attrs[0]["Cell Count"])
+
+    cell_info_path = f"{base}/Cell Info"
+    if cell_info_path in handle:
+        cell_info = handle[cell_info_path][:]
+        if len(cell_info):
+            return int(cell_info[0][-1])
+
+    cell_points_path = f"{base}/Cell Points"
+    if cell_points_path in handle:
+        return int(handle[cell_points_path].shape[0])
+
+    raise RuntimeError(f"Could not determine mesh cell count under {base}")
+
+
+def _read_hdf_2d_perimeter(handle: h5py.File, base: str) -> np.ndarray:
+    perimeter_path = f"{base}/Perimeter"
+    if perimeter_path in handle:
+        return handle[perimeter_path][:]
+
+    polygon_points_path = f"{base}/Polygon Points"
+    if polygon_points_path in handle:
+        return handle[polygon_points_path][:]
+
+    raise RuntimeError(f"Could not determine mesh perimeter points under {base}")
+
+
+def _read_hdf_2d_face_points(handle: h5py.File, base: str) -> np.ndarray:
+    face_points_path = f"{base}/FacePoints Coordinate"
+    if face_points_path in handle:
+        return handle[face_points_path][:]
+
+    cell_points_path = f"{base}/Cell Points"
+    if cell_points_path in handle:
+        return handle[cell_points_path][:]
+
+    raise RuntimeError(f"Could not determine mesh face/cell points under {base}")
+
+
 def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
     if not config.geom_hdf_path.exists():
         return {"available": False, "reason": "geometry_hdf_missing"}
@@ -4684,7 +5009,7 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
             handle,
             geom_path=config.geom_path,
         )
-        face_points = handle[f"{base}/FacePoints Coordinate"][:]
+        face_points = _read_hdf_2d_face_points(handle, base)
         attrs = handle["Geometry/2D Flow Area Break Lines/Attributes"][:]
 
     rows = []
@@ -4734,6 +5059,17 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
 def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     geom_text = config.geom_path.read_text(encoding="utf-8", errors="replace")
     lines = geom_text.splitlines(True)
+    storage_area_name = resolve_storage_area_name(
+        config,
+        geom_path=config.geom_path,
+        lines=lines,
+    )
+    lines = _upsert_project_line(
+        lines,
+        "Storage Area=",
+        f"{storage_area_name},,",
+        insert_after_prefixes=("Viewing Rectangle=", "Program Version=", "Geom Title="),
+    )
 
     perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
     breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
@@ -4745,14 +5081,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
                     or item["record"].get("name")
                     or f"BC Line {index}"
                 ),
-                "storage_area": str(
-                    item["record"].get("storage")
-                    or resolve_storage_area_name(
-                        config,
-                        geom_path=config.geom_path,
-                        lines=lines,
-                    )
-                ),
+                "storage_area": storage_area_name,
                 "coords": item["coords"],
             }
             for index, item in enumerate(
@@ -4770,11 +5099,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
             downstream_bc_length_multiplier=(
                 config.downstream_bc_length_multiplier
             ),
-            storage_area_name=resolve_storage_area_name(
-                config,
-                geom_path=config.geom_path,
-                lines=lines,
-            ),
+            storage_area_name=storage_area_name,
         )
 
     view_coord_sets = [
@@ -4890,6 +5215,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     return {
         "perimeter_points": len(perimeter_ring),
         "computation_points": len(computation_points),
+        "storage_area_name": storage_area_name,
         "mesh_cell_size": config.mesh_cell_size,
         "breakline_counts": [len(coords) for coords in breaklines],
         "boundary_lines": [
@@ -4989,12 +5315,16 @@ def regenerate_geometry_hdf(
         load_results_summary=False,
     )
 
-    result = MeshRegenerationWorkflow.regenerate_mesh(
-        ras_object=ras_obj,
-        timeout=timeout,
-        close_after=True,
-        mannings_layer_name="LandCover",
-    )
+    regen_kwargs = {
+        "ras_object": ras_obj,
+        "timeout": timeout,
+        "close_after": True,
+    }
+    regen_signature = inspect.signature(MeshRegenerationWorkflow.regenerate_mesh)
+    if "mannings_layer_name" in regen_signature.parameters:
+        regen_kwargs["mannings_layer_name"] = "LandCover"
+
+    result = MeshRegenerationWorkflow.regenerate_mesh(**regen_kwargs)
 
     if not config.geom_hdf_path.exists():
         raise RuntimeError("Geometry HDF was not recreated by HEC-RAS")
@@ -5009,8 +5339,8 @@ def regenerate_geometry_hdf(
             raise RuntimeError(
                 "Geometry HDF was recreated, but no 2D flow area mesh was found"
             )
-        n_cells = int(handle[f"{base}/Cells Center Coordinate"].shape[0])
-        perimeter = handle[f"{base}/Perimeter"][:]
+        n_cells = _read_hdf_2d_cell_count(handle, base)
+        perimeter = _read_hdf_2d_perimeter(handle, base)
         breakline_attrs = handle["Geometry/2D Flow Area Break Lines/Attributes"][:]
 
     region_records = None

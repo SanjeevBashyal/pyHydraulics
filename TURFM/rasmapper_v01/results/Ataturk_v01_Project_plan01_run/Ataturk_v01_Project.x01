@@ -4,10 +4,10 @@ Ataturk_v01_U
        1       1       0       2       8       F
        3       3       0       0       0       0       0       0
        0       0       0       F       T       0       0       0       1       0       0       0
-       0       0       F       T       0       0       0       F       0       0       F
+       0       0       F       F       0       0       0       F       0       0       F
        0
        1       1       0       F       T       T       0       3      30       T       T       F       0
-       0     .01       F   .0098      20   .3281   .0098       T       5       T       F
+       0     .01       F    .003      20      .1    .003       T       5       T       F
 Section - Expansion and Contraction Coefficients
        0       0       2
 Section - Expansion and Contraction Coefficients (Unsteady)
@@ -43,7 +43,7 @@ Section - XS Manning's/Roughness Data
        0     100       0
        0       T
        0       0       0
-     .15      .3      33
+      .5     .47      20
 NODE   1Fake Reach      0                                      0                                                
        1       F
        4
@@ -56,4 +56,4 @@ Section - XS Manning's/Roughness Data
        0     100       0
        0       T
        0       0       0
-     .15      .3      33
+      .5     .47      20

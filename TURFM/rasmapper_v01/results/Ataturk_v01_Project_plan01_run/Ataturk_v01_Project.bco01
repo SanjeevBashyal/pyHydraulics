@@ -2,7 +2,7 @@
                                               HEC-RAS - River Analysis System
  
  
-Project File:  F:\codex_rascommander\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\Ataturk_v01_Project.prj
+Project File:  E:\0_Python\pyHydraulics\TURFM\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\Ataturk_v01_Project.prj
  
 Project Name:  Ataturk_v01_Project
  
@@ -25,7 +25,7 @@ Ending Time:     02May2025 0730
                 #                                              #
                 #          HEC-RAS 6.6 September 2024          #
                 #                                              #
-                #             27APR26 at 17:55:00              #
+                #             04MAY26 at 23:00:44              #
                 #                                              #
                 ################################################
                 
@@ -43,28 +43,28 @@ Ending Time:     02May2025 0730
 
 
 
-                 ***   Volume Accounting for 2D Flow Area in 1000 m^3   ***
+                 ***   Volume Accounting for 2D Flow Area in Acre Feet   ***
 
            2D Area    Starting Vol      Ending Vol      Cum Inflow     Cum Outflow           Error   Percent Error
            *******    ************      **********      **********     ***********           *****   *************
  
  
-  AtaturkPerimeter                         0.01504           63.58           63.56        0.000619        0.000973
+  AtaturkPerimeter                        0.000541           1.460           1.460        0.001241         0.08503
 
 
 
-                 ***  Total Volume Accounting (for the entire model) in 1000 m^3   ***
+                 ***   Total Volume Accounting (for the entire model) in Acre Feet   ***
 
-Total Boundary Flux of Water In            63.58
-Total Boundary Flux of Water Out           63.56
+Total Boundary Flux of Water In            1.460
+Total Boundary Flux of Water Out           1.460
 
 Starting Volume                     0.0000000000
-Ending Volume                            0.01504
+Ending Volume                           0.000541
 
 
                              Error   Percent Error
                              *****   *************
-                          0.000619        0.000973
+                          0.001241         0.08503
 
 
 

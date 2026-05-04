@@ -29,9 +29,9 @@ Job Control Information
   Maximum Iterations    =       20
   Max Iter WOImprovement=        0
   Number Warmup Steps   =        0
-  Abort DZ Tolerance    =    98.43
-  DZ Tolerance          =    .0197
-  DZSA Tolerance        =    .0197
+  Abort DZ Tolerance    =       30
+  DZ Tolerance          =     .006
+  DZSA Tolerance        =     .006
   DQ Tolerance          =  3.1E+38
   Weir Flow Stability   =        2
   Spillway Stability    =        1
@@ -42,7 +42,7 @@ Job Control Information
   DSS Message Level     =        4
   Write HDF5 File       =        T
   Write DSS File        =        T
-F:\codex_rascommander\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\Ataturk_v01_Project.dss
+E:\0_Python\pyHydraulics\TURFM\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\Ataturk_v01_Project.dss
 Computational Time Window
   Start Date/Time       = 02May2025 0100
   End Date/Time         = 02May2025 0730

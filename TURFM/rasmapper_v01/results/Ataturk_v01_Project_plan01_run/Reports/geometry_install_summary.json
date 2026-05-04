@@ -1,6 +1,6 @@
 {
-  "geom_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01",
-  "geom_hdf_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
+  "geom_path": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01",
+  "geom_hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
   "geometry_title": "ATATURK_2D_CLEAN",
   "resolved_storage_area_name": "AtaturkPerimeter",
   "mesh_cell_size": 10.0,
@@ -297,9 +297,9 @@
   },
   "regeneration": {
     "workflow_success": true,
-    "hdf_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
-    "hdf_2d_area_group": "Geometry/2D Flow Areas/AtaturkPerimeter",
-    "mesh_cell_count": 21191,
+    "hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
+    "hdf_2d_area_group": "Geometry/2D Flow Areas",
+    "mesh_cell_count": 21324,
     "hdf_perimeter_points": 9,
     "hdf_breakline_count": 2,
     "region_mannings": [
@@ -425,11 +425,11 @@
       }
     ],
     "landcover_status": {
-      "generated_landcover_raster": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCover.tif",
-      "generated_landcover_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCoverTable.hdf",
-      "active_landcover_map_tif": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
-      "active_landcover_map_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
-      "landcover_mannings_raster": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\LandCover\\Ataturk_LC_ManningN_2m.tif",
+      "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCover.tif",
+      "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCoverTable.hdf",
+      "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
+      "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
+      "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\LandCover\\Ataturk_LC_ManningN_2m.tif",
       "lookup_records": [
         {
           "KodText": "111",
@@ -566,8 +566,8 @@
       ],
       "existing_ras_layer": {
         "type": "existing_ras_landcover",
-        "landcover_tif": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
-        "landcover_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
+        "landcover_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
+        "landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
         "cell_size_x": 10.0,
         "cell_size_y": 10.0,
         "crs": "PROJCS[\"TUREF / TM30\",GEOGCS[\"TUREF\",DATUM[\"Turkish_National_Reference_Frame\",SPHEROID[\"GRS 1980\",6378137,298.257222101004,AUTHORITY[\"EPSG\",\"7019\"]],AUTHORITY[\"EPSG\",\"1057\"]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",30],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]]"
@@ -576,7 +576,7 @@
     },
     "mesh_qc": {
       "available": true,
-      "mesh_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
+      "mesh_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.g01.hdf",
       "breaklines": [
         {
           "name": "Breakline 1",
@@ -584,14 +584,14 @@
           "far_spacing": 3.0,
           "near_repeats": 5,
           "influence_distance": 2.5,
-          "facepoint_count_within_influence": 13521,
+          "facepoint_count_within_influence": 13047,
           "closest_facepoint_distance": 0.0,
-          "median_facepoint_distance_within_influence": 1.49999999869198,
-          "within_1x": 2877,
-          "within_2x": 5230,
-          "within_3x": 7942,
-          "within_4x": 10576,
-          "within_5x": 13521
+          "median_facepoint_distance_within_influence": 1.4999999991509516,
+          "within_1x": 2694,
+          "within_2x": 4819,
+          "within_3x": 7562,
+          "within_4x": 10305,
+          "within_5x": 13047
         },
         {
           "name": "Breakline 2",
@@ -599,34 +599,31 @@
           "far_spacing": 3.0,
           "near_repeats": 5,
           "influence_distance": 2.5,
-          "facepoint_count_within_influence": 13547,
+          "facepoint_count_within_influence": 13020,
           "closest_facepoint_distance": 0.0,
-          "median_facepoint_distance_within_influence": 1.4999999978992562,
-          "within_1x": 2915,
-          "within_2x": 5245,
-          "within_3x": 7858,
-          "within_4x": 10790,
-          "within_5x": 13547
+          "median_facepoint_distance_within_influence": 1.4999999989987618,
+          "within_1x": 2693,
+          "within_2x": 4812,
+          "within_3x": 7545,
+          "within_4x": 10282,
+          "within_5x": 13020
         }
       ]
     },
     "removed_stale_landcover_layers": [],
-    "timeout": 300,
-    "geometry_association_selected": {
-      "selected_layer": "LandCover",
-      "rasmap_path": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Ataturk_v01_Project.rasmap"
-    }
+    "timeout": 100,
+    "geometry_association_selected": null
   },
   "skip_regeneration": false,
-  "generated_landcover_raster": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCover.tif",
-  "generated_landcover_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCoverTable.hdf",
-  "active_landcover_map_tif": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
-  "active_landcover_map_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
-  "landcover_mannings_raster": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\LandCover\\Ataturk_LC_ManningN_2m.tif",
+  "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCover.tif",
+  "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LandCoverTable.hdf",
+  "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
+  "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
+  "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\LandCover\\Ataturk_LC_ManningN_2m.tif",
   "existing_ras_layer": {
     "type": "existing_ras_landcover",
-    "landcover_tif": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
-    "landcover_hdf": "F:\\codex_rascommander\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
+    "landcover_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.tif",
+    "landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\rasmapper_v01\\projects\\Ataturk_v01_Project\\Land Classification\\LC_At_clip_V1.hdf",
     "cell_size_x": 10.0,
     "cell_size_y": 10.0,
     "crs": "PROJCS[\"TUREF / TM30\",GEOGCS[\"TUREF\",DATUM[\"Turkish_National_Reference_Frame\",SPHEROID[\"GRS 1980\",6378137,298.257222101004,AUTHORITY[\"EPSG\",\"7019\"]],AUTHORITY[\"EPSG\",\"1057\"]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",30],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]]"
