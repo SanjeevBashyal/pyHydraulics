@@ -685,8 +685,20 @@ def resolve_hdf_2d_area_group(
             return f"{base_root}/{candidate}"
 
     available = list(area_group.keys())
-    if len(available) == 1:
-        return f"{base_root}/{available[0]}"
+    child_groups = [
+        name
+        for name, item in area_group.items()
+        if isinstance(item, h5py.Group)
+    ]
+    if len(child_groups) == 1:
+        return f"{base_root}/{child_groups[0]}"
+    if not child_groups and {"Attributes", "Cell Points"}.issubset(set(available)):
+        raise RuntimeError(
+            "Geometry HDF contains the 2D area input point table, but no "
+            "generated mesh group. RAS Mapper mesh generation likely did not "
+            "finish before the install timeout. Increase --install-timeout "
+            "or simplify/coarsen the 2D mesh inputs."
+        )
 
     raise RuntimeError(
         "Could not determine the 2D flow area group in the geometry HDF. "
@@ -3783,7 +3795,7 @@ def compute_plan(
     output_dir: Optional[Path] = None,
     overwrite: bool = False,
     timeout_seconds: Optional[int] = None,
-    force_geometry_preprocess: bool = True,
+    force_geometry_preprocess: bool = False,
 ) -> Dict[str, Any]:
     validate_inputs(config)
     if not config.project_file.exists():
@@ -3795,6 +3807,12 @@ def compute_plan(
         raise FileNotFoundError(
             f"Plan file not found: {config.plan_path}. "
             "Run 'create-unsteady-plan' first."
+        )
+    if not force_geometry_preprocess and not config.geom_hdf_path.exists():
+        raise FileNotFoundError(
+            f"Geometry HDF not found: {config.geom_hdf_path}. "
+            "Run install-geometry with regeneration before compute-plan, "
+            "or call compute_plan(..., force_geometry_preprocess=True)."
         )
 
     destination = (
@@ -4008,15 +4026,69 @@ def seed_geometry_from_reference(config: RasMapperConfig) -> None:
     ensure_project_has_geom_reference(config)
 
 
+def _candidate_keys(name: str) -> List[str]:
+    text = str(name).strip()
+    keys = [text.upper(), _normalize_code(text).upper()]
+    if " - " in text:
+        keys.append(text.split(" - ", 1)[0].strip().upper())
+    numeric = []
+    for char in text:
+        if char.isdigit() or char == ".":
+            numeric.append(char)
+        else:
+            break
+    if numeric:
+        keys.append(_normalize_code("".join(numeric)).upper())
+    return [key for key in keys if key]
+
+
+def _landcover_lookup_indexes(
+    lookup_df: pd.DataFrame,
+) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
+    code_index: Dict[str, pd.Series] = {}
+    name_index: Dict[str, pd.Series] = {}
+    for _, row in lookup_df.iterrows():
+        code_index[str(_normalize_code(row["KodText"])).strip().upper()] = row
+        name_index[str(row["Adi"]).strip().upper()] = row
+    return code_index, name_index
+
+
+def _lookup_manning_from_landcover_name(
+    landcover_name: Any,
+    code_index: Dict[str, pd.Series],
+    name_index: Dict[str, pd.Series],
+    default_value: float,
+) -> float:
+    for key in _candidate_keys(str(landcover_name)):
+        match = code_index.get(key)
+        if match is None:
+            match = name_index.get(key)
+        if match is not None:
+            return float(match["Manningn"])
+    return float(default_value)
+
+
 def build_expected_region_mannings(
     region_df: pd.DataFrame,
     lookup_df: pd.DataFrame,
     default_value: Optional[float] = None,
 ) -> pd.DataFrame:
     updated = region_df.copy()
-    updated["MainChannel"] = updated["MainChannel"].astype(float)
-    if default_value is not None:
-        updated["MainChannel"] = float(default_value)
+    fallback = (
+        float(default_value)
+        if default_value is not None
+        else float(updated["MainChannel"].astype(float).iloc[0])
+    )
+    code_index, name_index = _landcover_lookup_indexes(lookup_df)
+    updated["MainChannel"] = [
+        _lookup_manning_from_landcover_name(
+            row["Land Cover Name"],
+            code_index,
+            name_index,
+            fallback,
+        )
+        for _, row in updated.iterrows()
+    ]
     return updated
 
 
@@ -4129,11 +4201,17 @@ def build_exact_region_mannings_from_lookup(
         lookup_df,
     )
     rows = []
+    code_index, name_index = _landcover_lookup_indexes(lookup_df)
     for name in names:
         if name == "NoData":
             value = float(nodata_value)
         else:
-            value = float(default_value)
+            value = _lookup_manning_from_landcover_name(
+                name,
+                code_index,
+                name_index,
+                default_value,
+            )
         rows.append(
             {
                 "Table Number": table_value,
@@ -4324,28 +4402,18 @@ def _aligned_grid_values(
 
 def _append_unique_point(
     points: List[Tuple[float, float]],
-    seen: Dict[Tuple[int, int], List[Tuple[float, float]]],
+    seen: set[Tuple[int, int]],
     point: Tuple[float, float],
-    min_distance: float = 0.05,
-) -> bool:
-    cell_size = max(float(min_distance), 1e-9)
+    precision: float = 1000.0,
+) -> None:
     key = (
-        int(math.floor(point[0] / cell_size)),
-        int(math.floor(point[1] / cell_size)),
+        int(round(point[0] * precision)),
+        int(round(point[1] * precision)),
     )
-    min_distance_sq = min_distance * min_distance
-    for grid_x in range(key[0] - 1, key[0] + 2):
-        for grid_y in range(key[1] - 1, key[1] + 2):
-            for existing in seen.get((grid_x, grid_y), []):
-                if (
-                    (existing[0] - point[0]) ** 2
-                    + (existing[1] - point[1]) ** 2
-                    <= min_distance_sq
-                ):
-                    return False
-    seen.setdefault(key, []).append(point)
+    if key in seen:
+        return
+    seen.add(key)
     points.append(point)
-    return True
 
 
 def _sample_polyline_points(
@@ -4378,8 +4446,7 @@ def _generate_breakline_seed_points(
     near_repeats: int,
 ) -> List[Tuple[float, float]]:
     seed_points: List[Tuple[float, float]] = []
-    seen: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
-    min_distance = max(0.05, near_spacing * 0.05)
+    seen: set[Tuple[int, int]] = set()
 
     for breakline in breaklines:
         for start, end in zip(breakline[:-1], breakline[1:]):
@@ -4399,22 +4466,16 @@ def _generate_breakline_seed_points(
                 px, py = point
                 for repeat in range(0, near_repeats + 1):
                     offset = repeat * near_spacing
-                    candidates = (
-                        [(px, py)]
-                        if repeat == 0
-                        else [
-                            (px + nx * offset, py + ny * offset),
-                            (px - nx * offset, py - ny * offset),
-                        ]
-                    )
+                    candidates = [
+                        (px, py) if repeat == 0 else None,
+                        (px + nx * offset, py + ny * offset),
+                        (px - nx * offset, py - ny * offset),
+                    ]
                     for candidate in candidates:
+                        if candidate is None:
+                            continue
                         if _point_in_ring(candidate, ring):
-                            _append_unique_point(
-                                seed_points,
-                                seen,
-                                candidate,
-                                min_distance=min_distance,
-                            )
+                            _append_unique_point(seed_points, seen, candidate)
     return seed_points
 
 
@@ -4429,21 +4490,12 @@ def _generate_computation_points(
     xs = _aligned_grid_values(xmin, xmax, spacing)
     ys = _aligned_grid_values(ymin, ymax, spacing, descending=True)
     points: List[Tuple[float, float]] = []
-    seen: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
-    min_distance_candidates = [0.05, spacing * 0.005]
-    if breakline_near_spacing:
-        min_distance_candidates.append(breakline_near_spacing * 0.05)
-    min_distance = max(min_distance_candidates)
+    seen: set[Tuple[int, int]] = set()
     for y in ys:
         for x in xs:
             point = (x, y)
             if _point_in_ring(point, ring):
-                _append_unique_point(
-                    points,
-                    seen,
-                    point,
-                    min_distance=min_distance,
-                )
+                _append_unique_point(points, seen, point)
 
     if breaklines and breakline_near_spacing and breakline_near_repeats:
         for point in _generate_breakline_seed_points(
@@ -4452,12 +4504,7 @@ def _generate_computation_points(
             breakline_near_spacing,
             breakline_near_repeats,
         ):
-            _append_unique_point(
-                points,
-                seen,
-                point,
-                min_distance=min_distance,
-            )
+            _append_unique_point(points, seen, point)
 
     if not points:
         raise ValueError(
@@ -5288,10 +5335,7 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
     return summary
 
 
-def sync_geometry_to_source_shapes(
-    config: RasMapperConfig,
-    include_breakline_seed_points: bool = False,
-) -> Dict[str, Any]:
+def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     geom_text = config.geom_path.read_text(encoding="utf-8", errors="replace")
     lines = geom_text.splitlines(True)
 
@@ -5355,7 +5399,7 @@ def sync_geometry_to_source_shapes(
     computation_points = _generate_computation_points(
         perimeter_ring,
         config.mesh_cell_size,
-        breaklines=breaklines if include_breakline_seed_points else None,
+        breaklines=breaklines,
         breakline_near_spacing=config.breakline_near_spacing,
         breakline_near_repeats=config.breakline_near_repeats,
     )
@@ -5451,7 +5495,6 @@ def sync_geometry_to_source_shapes(
         "perimeter_points": len(perimeter_ring),
         "computation_points": len(computation_points),
         "mesh_cell_size": config.mesh_cell_size,
-        "breakline_seed_points_included": include_breakline_seed_points,
         "breakline_counts": [len(coords) for coords in breaklines],
         "boundary_lines": [
             {
@@ -5757,10 +5800,7 @@ def enforce_bank_lines_file_only(config: RasMapperConfig) -> Dict[str, Any]:
         copy_file(config.reference_geom_hdf_src, config.geom_hdf_path)
         hdf_status = "reference_hdf_copied"
 
-    source_sync = sync_geometry_to_source_shapes(
-        config,
-        include_breakline_seed_points=False,
-    )
+    source_sync = sync_geometry_to_source_shapes(config)
 
     region_records = None
     existing_landcover_status = install_existing_landcover_layer(config)
@@ -5810,22 +5850,6 @@ def enforce_bank_lines_file_only(config: RasMapperConfig) -> Dict[str, Any]:
     return summary
 
 
-def _candidate_keys(name: str) -> List[str]:
-    text = str(name).strip()
-    keys = [text.upper(), _normalize_code(text).upper()]
-    if " - " in text:
-        keys.append(text.split(" - ", 1)[0].strip().upper())
-    numeric = []
-    for char in text:
-        if char.isdigit() or char == ".":
-            numeric.append(char)
-        else:
-            break
-    if numeric:
-        keys.append(_normalize_code("".join(numeric)).upper())
-    return [key for key in keys if key]
-
-
 def build_expected_mannings(
     geometry_df: pd.DataFrame,
     lookup_df: pd.DataFrame,
@@ -5847,7 +5871,9 @@ def build_expected_mannings(
         geom_name = str(geom_row["Land Cover Name"]).strip()
         match = None
         for key in _candidate_keys(geom_name):
-            match = code_index.get(key) or name_index.get(key)
+            match = code_index.get(key)
+            if match is None:
+                match = name_index.get(key)
             if match is not None:
                 break
 

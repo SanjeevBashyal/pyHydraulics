@@ -1,4 +1,4 @@
-HEC-RAS 6.7 Beta 4 Development
+HEC-RAS 6.6 September 2024
        1       1       0       0
        0       0
        F
@@ -42,7 +42,7 @@ Job Control Information
   DSS Message Level     =        4
   Write HDF5 File       =        T
   Write DSS File        =        T
-E:\0_Python\pyHydraulics\TURFM\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\Ataturk_v01_Project.dss
+F:\codex_rascommander\rasmapper_v01\results\Ataturk_v01_Project_plan01_run\Ataturk_v01_Project.dss
 Computational Time Window
   Start Date/Time       = 02May2025 0100
   End Date/Time         = 02May2025 0730

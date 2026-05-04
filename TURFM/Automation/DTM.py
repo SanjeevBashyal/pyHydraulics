@@ -812,8 +812,9 @@ class DTMChannelModifier:
         )
         modifier.channel_polygon = poly_gdf.geometry.iloc[0]
 
-        # Generate centerline from banks
+        # Generate the interpolation centerline from bank lines, not from cross-section points.
         modifier.centerline_gdf = DTMChannelModifier.generate_centerline_from_banks(modifier.banks_gdf)
+        modifier.centerline_source = "bank_lines"
 
         # Pre-process cross sections for rapid bracketing & interpolation
         import pandas as pd
@@ -1274,6 +1275,7 @@ class DTMChannelModifier:
             "intermediate_tifs": intermediate_tifs,
             "shared_bounds": [float(value) for value in shared_bounds],
             "blend_type": blend_type,
+            "centerline_source": "bank_lines",
             "bank_offset_m": float(bank_offset_m),
             "full_cross_section_weight_distance_m": float(full_cross_section_weight_distance_m),
             "transition_to_dtm_distance_m": float(transition_to_dtm_distance_m),
@@ -1289,6 +1291,8 @@ class DTMChannelModifier:
                     "cross_section_csv": str(channel["cross_section_csv"]),
                     "bank_shp_path": str(channel["bank_shp_path"]),
                     "dtm_path": str(channel.get("dtm_path", dtm_path)),
+                    "centerline_source": channel.get("centerline_source", "bank_lines"),
+                    "processing_centerline_source": channel.get("processing_centerline_source", "bank_lines"),
                 }
                 for channel in network["channels"]
             ],
@@ -2006,8 +2010,10 @@ class DTMChannelModifier:
                     "dtm_path": Path(channel["dtm_path"]) if channel.get("dtm_path") else None,
                     "banks_gdf": banks_gdf,
                     "centerline": centerline,
+                    "centerline_source": "bank_lines",
                     "processing_banks_gdf": banks_gdf.copy(),
                     "processing_centerline": centerline,
+                    "processing_centerline_source": "bank_lines",
                 }
             )
 
@@ -2030,8 +2036,10 @@ class DTMChannelModifier:
             tributary["processing_centerline"] = DTMChannelModifier.generate_centerline_from_banks(
                 tributary["processing_banks_gdf"]
             ).geometry.iloc[0]
+            tributary["processing_centerline_source"] = "extended_bank_lines"
             if junction.get("extended_centerline") is not None:
                 tributary["processing_centerline"] = junction["extended_centerline"]
+                tributary["processing_centerline_source"] = "bank_line_centerline_extended_to_junction"
 
         if junctions:
             merged_banks_gdf = DTMChannelModifier.build_connected_junction_banklines(channels)
@@ -2589,6 +2597,8 @@ class DTMChannelModifier:
         rows = [
             {
                 "Channel": channel["name"],
+                "CLSource": channel.get("centerline_source", "bank_lines"),
+                "ProcCLSrc": channel.get("processing_centerline_source", "bank_lines"),
                 "geometry": channel["processing_centerline"],
             }
             for channel in channels

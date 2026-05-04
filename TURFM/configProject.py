@@ -83,8 +83,8 @@ class Config:
 
     # Processing Config
     BLEND_TYPE: str = "linear"
-    HECRAS_VERSION: str = "6.7"
-    RAS_EXE_PATH: str = r"C:\Program Files (x86)\HEC\HEC-RAS\6.7 Beta 4\Ras.exe"
+    HECRAS_VERSION: str = "7.0"
+    RAS_EXE_PATH: str = r"C:\Program Files (x86)\HEC\HEC-RAS\7.0\Ras.exe"
     DEM_FILENAME: str = "SET4_27_DTM_070226_R1.tif"
     DTM_INDEX_FILENAME: str = "dtm.csv"
     DTM_DIRNAME: str = "DTMs"
