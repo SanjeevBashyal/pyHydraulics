@@ -1,0 +1,124 @@
+from setuptools import setup, find_packages
+from setuptools.command.build_py import build_py
+import subprocess
+from pathlib import Path
+
+class CustomBuildPy(build_py):
+    def run(self):
+        # Clean up __pycache__ folders
+        root_dir = Path(__file__).parent
+        for pycache_dir in root_dir.rglob('__pycache__'):
+            if pycache_dir.is_dir():
+                for cache_file in pycache_dir.iterdir():
+                    cache_file.unlink()  # Delete each file
+                pycache_dir.rmdir()      # Delete the empty directory
+                print(f"Cleaned up: {pycache_dir}")
+
+        # Skip knowledge base generation on ReadTheDocs (causes build timeout)
+        # and in CI environments where it's not needed
+        import os
+        if os.environ.get('READTHEDOCS') or os.environ.get('CI'):
+            print("Skipping knowledge base generation (docs/CI build detected)")
+        else:
+            # Run the summary_knowledge_bases.py script
+            script_path = Path(__file__).parent / 'ai_tools' / 'generate_llm_knowledge_bases.py'
+            try:
+                subprocess.run(['python', str(script_path)], check=True)
+            except subprocess.CalledProcessError:
+                print("Warning: Knowledge base generation script failed, continuing with build")
+            except FileNotFoundError:
+                print("Warning: Knowledge base generation script not found, continuing with build")
+
+        # Continue with the regular build process
+        super().run()
+
+setup(
+    name="ras-commander",
+    version="0.90.1",
+    packages=find_packages(),
+    include_package_data=True,
+    python_requires='>=3.10',
+    author="William M. Katzenmeyer, P.E., C.F.M.",
+    author_email="info@clbengineering.com",
+    description="A Python library for automating HEC-RAS 6.x operations",
+    long_description=open('README.md').read(),
+    long_description_content_type="text/markdown",
+    url="https://github.com/gpt-cmdr/ras-commander",
+    cmdclass={
+        'build_py': CustomBuildPy,
+    },
+    install_requires=[
+        'h5py',
+        'numpy',
+        'pandas',
+        'requests',
+        'tqdm',
+        'scipy',
+        'xarray',
+        'geopandas',
+        'matplotlib',
+        'shapely',
+        'rasterstats',
+        'rtree',
+        'fsspec>=2023.0.0',  # Required for Atlas14Grid remote HTTP access
+        'pywin32>=227; sys_platform == "win32"',    # Required for RasControl COM interface (Windows only)
+        'psutil>=5.6.6',   # Required for RasControl process management
+        'hms-commander>=0.2.0',  # Atlas 14 DataFrame API with standardized return format
+    ],
+    extras_require={
+        # Remote execution backends (PsExec worker has no extra deps)
+        'remote': [],  # Base remote - PsExec only, no additional deps
+        'remote-ssh': ['paramiko>=3.0'],
+        'remote-winrm': ['pywinrm>=0.4.3'],
+        'remote-docker': ['docker>=6.0'],
+        'remote-aws': ['boto3>=1.28'],
+        'remote-azure': ['azure-identity>=1.14', 'azure-mgmt-compute>=30.0'],
+        'remote-all': [
+            'paramiko>=3.0',
+            'pywinrm>=0.4.3',
+            'docker>=6.0',
+            'boto3>=1.28',
+            'azure-identity>=1.14',
+            'azure-mgmt-compute>=30.0',
+        ],
+        # GUI automation and screenshot capture (Windows only)
+        'gui': ['Pillow>=9.0'],
+        # Precipitation enhancements
+        'precip-huc12': ['pygeohydro>=0.19.0'],  # HUC12 watershed boundaries for Atlas14Variance
+    })
+
+"""
+ras-commander setup.py
+
+This file is used to build and publish the ras-commander package to PyPI.
+
+To build and publish this package, follow these steps:
+
+1. Ensure you have the latest versions of setuptools, wheel, and twine installed:
+   pip install --upgrade setuptools wheel twine
+
+2. Update the version number in ras_commander/__init__.py (if not using automatic versioning)
+
+3. Create source distribution and wheel:
+   python setup.py sdist bdist_wheel
+
+4. Check the distribution:
+   twine check dist/*
+
+5. Upload to Test PyPI (optional):
+   twine upload --repository testpypi dist/*
+
+6. Install from Test PyPI to verify (optional):
+   pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple ras-commander
+
+7. Upload to PyPI:
+   twine upload dist/* --username __token__ --password <your_api_key>
+
+
+8. Install from PyPI to verify:
+   pip install ras-commander
+
+Note: Ensure you have the necessary credentials and access rights to upload to PyPI.
+For more information, visit: https://packaging.python.org/tutorials/packaging-projects/
+
+"""

@@ -1,0 +1,700 @@
+"""
+RasExamples - Manage and load HEC-RAS example projects for testing and development
+
+This module is part of the ras-commander library and uses a centralized logging configuration.
+
+Logging Configuration:
+- The logging is set up in the logging_config.py file.
+- A @log_call decorator is available to automatically log function calls.
+- Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
+- Logs are written to both console and a rotating file handler.
+- The default log file is 'ras_commander.log' in the 'logs' directory.
+- The default log level is INFO.
+
+To use logging in this module:
+1. Use the @log_call decorator for automatic function call logging.
+2. For additional logging, use logger.[level]() calls (e.g., logger.info(), logger.debug()).
+3. Obtain the logger using: logger = logging.getLogger(__name__)
+
+Example:
+    @log_call
+    def my_function():
+        logger = logging.getLogger(__name__)
+        logger.debug("Additional debug information")
+        # Function logic here
+
+
+-----
+
+All of the methods in this class are static and are designed to be used without instantiation.
+
+List of Functions in RasExamples:
+- get_example_projects()
+- list_categories()
+- list_projects()
+- extract_project()
+- is_project_extracted()
+- clean_projects_directory()
+
+"""
+import os
+import sys
+import requests
+import zipfile
+import pandas as pd
+from pathlib import Path
+import shutil
+from typing import Union, List, Optional
+import csv
+from datetime import datetime
+import logging
+import re
+from tqdm import tqdm
+from ras_commander import get_logger
+from ras_commander.LoggingConfig import log_call
+
+logger = get_logger(__name__)
+
+
+def _get_user_data_dir() -> Path:
+    """
+    Get platform-appropriate user data directory for ras-commander.
+
+    This function returns a user-writable directory for storing downloaded
+    example projects and cache files, avoiding permission issues with
+    system-wide package installations.
+
+    Returns:
+        Path: User data directory
+            - Windows: %LOCALAPPDATA%/ras-commander (e.g., C:/Users/name/AppData/Local/ras-commander)
+            - macOS: ~/Library/Application Support/ras-commander
+            - Linux: ~/.local/share/ras-commander (XDG_DATA_HOME if set)
+    """
+    if sys.platform == 'win32':
+        # Windows: Use LOCALAPPDATA
+        base = os.environ.get('LOCALAPPDATA')
+        if base:
+            return Path(base) / 'ras-commander'
+        # Fallback to user home
+        return Path.home() / 'AppData' / 'Local' / 'ras-commander'
+    elif sys.platform == 'darwin':
+        # macOS: Use Application Support
+        return Path.home() / 'Library' / 'Application Support' / 'ras-commander'
+    else:
+        # Linux/Unix: Use XDG_DATA_HOME or ~/.local/share
+        xdg_data = os.environ.get('XDG_DATA_HOME')
+        if xdg_data:
+            return Path(xdg_data) / 'ras-commander'
+        return Path.home() / '.local' / 'share' / 'ras-commander'
+
+class RasExamples:
+    """
+    A class for quickly loading HEC-RAS example projects for testing and development of ras-commander.
+    All methods are class methods, so no initialization is required.
+
+    Storage Locations:
+    - ZIP files and CSV cache: User data directory (writable without admin)
+      - Windows: %LOCALAPPDATA%/ras-commander/examples
+      - macOS: ~/Library/Application Support/ras-commander/examples
+      - Linux: ~/.local/share/ras-commander/examples
+    - Extracted projects: Current working directory / example_projects (or output_path)
+
+    This design ensures RasExamples works in system-wide conda environments
+    without requiring administrator privileges.
+    """
+    base_url = 'https://github.com/HydrologicEngineeringCenter/hec-downloads/releases/download/'
+    valid_versions = [
+            "6.6", "6.5", "6.4.1", "6.3.1", "6.3", "6.2", "6.1", "6.0",
+            "5.0.7", "5.0.6", "5.0.5", "5.0.4", "5.0.3", "5.0.1", "5.0",
+            "4.1", "4.0", "3.1.3", "3.1.2", "3.1.1", "3.0", "2.2"
+        ]
+
+    # User data directory for ZIP files and CSV cache (writable without admin)
+    _user_data_dir = _get_user_data_dir() / 'examples'
+
+    # Legacy directory (package location) - checked for backward compatibility
+    _legacy_dir = Path(__file__).resolve().parent.parent / 'examples'
+
+    # Active examples_dir points to user data directory (for ZIP/CSV storage)
+    examples_dir = _user_data_dir
+
+    # Default projects extraction directory
+    # Note: Evaluated at import time. Use output_path parameter for different location.
+    projects_dir = Path.cwd() / 'example_projects'
+
+    # CSV cache file in user data directory
+    csv_file_path = _user_data_dir / 'example_projects.csv'
+    
+    # Special projects that are not in the main zip file
+    SPECIAL_PROJECTS = {
+        'NewOrleansMetro': 'https://www.hec.usace.army.mil/confluence/rasdocs/hgt/files/latest/299502039/299502111/1/1747692522764/NewOrleansMetroPipesExample.zip',
+        'BeaverLake': 'https://www.hec.usace.army.mil/confluence/rasdocs/hgt/files/latest/299501780/299502090/1/1747692179014/BeaverLake-SWMM-Import-Solution.zip'
+    }
+
+    _folder_df = None
+    _zip_file_path = None
+
+    def __init__(self):
+        """Initialize RasExamples and ensure data is loaded"""
+        self._ensure_initialized()
+
+    @property
+    def folder_df(self):
+        """Access the folder DataFrame"""
+        self._ensure_initialized()
+        return self._folder_df
+
+    def _ensure_initialized(self):
+        """Ensure the class is initialized with required data"""
+        self.projects_dir.mkdir(parents=True, exist_ok=True)
+        if self._folder_df is None:
+            self._load_project_data()
+
+    def _load_project_data(self):
+        """Load project data from CSV if up-to-date, otherwise extract from zip."""
+        logger.debug("Loading project data")
+        self._find_zip_file()
+        
+        if not self._zip_file_path:
+            logger.info("No example projects zip file found. Downloading...")
+            self.get_example_projects()
+        
+        try:
+            zip_modified_time = os.path.getmtime(self._zip_file_path)
+        except FileNotFoundError:
+            logger.error(f"Zip file not found at {self._zip_file_path}.")
+            return
+        
+        if self.csv_file_path.exists():
+            csv_modified_time = os.path.getmtime(self.csv_file_path)
+            
+            if csv_modified_time >= zip_modified_time:
+                logger.info("Loading project data from CSV...")
+                try:
+                    self._folder_df = pd.read_csv(self.csv_file_path)
+                    logger.info(f"Loaded {len(self._folder_df)} projects from CSV.")
+                    return
+                except Exception as e:
+                    logger.error(f"Failed to read CSV file: {e}")
+                    self._folder_df = None
+
+        logger.info("Extracting folder structure from zip file...")
+        self._extract_folder_structure()
+        self._save_to_csv()
+
+    @classmethod
+    def extract_project(cls, project_names: Union[str, List[str]], output_path: Union[str, Path] = None, suffix: Optional[str] = None) -> Union[Path, List[Path]]:
+        """Extract one or more specific HEC-RAS projects from the zip file.
+
+        Args:
+            project_names: Single project name as string or list of project names
+            output_path: Optional path where the project folder will be placed.
+                        Can be a relative path (creates subfolder in current directory)
+                        or an absolute path. If None, uses default 'example_projects' folder.
+            suffix: Optional suffix to append to folder name using format "{project_name}_{suffix}".
+                   If None (default), uses original project name.
+                   Useful for extracting the same project multiple times with different configurations.
+                   Suffix is sanitized to remove special characters.
+                   Example: suffix="aep_30yr" with project "Davis" → "Davis_aep_30yr"
+
+        Returns:
+            Path: Single Path object if one project extracted
+            List[Path]: List of Path objects if multiple projects extracted
+        """
+        logger.debug(f"Extracting projects: {project_names}")
+        
+        # Initialize if needed
+        if cls._folder_df is None:
+            cls._find_zip_file()
+            if not cls._zip_file_path:
+                logger.info("No example projects zip file found. Downloading...")
+                cls.get_example_projects()
+            cls._load_project_data()
+        
+        if isinstance(project_names, str):
+            project_names = [project_names]
+
+        # Determine the output directory
+        if output_path is None:
+            # Use default 'example_projects' folder
+            base_output_path = cls.projects_dir
+        else:
+            # Convert to Path object
+            base_output_path = Path(output_path)
+            # If relative path, make it relative to current working directory
+            if not base_output_path.is_absolute():
+                base_output_path = Path.cwd() / base_output_path
+            # Create the directory if it doesn't exist
+            base_output_path.mkdir(parents=True, exist_ok=True)
+
+        extracted_paths = []
+
+        for project_name in project_names:
+            # Compute final folder name with optional suffix
+            folder_name = cls._get_folder_name(project_name, suffix)
+
+            # Check if this is a special project
+            if project_name in cls.SPECIAL_PROJECTS:
+                try:
+                    special_path = cls._extract_special_project(project_name, base_output_path, suffix)
+                    extracted_paths.append(special_path)
+                    continue
+                except Exception as e:
+                    logger.error(f"Failed to extract special project '{project_name}': {e}")
+                    continue
+
+            # Regular project extraction logic
+            logger.info("----- RasExamples Extracting Project -----")
+            logger.info(f"Extracting project '{project_name}'" + (f" as '{folder_name}'" if suffix else ""))
+            project_path = base_output_path
+            final_folder_path = project_path / folder_name
+
+            if final_folder_path.exists():
+                logger.info(f"Folder '{folder_name}' already exists. Deleting existing folder...")
+                try:
+                    shutil.rmtree(final_folder_path)
+                    logger.info(f"Existing folder '{folder_name}' has been deleted.")
+                except Exception as e:
+                    logger.error(f"Failed to delete existing folder '{folder_name}': {e}")
+                    continue
+
+            project_info = cls._folder_df[cls._folder_df['Project'] == project_name]
+            if project_info.empty:
+                error_msg = f"Project '{project_name}' not found in the zip file."
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            try:
+                with zipfile.ZipFile(cls._zip_file_path, 'r') as zip_ref:
+                    for file in zip_ref.namelist():
+                        parts = Path(file).parts
+                        if len(parts) > 1 and parts[1] == project_name:
+                            # Build path relative to the original project name
+                            original_relative = Path(*parts[1:])
+                            # Replace original project name with folder_name in the path
+                            if len(original_relative.parts) > 0:
+                                new_relative = Path(folder_name) / Path(*original_relative.parts[1:]) if len(original_relative.parts) > 1 else Path(folder_name)
+                            else:
+                                new_relative = Path(folder_name)
+                            extract_path = project_path / new_relative
+                            if file.endswith('/'):
+                                extract_path.mkdir(parents=True, exist_ok=True)
+                            else:
+                                extract_path.parent.mkdir(parents=True, exist_ok=True)
+                                with zip_ref.open(file) as source, open(extract_path, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+
+                logger.info(f"Successfully extracted project '{project_name}' to {final_folder_path}")
+                extracted_paths.append(final_folder_path)
+            except Exception as e:
+                logger.error(f"An error occurred while extracting project '{project_name}': {str(e)}")
+
+        # Return single path if only one project was extracted, otherwise return list
+        return extracted_paths[0] if len(project_names) == 1 else extracted_paths
+
+    @classmethod
+    def _find_zip_file(cls):
+        """
+        Locate the example projects zip file.
+
+        Checks multiple locations in order:
+        1. User data directory (primary location for new downloads)
+        2. Legacy package directory (backward compatibility for existing installations)
+
+        This allows users with existing ZIP files in the old location to continue
+        using them without re-downloading.
+        """
+        # Directories to search (order matters - user data first, then legacy)
+        search_dirs = [cls._user_data_dir, cls._legacy_dir]
+
+        for search_dir in search_dirs:
+            if not search_dir.exists():
+                continue
+
+            for version in cls.valid_versions:
+                potential_zip = search_dir / f"Example_Projects_{version.replace('.', '_')}.zip"
+                if potential_zip.exists():
+                    cls._zip_file_path = potential_zip
+                    if search_dir == cls._legacy_dir:
+                        logger.info(f"Found zip file in legacy location: {cls._zip_file_path}")
+                        logger.info("Note: Future downloads will use user data directory.")
+                    else:
+                        logger.info(f"Found zip file: {cls._zip_file_path}")
+                    return
+
+        logger.warning("No existing example projects zip file found.")
+
+    @classmethod
+    def get_example_projects(cls, version_number='6.6'):
+        """
+        Download and extract HEC-RAS example projects for a specified version.
+
+        Downloads the ZIP file to the user data directory, which is writable
+        without administrator privileges:
+        - Windows: %LOCALAPPDATA%/ras-commander/examples
+        - macOS: ~/Library/Application Support/ras-commander/examples
+        - Linux: ~/.local/share/ras-commander/examples
+
+        Args:
+            version_number: HEC-RAS version (default: '6.6')
+
+        Returns:
+            Path: Directory where projects will be extracted
+        """
+        logger.info(f"Getting example projects for version {version_number}")
+        if version_number not in cls.valid_versions:
+            error_msg = f"Invalid version number. Valid versions are: {', '.join(cls.valid_versions)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        zip_url = f"{cls.base_url}1.0.33/Example_Projects_{version_number.replace('.', '_')}.zip"
+
+        # Create user data directory for ZIP storage (writable without admin)
+        try:
+            cls._user_data_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Using user data directory: {cls._user_data_dir}")
+        except PermissionError as e:
+            # This should not happen with user data directory, but handle gracefully
+            logger.error(f"Cannot create user data directory {cls._user_data_dir}: {e}")
+            logger.error("Please check your system permissions or set RasExamples._user_data_dir manually.")
+            raise
+
+        cls._zip_file_path = cls._user_data_dir / f"Example_Projects_{version_number.replace('.', '_')}.zip"
+
+        if not cls._zip_file_path.exists():
+            logger.info(f"Downloading HEC-RAS Example Projects from {zip_url}.")
+            logger.info(f"Saving to: {cls._zip_file_path}")
+            logger.info("The file is over 400 MB, so it may take a few minutes to download....")
+            try:
+                response = requests.get(zip_url, stream=True)
+                response.raise_for_status()
+                with open(cls._zip_file_path, 'wb') as file:
+                    shutil.copyfileobj(response.raw, file)
+                logger.info(f"Downloaded to {cls._zip_file_path}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to download the zip file: {e}")
+                raise
+        else:
+            logger.info("HEC-RAS Example Projects zip file already exists. Skipping download.")
+
+        cls._load_project_data()
+        return cls.projects_dir
+
+    @classmethod
+    def _load_project_data(cls):
+        """Load project data from CSV if up-to-date, otherwise extract from zip."""
+        logger.debug("Loading project data")
+        
+        try:
+            zip_modified_time = os.path.getmtime(cls._zip_file_path)
+        except FileNotFoundError:
+            logger.error(f"Zip file not found at {cls._zip_file_path}.")
+            return
+        
+        if cls.csv_file_path.exists():
+            csv_modified_time = os.path.getmtime(cls.csv_file_path)
+            
+            if csv_modified_time >= zip_modified_time:
+                logger.info("Loading project data from CSV...")
+                try:
+                    cls._folder_df = pd.read_csv(cls.csv_file_path)
+                    logger.info(f"Loaded {len(cls._folder_df)} projects from CSV.")
+                    return
+                except Exception as e:
+                    logger.error(f"Failed to read CSV file: {e}")
+                    cls._folder_df = None
+
+        logger.info("Extracting folder structure from zip file...")
+        cls._extract_folder_structure()
+        cls._save_to_csv()
+
+    @classmethod
+    def _extract_folder_structure(cls):
+        """
+        Extract folder structure from the zip file.
+
+        Populates folder_df with category and project information.
+        """
+        folder_data = []
+        try:
+            with zipfile.ZipFile(cls._zip_file_path, 'r') as zip_ref:
+                for file in zip_ref.namelist():
+                    parts = Path(file).parts
+                    if len(parts) > 1:
+                        folder_data.append({
+                            'Category': parts[0],
+                            'Project': parts[1]
+                        })
+        
+            cls._folder_df = pd.DataFrame(folder_data).drop_duplicates()
+            logger.info(f"Extracted {len(cls._folder_df)} projects.")
+            logger.debug(f"folder_df:\n{cls._folder_df}")
+        except zipfile.BadZipFile:
+            logger.error(f"The file {cls._zip_file_path} is not a valid zip file.")
+            cls._folder_df = pd.DataFrame(columns=['Category', 'Project'])
+        except Exception as e:
+            logger.error(f"An error occurred while extracting the folder structure: {str(e)}")
+            cls._folder_df = pd.DataFrame(columns=['Category', 'Project'])
+
+    @classmethod
+    def _save_to_csv(cls):
+        """Save the extracted folder structure to CSV file in user data directory."""
+        if cls._folder_df is not None and not cls._folder_df.empty:
+            try:
+                # Ensure parent directory exists
+                cls.csv_file_path.parent.mkdir(parents=True, exist_ok=True)
+                cls._folder_df.to_csv(cls.csv_file_path, index=False)
+                logger.info(f"Saved project data to {cls.csv_file_path}")
+            except Exception as e:
+                logger.error(f"Failed to save project data to CSV: {e}")
+        else:
+            logger.warning("No folder data to save to CSV.")
+
+    @classmethod
+    def list_categories(cls):
+        """
+        List all categories of example projects.
+        """
+        if cls._folder_df is None or 'Category' not in cls._folder_df.columns:
+            logger.warning("No categories available. Make sure the zip file is properly loaded.")
+            return []
+        categories = cls._folder_df['Category'].unique()
+        logger.info(f"Available categories: {', '.join(categories)}")
+        return categories.tolist()
+
+    @classmethod
+    def list_projects(cls, category=None):
+        """
+        List all projects or projects in a specific category.
+        
+        Note: Special projects (NewOrleansMetro, BeaverLake) are also available but not listed
+        in categories as they are downloaded separately.
+        """
+        if cls._folder_df is None:
+            logger.warning("No projects available. Make sure the zip file is properly loaded.")
+            return []
+        if category:
+            projects = cls._folder_df[cls._folder_df['Category'] == category]['Project'].unique()
+            logger.info(f"Projects in category '{category}': {', '.join(projects)}")
+        else:
+            projects = cls._folder_df['Project'].unique()
+            # Add special projects to the list
+            all_projects = list(projects) + list(cls.SPECIAL_PROJECTS.keys())
+            logger.info(f"All available projects: {', '.join(all_projects)}")
+            return all_projects
+        return projects.tolist()
+
+    @classmethod
+    def is_project_extracted(cls, project_name):
+        """
+        Check if a specific project is already extracted.
+        """
+        project_path = cls.projects_dir / project_name
+        is_extracted = project_path.exists()
+        logger.info(f"Project '{project_name}' extracted: {is_extracted}")
+        return is_extracted
+
+    @classmethod
+    def clean_projects_directory(cls):
+        """Remove all extracted projects from the example_projects directory."""
+        logger.info(f"Cleaning projects directory: {cls.projects_dir}")
+        if cls.projects_dir.exists():
+            try:
+                shutil.rmtree(cls.projects_dir)
+                logger.info("All projects have been removed.")
+            except Exception as e:
+                logger.error(f"Failed to remove projects directory: {e}")
+        else:
+            logger.warning("Projects directory does not exist.")
+        cls.projects_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Projects directory cleaned and recreated.")
+
+    @classmethod
+    def download_fema_ble_model(cls, huc8, output_dir=None):
+        """
+        Download a FEMA Base Level Engineering (BLE) model for a given HUC8.
+
+        Args:
+            huc8 (str): The 8-digit Hydrologic Unit Code (HUC) for the desired watershed.
+            output_dir (str, optional): The directory to save the downloaded files. If None, uses the current working directory.
+
+        Returns:
+            str: The path to the downloaded and extracted model directory.
+
+        Note:
+            This method downloads the BLE model from the FEMA website and extracts it to the specified directory.
+        """
+        # Method implementation...
+
+    @classmethod
+    def _make_safe_folder_name(cls, name: str) -> str:
+        """
+        Convert a string to a safe folder name by replacing unsafe characters with underscores.
+        """
+        safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', name)
+        logger.debug(f"Converted '{name}' to safe folder name '{safe_name}'")
+        return safe_name
+
+    @classmethod
+    def _get_folder_name(cls, project_name: str, suffix: str = None) -> str:
+        """
+        Compute the folder name for project extraction.
+
+        Args:
+            project_name: Original project name from zip
+            suffix: Optional suffix to append
+
+        Returns:
+            Final folder name: "{project_name}" if suffix is None,
+            else "{project_name}_{sanitized_suffix}"
+        """
+        if suffix is None:
+            return project_name
+
+        safe_suffix = cls._make_safe_folder_name(suffix)
+        return f"{project_name}_{safe_suffix}"
+
+    @classmethod
+    def _download_file_with_progress(cls, url: str, dest_folder: Path, file_size: int) -> Path:
+        """
+        Download a file from a URL to a specified destination folder with progress bar.
+        """
+        local_filename = dest_folder / url.split('/')[-1]
+        try:
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()
+                with open(local_filename, 'wb') as f, tqdm(
+                    desc=local_filename.name,
+                    total=file_size,
+                    unit='iB',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                ) as progress_bar:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        size = f.write(chunk)
+                        progress_bar.update(size)
+            logger.info(f"Successfully downloaded {url} to {local_filename}")
+            return local_filename
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed for {url}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to write file {local_filename}: {e}")
+            raise
+
+    @classmethod
+    def _convert_size_to_bytes(cls, size_str: str) -> int:
+        """
+        Convert a human-readable file size to bytes.
+        """
+        units = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
+        size_str = size_str.upper().replace(' ', '')
+        if not re.match(r'^\d+(\.\d+)?[BKMGT]B?$', size_str):
+            raise ValueError(f"Invalid size string: {size_str}")
+        
+        number, unit = float(re.findall(r'[\d\.]+', size_str)[0]), re.findall(r'[BKMGT]B?', size_str)[0]
+        return int(number * units[unit])
+
+    @classmethod
+    def _extract_special_project(cls, project_name: str, output_path: Path = None, suffix: Optional[str] = None) -> Path:
+        """
+        Download and extract special projects that are not in the main zip file.
+
+        Args:
+            project_name: Name of the special project ('NewOrleansMetro' or 'BeaverLake')
+            output_path: Base output directory path. If None, uses cls.projects_dir
+            suffix: Optional suffix to append to folder name using format "{project_name}_{suffix}".
+
+        Returns:
+            Path: Path to the extracted project directory
+
+        Raises:
+            ValueError: If the project is not a recognized special project
+        """
+        if project_name not in cls.SPECIAL_PROJECTS:
+            raise ValueError(f"'{project_name}' is not a recognized special project")
+
+        # Compute final folder name with optional suffix
+        folder_name = cls._get_folder_name(project_name, suffix)
+
+        logger.info(f"----- RasExamples Extracting Special Project -----")
+        logger.info(f"Extracting special project '{project_name}'" + (f" as '{folder_name}'" if suffix else ""))
+
+        # Use provided output_path or default
+        base_path = output_path if output_path else cls.projects_dir
+
+        # Create the project directory with suffix-aware folder name
+        project_path = base_path / folder_name
+        
+        # Check if already exists
+        if project_path.exists():
+            logger.info(f"Folder '{folder_name}' already exists. Deleting existing folder...")
+            try:
+                shutil.rmtree(project_path)
+                logger.info(f"Existing folder '{folder_name}' has been deleted.")
+            except Exception as e:
+                logger.error(f"Failed to delete existing folder '{folder_name}': {e}")
+                raise
+
+        # Create the project directory
+        project_path.mkdir(parents=True, exist_ok=True)
+
+        # Download the zip file
+        url = cls.SPECIAL_PROJECTS[project_name]
+        zip_file_path = base_path / f"{folder_name}_temp.zip"
+        
+        logger.info(f"Downloading special project from: {url}")
+        logger.info("This may take a few moments...")
+        
+        try:
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
+            
+            # Get total file size if available
+            total_size = int(response.headers.get('content-length', 0))
+            
+            # Download with progress bar
+            with open(zip_file_path, 'wb') as file:
+                if total_size > 0:
+                    with tqdm(
+                        desc=f"Downloading {project_name}",
+                        total=total_size,
+                        unit='iB',
+                        unit_scale=True,
+                        unit_divisor=1024,
+                    ) as progress_bar:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            size = file.write(chunk)
+                            progress_bar.update(size)
+                else:
+                    # No content length, download without progress bar
+                    for chunk in response.iter_content(chunk_size=8192):
+                        file.write(chunk)
+            
+            logger.info(f"Downloaded special project zip file to {zip_file_path}")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to download special project '{project_name}': {e}")
+            if zip_file_path.exists():
+                zip_file_path.unlink()
+            raise
+        
+        # Extract the zip file directly to the project directory
+        try:
+            with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+                # Extract directly to the project directory (no internal folder structure)
+                zip_ref.extractall(project_path)
+            logger.info(f"Successfully extracted special project '{project_name}' to {project_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to extract special project '{project_name}': {e}")
+            if project_path.exists():
+                shutil.rmtree(project_path)
+            raise
+        finally:
+            # Clean up the temporary zip file
+            if zip_file_path.exists():
+                zip_file_path.unlink()
+                logger.debug(f"Removed temporary zip file: {zip_file_path}")
+        
+        return project_path

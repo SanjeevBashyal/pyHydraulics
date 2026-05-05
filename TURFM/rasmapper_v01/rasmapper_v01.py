@@ -11,6 +11,7 @@ site-specific file names and paths.
 from __future__ import annotations
 
 import argparse
+import csv
 import inspect
 import json
 import math
@@ -23,7 +24,7 @@ import textwrap
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -93,6 +94,7 @@ class CrossSectionInfo:
     points: List[Tuple[float, float]]
     mean_point: Tuple[float, float]
     mean_z: float
+    xyz_points: List[Tuple[float, float, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,34 @@ class CrossSectionGroup:
     source_path: Path
     copy_path: Path
     sections: List[CrossSectionInfo]
+
+
+@dataclass(frozen=True)
+class StructureConnection:
+    name: str
+    structure_type: str
+    line: List[Tuple[float, float]]
+    rise: float
+    span: Optional[float]
+    culvert_length: float
+    upstream_invert: float
+    downstream_invert: float
+    deck_distance: float
+    deck_width: float
+    deck_weir: float
+    deck_skew: float
+    deck_max: float
+    culvert_mannings: float
+    culvert_bottom_mannings: float
+    entrance_loss: float
+    exit_loss: float
+    inlet_type: int
+    outlet_type: int
+    num_barrels: int
+    opening_offset: float
+    barrel_center_spacing: Optional[float]
+    shape_code: int
+    htab_hwmax: float
 
 
 @dataclass(frozen=True)
@@ -118,6 +148,7 @@ class RasMapperConfig:
     dss_name: str = "boundary.dss"
     cross_section_name: Any = "cross_sections.csv"
     junction_bc_csv_name: Optional[str] = None
+    structure_csv_name: Optional[str] = None
     landcover_name: str = "landcover.shp"
     existing_landcover_tif_name: Optional[str] = None
     existing_landcover_hdf_name: Optional[str] = None
@@ -133,6 +164,7 @@ class RasMapperConfig:
     breakline_near_repeats: int = 5
     breakline_far_spacing: float = 3.0
     landcover_cell_size: float = 2.0
+    create_landcover_with_rasmapper_gui: bool = True
     landcover_nodata_manning: float = 0.025
     region_default_manning: float = 0.025
     boundary_offset_distance: float = 1.0
@@ -143,6 +175,9 @@ class RasMapperConfig:
     junction_bc_name: str = "junction BC"
     junction_snap_tolerance: float = 100.0
     branch_connectivity_threshold: float = 0.25
+    slope_min_cross_section_distance: float = 30.0
+    slope_min_value: float = 0.0001
+    slope_fallback_value: float = 0.0005
     unsteady_number: str = "01"
     plan_number: str = "01"
     template_unsteady_name: Optional[str] = None
@@ -281,6 +316,12 @@ class RasMapperConfig:
         return _source_path(self.files_root, self.junction_bc_csv_name)
 
     @property
+    def structure_csv_src(self) -> Optional[Path]:
+        if not self.structure_csv_name:
+            return None
+        return _source_path(self.files_root, self.structure_csv_name)
+
+    @property
     def landcover_src(self) -> Path:
         return self.files_root / self.landcover_name
 
@@ -348,6 +389,12 @@ class RasMapperConfig:
         return self.boundary_dir / Path(self.junction_bc_csv_src).name
 
     @property
+    def structure_csv_copy(self) -> Optional[Path]:
+        if not self.structure_csv_src:
+            return None
+        return self.boundary_dir / "Structures" / Path(self.structure_csv_src).name
+
+    @property
     def terrain_hdf(self) -> Path:
         return self.terrain_dir / (Path(self.dtm_name).stem + ".hdf")
 
@@ -391,7 +438,7 @@ class RasMapperConfig:
 
     @property
     def landcover_hdf(self) -> Path:
-        return self.land_classification_dir / "LandCoverTable.hdf"
+        return self.land_classification_dir / "LandCover.hdf"
 
     @property
     def existing_landcover_tif_src(self) -> Optional[Path]:
@@ -442,7 +489,7 @@ class RasMapperConfig:
     def active_landcover_map_hdf(self) -> Optional[Path]:
         if self.has_existing_landcover_layer:
             return self.existing_landcover_hdf_copy
-        return None
+        return self.landcover_hdf
 
     @property
     def landcover_mannings_raster(self) -> Path:
@@ -556,6 +603,66 @@ def _source_path(root: Path, value: str) -> Path:
     return (root / path).resolve()
 
 
+def _normalize_dbf_encoding(value: str) -> str:
+    text = str(value).strip().strip('"').strip("'")
+    if not text:
+        return ""
+    aliases = {
+        "1252": "cp1252",
+        "1254": "cp1254",
+        "ansi 1252": "cp1252",
+        "windows-1252": "cp1252",
+        "windows-1254": "cp1254",
+    }
+    return aliases.get(text.lower(), text)
+
+
+def _shapefile_encoding_candidates(shp_path: Path) -> List[str]:
+    candidates: List[str] = []
+    cpg_path = shp_path.with_suffix(".cpg")
+    if cpg_path.exists():
+        cpg_text = cpg_path.read_text(
+            encoding="ascii",
+            errors="ignore",
+        ).strip()
+        cpg_encoding = _normalize_dbf_encoding(cpg_text)
+        if cpg_encoding:
+            candidates.append(cpg_encoding)
+    for encoding in ("utf-8", "cp1254", "cp1252", "iso-8859-9", "latin1"):
+        if encoding not in candidates:
+            candidates.append(encoding)
+    return candidates
+
+
+def _read_shapefile_records(
+    shp_path: Path,
+) -> Tuple[List[str], List[Any], str]:
+    last_error: Optional[Exception] = None
+    for encoding in _shapefile_encoding_candidates(shp_path):
+        try:
+            with shapefile.Reader(str(shp_path), encoding=encoding) as reader:
+                field_names = [field[0] for field in reader.fields[1:]]
+                records = list(reader.records())
+            return field_names, records, encoding
+        except UnicodeDecodeError as exc:
+            last_error = exc
+
+    with shapefile.Reader(
+        str(shp_path),
+        encoding=_shapefile_encoding_candidates(shp_path)[0],
+        encodingErrors="replace",
+    ) as reader:
+        field_names = [field[0] for field in reader.fields[1:]]
+        records = list(reader.records())
+    LOGGER.warning(
+        "Read shapefile DBF with replacement characters after decode error: "
+        "%s (%s)",
+        shp_path,
+        last_error,
+    )
+    return field_names, records, "replace"
+
+
 def _as_config_list(value: Any) -> List[str]:
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value if str(item).strip()]
@@ -586,6 +693,7 @@ def load_study_area_overrides(config_json: Path) -> Dict[str, Any]:
         "gdal_grid_exe",
         "existing_landcover_tif_name",
         "existing_landcover_hdf_name",
+        "structure_csv_name",
     }
     for key, value in raw.items():
         if key in path_fields:
@@ -619,7 +727,26 @@ def resolve_storage_area_name(
     lines: Optional[Sequence[str]] = None,
 ) -> str:
     if config.storage_area_name:
-        return config.storage_area_name
+        name = str(config.storage_area_name).strip()
+        if len(name) <= 16:
+            return name
+        flow_area_name = str(config.flow_area_name).strip()
+        if flow_area_name and len(flow_area_name) <= 16:
+            LOGGER.warning(
+                "Storage/2D area name '%s' is longer than HEC-RAS HDF "
+                "name storage allows; using flow_area_name '%s' instead.",
+                name,
+                flow_area_name,
+            )
+            return flow_area_name
+        shortened = name[:16]
+        LOGGER.warning(
+            "Storage/2D area name '%s' is longer than HEC-RAS HDF name "
+            "storage allows; truncating to '%s'.",
+            name,
+            shortened,
+        )
+        return shortened
 
     if lines is not None:
         parsed = _parse_storage_area_name(lines)
@@ -636,7 +763,13 @@ def resolve_storage_area_name(
         if parsed:
             return parsed
 
-    return f"{config.perimeter_src.stem}Perimeter"
+    fallback = f"{config.perimeter_src.stem}Perimeter"
+    if len(fallback) > 16:
+        flow_area_name = str(config.flow_area_name).strip()
+        if flow_area_name and len(flow_area_name) <= 16:
+            return flow_area_name
+        return fallback[:16]
+    return fallback
 
 
 def resolve_hdf_2d_area_group(
@@ -665,17 +798,8 @@ def resolve_hdf_2d_area_group(
         if candidate in area_group:
             return f"{base_root}/{candidate}"
 
-    if "Attributes" in area_group and (
-        "Cell Info" in area_group or "Cell Points" in area_group
-    ):
-        attrs = area_group["Attributes"][:]
-        names = [
-            _decode_hdf_bytes(row["Name"])
-            for row in attrs
-            if "Name" in attrs.dtype.names
-        ]
-        if not names or any(name in candidates for name in names) or len(attrs) == 1:
-            return base_root
+    if "Cell Points" in area_group and "Attributes" in area_group:
+        return base_root
 
     available = list(area_group.keys())
     if len(available) == 1:
@@ -708,6 +832,8 @@ def validate_inputs(
     required.extend(config.cross_section_srcs)
     if config.junction_bc_csv_src is not None:
         required.append(config.junction_bc_csv_src)
+    if config.structure_csv_src is not None:
+        required.append(config.structure_csv_src)
     if require_reference_geometry:
         required.extend(
             [
@@ -862,8 +988,8 @@ def load_polygon_rings(shp_path: Path) -> List[List[Tuple[float, float]]]:
 def load_polyline_features(
     shp_path: Path,
 ) -> List[Tuple[Dict[str, Any], List[Tuple[float, float]]]]:
-    with shapefile.Reader(str(shp_path)) as reader:
-        field_names = [field[0] for field in reader.fields[1:]]
+    field_names, _, encoding = _read_shapefile_records(shp_path)
+    with shapefile.Reader(str(shp_path), encoding=encoding) as reader:
         features = []
         for shape_record in reader.iterShapeRecords():
             record = dict(zip(field_names, shape_record.record))
@@ -966,6 +1092,22 @@ def load_cross_sections(csv_path: Path) -> List[CrossSectionInfo]:
         points = _dedupe_consecutive_points(
             list(zip(group["X"].astype(float), group["Y"].astype(float)))
         )
+        raw_xyz_points = [
+            (float(row.X), float(row.Y), float(row.Z))
+            for row in group[["X", "Y", "Z"]].itertuples(index=False)
+        ]
+        xyz_points: List[Tuple[float, float, float]] = []
+        for point in raw_xyz_points:
+            if xyz_points:
+                prev = xyz_points[-1]
+                if (
+                    abs(prev[0] - point[0]) <= 1e-9
+                    and abs(prev[1] - point[1]) <= 1e-9
+                ):
+                    if point[2] < prev[2]:
+                        xyz_points[-1] = point
+                    continue
+            xyz_points.append(point)
         xs = [pt[0] for pt in points]
         ys = [pt[1] for pt in points]
         sections.append(
@@ -975,6 +1117,7 @@ def load_cross_sections(csv_path: Path) -> List[CrossSectionInfo]:
                 points=points,
                 mean_point=(sum(xs) / len(xs), sum(ys) / len(ys)),
                 mean_z=float(group["Z"].astype(float).mean()),
+                xyz_points=xyz_points,
             )
         )
 
@@ -1002,6 +1145,248 @@ def estimate_normal_depth_slope(
     dz = abs(upstream_neighbor.mean_z - downstream.mean_z)
     slope = dz / distance if distance else 0.0005
     return max(slope, 0.0001)
+
+
+def _section_channel_point(
+    section: CrossSectionInfo,
+    breaklines: Sequence[Sequence[Tuple[float, float]]],
+) -> Dict[str, Any]:
+    xyz_points = section.xyz_points or [
+        (section.mean_point[0], section.mean_point[1], section.mean_z)
+    ]
+    if not xyz_points:
+        return {
+            "x": section.mean_point[0],
+            "y": section.mean_point[1],
+            "z": section.mean_z,
+            "method": "mean_fallback",
+            "station": section.station_label,
+            "bank_intersections": 0,
+        }
+
+    try:
+        from shapely.geometry import LineString, MultiPoint, Point
+    except ImportError:
+        lowest = min(xyz_points, key=lambda item: item[2])
+        return {
+            "x": lowest[0],
+            "y": lowest[1],
+            "z": lowest[2],
+            "method": "full_xs_lowest_no_shapely",
+            "station": section.station_label,
+            "bank_intersections": 0,
+        }
+
+    section_line = LineString([(x, y) for x, y, _ in xyz_points])
+    if section_line.length <= 0.0:
+        lowest = min(xyz_points, key=lambda item: item[2])
+        return {
+            "x": lowest[0],
+            "y": lowest[1],
+            "z": lowest[2],
+            "method": "full_xs_lowest_zero_length",
+            "station": section.station_label,
+            "bank_intersections": 0,
+        }
+
+    intersection_distances: List[float] = []
+    for breakline in breaklines:
+        if len(breakline) < 2:
+            continue
+        intersection = section_line.intersection(LineString(breakline))
+        geometries: List[Any]
+        if intersection.is_empty:
+            continue
+        if isinstance(intersection, Point):
+            geometries = [intersection]
+        elif isinstance(intersection, MultiPoint):
+            geometries = list(intersection.geoms)
+        elif hasattr(intersection, "geoms"):
+            geometries = list(intersection.geoms)
+        else:
+            geometries = [intersection]
+        for geom in geometries:
+            if isinstance(geom, Point):
+                intersection_distances.append(float(section_line.project(geom)))
+
+    candidate_points = xyz_points
+    method = "full_xs_lowest"
+    if len(intersection_distances) >= 2:
+        left = min(intersection_distances)
+        right = max(intersection_distances)
+        between = []
+        for x, y, z in xyz_points:
+            distance = float(section_line.project(Point(x, y)))
+            if left <= distance <= right:
+                between.append((x, y, z))
+        if between:
+            candidate_points = between
+            method = "between_breakline_intersections_lowest"
+
+    lowest = min(candidate_points, key=lambda item: item[2])
+    return {
+        "x": lowest[0],
+        "y": lowest[1],
+        "z": lowest[2],
+        "method": method,
+        "station": section.station_label,
+        "bank_intersections": len(intersection_distances),
+        "candidate_point_count": len(candidate_points),
+    }
+
+
+def estimate_channel_slope(
+    sections: Sequence[CrossSectionInfo],
+    breaklines: Sequence[Sequence[Tuple[float, float]]],
+    *,
+    mode: str,
+    min_distance: float,
+    min_slope: float,
+    fallback_slope: float,
+) -> Dict[str, Any]:
+    if len(sections) < 2:
+        return {
+            "slope": fallback_slope,
+            "status": "fallback_insufficient_sections",
+            "mode": mode,
+        }
+
+    if mode == "upstream":
+        base = sections[0]
+        candidates = sections[1:]
+    elif mode == "downstream":
+        base = sections[-1]
+        candidates = list(reversed(sections[:-1]))
+    else:
+        raise ValueError(f"Unsupported slope mode: {mode}")
+
+    base_point = _section_channel_point(base, breaklines)
+    skipped: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_point = _section_channel_point(candidate, breaklines)
+        dx = candidate_point["x"] - base_point["x"]
+        dy = candidate_point["y"] - base_point["y"]
+        distance = math.hypot(dx, dy)
+        if distance < min_distance:
+            skipped.append(
+                {
+                    "station": candidate.station_label,
+                    "distance": distance,
+                    "reason": "below_min_distance",
+                }
+            )
+            continue
+        dz = abs(float(base_point["z"]) - float(candidate_point["z"]))
+        raw_slope = dz / distance if distance > 0.0 else fallback_slope
+        return {
+            "slope": max(raw_slope, min_slope),
+            "raw_slope": raw_slope,
+            "status": "computed",
+            "mode": mode,
+            "base_station": base.station_label,
+            "candidate_station": candidate.station_label,
+            "base_point": base_point,
+            "candidate_point": candidate_point,
+            "distance": distance,
+            "vertical_drop": dz,
+            "min_distance": min_distance,
+            "skipped": skipped,
+        }
+
+    return {
+        "slope": fallback_slope,
+        "status": "fallback_no_candidate_meets_distance",
+        "mode": mode,
+        "base_station": base.station_label,
+        "base_point": base_point,
+        "min_distance": min_distance,
+        "skipped": skipped,
+    }
+
+
+def write_slope_audit_pngs(
+    config: RasMapperConfig,
+    sections: Sequence[CrossSectionInfo],
+    breaklines: Sequence[Sequence[Tuple[float, float]]],
+    slope_reports: Sequence[Dict[str, Any]],
+) -> List[Path]:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        LOGGER.warning("matplotlib not available; skipping slope audit plots")
+        return []
+
+    section_by_station = {section.station_label: section for section in sections}
+    output_dir = config.reports_dir / "Slope_Audit"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: List[Path] = []
+
+    for index, report in enumerate(slope_reports, start=1):
+        if "base_point" not in report or "candidate_point" not in report:
+            continue
+        base_section = section_by_station.get(str(report.get("base_station")))
+        candidate_section = section_by_station.get(
+            str(report.get("candidate_station"))
+        )
+        if base_section is None or candidate_section is None:
+            continue
+
+        fig, ax = plt.subplots(figsize=(9, 7))
+        for breakline in breaklines:
+            ax.plot(
+                [pt[0] for pt in breakline],
+                [pt[1] for pt in breakline],
+                color="#d95f02",
+                linewidth=1.2,
+                alpha=0.7,
+            )
+        for section, color, label in (
+            (base_section, "#1b9e77", "Base XS"),
+            (candidate_section, "#7570b3", "Candidate XS"),
+        ):
+            ax.plot(
+                [pt[0] for pt in section.points],
+                [pt[1] for pt in section.points],
+                color=color,
+                linewidth=2.0,
+                label=f"{label} {section.station_label}",
+            )
+
+        base_point = report["base_point"]
+        candidate_point = report["candidate_point"]
+        ax.scatter(
+            [base_point["x"], candidate_point["x"]],
+            [base_point["y"], candidate_point["y"]],
+            color=["#e7298a", "#66a61e"],
+            s=70,
+            zorder=5,
+            label="Selected low points",
+        )
+        ax.plot(
+            [base_point["x"], candidate_point["x"]],
+            [base_point["y"], candidate_point["y"]],
+            color="black",
+            linestyle="--",
+            linewidth=1.2,
+        )
+        ax.set_title(
+            f"{report.get('role', report.get('mode', 'slope'))}: "
+            f"slope={float(report['slope']):.6g}"
+        )
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.axis("equal")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best")
+        label = str(report.get("role") or report.get("mode") or f"slope_{index}")
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
+        output = output_dir / f"{index:02d}_{safe_label}.png"
+        fig.tight_layout()
+        fig.savefig(output, dpi=160)
+        plt.close(fig)
+        outputs.append(output)
+
+    return outputs
 
 
 def load_cross_section_groups(config: RasMapperConfig) -> List[CrossSectionGroup]:
@@ -1210,19 +1595,11 @@ def _decode_hdf_bytes(value: Any) -> str:
 
 
 def normalize_dss_pathname(pathname: str) -> str:
-    clean = str(pathname).strip().strip("/")
-    if not clean:
-        return ""
-    parts = [
-        part.strip()
-        for part in clean.split("/")
-    ]
-    if len(parts) < 6:
-        parts.extend([""] * (6 - len(parts)))
-    parts = parts[:6]
+    parts = [part.strip() for part in str(pathname).strip().split("/")]
+    parts = [part for part in parts if part]
     if not parts:
         return ""
-    return "/" + "/".join(parts) + "/"
+    return "/" + "/".join(parts[:6]) + "/"
 
 
 @log_call
@@ -1367,6 +1744,13 @@ def _register_map_layer(
     layer_elem.set("Type", layer_type)
     layer_elem.set("Checked", "True")
     layer_elem.set("Filename", filename)
+    if layer_type == "LandCoverLayer":
+        layer_elem.set("SelectedParameterForSurfaceFillLabel", "ID")
+        ET.SubElement(
+            layer_elem,
+            "Layer",
+            {"Name": "Classification Polygons", "Type": "LandCoverClassificationLayer"},
+        )
 
     if layer_type in ("RasterLayer", "InterpolatedLayer", "FinalNValueLayer"):
         resample_elem = ET.SubElement(layer_elem, "ResampleMethod")
@@ -1615,24 +1999,24 @@ def install_existing_landcover_layer(config: RasMapperConfig) -> Optional[Dict[s
 
 def _sync_landcover_map_layers(config: RasMapperConfig) -> None:
     _remove_helper_map_layers(config.rasmap_path)
+    active_hdf = config.active_landcover_map_hdf
+    if active_hdf is None or not active_hdf.exists():
+        LOGGER.info(
+            "Skipping LandCover map-layer registration because native HDF "
+            "does not exist yet: %s",
+            active_hdf,
+        )
+        return
 
     for layer_name in ("LandCover", "LandCover Raster"):
         _remove_map_layer(config.rasmap_path, layer_name)
 
-    if config.has_existing_landcover_layer:
-        _register_map_layer(
-            "LandCover",
-            config.active_landcover_map_hdf,
-            "LandCoverLayer",
-            rasmap_path=config.rasmap_path,
-        )
-    else:
-        _register_map_layer(
-            "LandCover",
-            config.landcover_raster,
-            "InterpolatedLayer",
-            rasmap_path=config.rasmap_path,
-        )
+    _register_map_layer(
+        "LandCover",
+        active_hdf,
+        "LandCoverLayer",
+        rasmap_path=config.rasmap_path,
+    )
 
 
 def _ensure_geometry_landcover_association(config: RasMapperConfig) -> bool:
@@ -1732,16 +2116,11 @@ def _ensure_geometry_landcover_association(config: RasMapperConfig) -> bool:
 
 
 def _load_landcover_table(shp_path: Path) -> pd.DataFrame:
-    try:
-        reader = shapefile.Reader(str(shp_path), encoding="utf-8")
-    except LookupError:
-        reader = shapefile.Reader(str(shp_path))
-
-    with reader:
-        field_names = [field[0] for field in reader.fields[1:]]
-        rows: List[Dict[str, Any]] = []
-        for record in reader.records():
-            rows.append(dict(zip(field_names, record)))
+    field_names, records, encoding = _read_shapefile_records(shp_path)
+    LOGGER.info("Read landcover DBF using encoding '%s': %s", encoding, shp_path)
+    rows: List[Dict[str, Any]] = []
+    for record in records:
+        rows.append(dict(zip(field_names, record)))
 
     frame = pd.DataFrame(rows)
     required = {"KodText", "Adi", "Manningn"}
@@ -1832,7 +2211,8 @@ def create_mannings_raster(
 ) -> Path:
     config.landcover_mannings_raster.parent.mkdir(parents=True, exist_ok=True)
 
-    with rasterio.open(config.landcover_raster) as src:
+    source_raster = config.active_landcover_map_tif
+    with rasterio.open(source_raster) as src:
         data = src.read(1)
         profile = src.profile.copy()
 
@@ -1882,12 +2262,6 @@ def create_landcover_layer_hdf(
     lookup_df: pd.DataFrame,
 ) -> Path:
     config.landcover_hdf.parent.mkdir(parents=True, exist_ok=True)
-    legacy_hdf = config.land_classification_dir / "LandCover.hdf"
-    if legacy_hdf != config.landcover_hdf and legacy_hdf.exists():
-        legacy_backup = config.land_classification_dir / "LandCover.hdf.legacy.bak"
-        if legacy_backup.exists():
-            legacy_backup.unlink()
-        legacy_hdf.replace(legacy_backup)
     if config.landcover_hdf.exists():
         config.landcover_hdf.unlink()
 
@@ -1951,6 +2325,480 @@ def create_landcover_layer_hdf(
     return config.landcover_hdf
 
 
+def _decode_hdf_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value).strip()
+
+
+def _landcover_lookup_indexes(
+    lookup_df: pd.DataFrame,
+) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
+    code_index: Dict[str, pd.Series] = {}
+    name_index: Dict[str, pd.Series] = {}
+    for _, row in lookup_df.iterrows():
+        code = str(row["KodText"]).strip()
+        name = str(row["Adi"]).strip()
+        code_index[code.upper()] = row
+        code_index[_normalize_code(code).upper()] = row
+        if name:
+            name_index[name.upper()] = row
+    return code_index, name_index
+
+
+def _match_landcover_lookup_row(
+    landcover_name: Any,
+    lookup_df: pd.DataFrame,
+) -> Optional[pd.Series]:
+    text = str(landcover_name).strip()
+    if not text:
+        return None
+
+    code_index, name_index = _landcover_lookup_indexes(lookup_df)
+    keys = [text.upper(), _normalize_code(text).upper()]
+    if " - " in text:
+        keys.append(text.split(" - ", 1)[0].strip().upper())
+
+    numeric_prefix = []
+    for char in text:
+        if char.isdigit() or char == ".":
+            numeric_prefix.append(char)
+        else:
+            break
+    if numeric_prefix:
+        keys.append(_normalize_code("".join(numeric_prefix)).upper())
+
+    for key in keys:
+        match = code_index.get(key)
+        if match is None:
+            match = name_index.get(key)
+        if match is not None:
+            return match
+    return None
+
+
+def _landcover_manning_value(
+    landcover_name: Any,
+    lookup_df: pd.DataFrame,
+    nodata_value: float,
+    default_value: float,
+) -> float:
+    text = str(landcover_name).strip()
+    if text.lower() == "nodata":
+        return float(nodata_value)
+
+    match = _match_landcover_lookup_row(text, lookup_df)
+    if match is None:
+        return float(default_value)
+    return float(match["Manningn"])
+
+
+def _landcover_hdf_names_and_ids(
+    handle: h5py.File,
+    lookup_df: pd.DataFrame,
+) -> List[Tuple[int, str]]:
+    rows: List[Tuple[int, str]] = []
+
+    if "Raster Map" in handle:
+        for row in handle["Raster Map"][:]:
+            rows.append((int(row["ID"]), _decode_hdf_text(row["Name"])))
+    elif "IDs" in handle and "Names" in handle:
+        ids = handle["IDs"][:]
+        names = handle["Names"][:]
+        for raw_id, raw_name in zip(ids, names):
+            rows.append((int(raw_id), _decode_hdf_text(raw_name)))
+
+    seen = {name for _, name in rows}
+    if "NoData" not in seen:
+        rows.insert(0, (0, "NoData"))
+        seen.add("NoData")
+
+    for _, lookup_row in lookup_df.iterrows():
+        name = str(lookup_row["KodText"]).strip()
+        if name not in seen:
+            rows.append((int(_normalize_code(name)), name))
+            seen.add(name)
+
+    return rows
+
+
+@log_call
+def sync_landcover_hdf_mannings(
+    config: RasMapperConfig,
+    lookup_df: pd.DataFrame,
+) -> Optional[Path]:
+    """
+    Apply KodText/Manningn values to a native RAS LandCover HDF.
+
+    GUI-created LandCover layers are the authoritative source for RAS Mapper,
+    but depending on the dialog/import path the HDF may not contain the same
+    Manning table that the direct writer used. This normalizes both styles:
+    native `Raster Map`/`Variables` and temporary `IDs`/`Names`.
+    """
+    hdf_path = config.active_landcover_map_hdf
+    if hdf_path is None or not hdf_path.exists():
+        return None
+
+    rows: List[Tuple[int, str]]
+    with h5py.File(hdf_path, "r+") as handle:
+        rows = _landcover_hdf_names_and_ids(handle, lookup_df)
+        max_name_len = max(6, min(64, max(len(name) for _, name in rows)))
+
+        raster_dtype = np.dtype(
+            [("ID", "<i4"), ("Name", _bytes_dtype(max_name_len))]
+        )
+        variable_dtype = np.dtype(
+            [
+                ("Name", _bytes_dtype(max_name_len)),
+                ("ManningsN", "<f4"),
+                ("Percent Impervious", "<f4"),
+            ]
+        )
+
+        raster_map = np.zeros(len(rows), dtype=raster_dtype)
+        variables = np.zeros(len(rows), dtype=variable_dtype)
+        existing_percent: Dict[str, float] = {}
+        if "Variables" in handle and "Percent Impervious" in handle["Variables"].dtype.names:
+            for row in handle["Variables"][:]:
+                existing_percent[_decode_hdf_text(row["Name"])] = float(
+                    row["Percent Impervious"]
+                )
+
+        for index, (code, name) in enumerate(rows):
+            raw_name = name.encode("utf-8", errors="ignore")[:max_name_len]
+            raster_map[index]["ID"] = int(code)
+            raster_map[index]["Name"] = raw_name
+            variables[index]["Name"] = raw_name
+            variables[index]["ManningsN"] = _landcover_manning_value(
+                name,
+                lookup_df,
+                nodata_value=config.landcover_nodata_manning,
+                default_value=config.region_default_manning,
+            )
+            variables[index]["Percent Impervious"] = existing_percent.get(
+                name,
+                -9999.0,
+            )
+
+        for dataset_name in ("Raster Map", "Variables"):
+            if dataset_name in handle:
+                del handle[dataset_name]
+        handle.create_dataset("Raster Map", data=raster_map)
+        handle.create_dataset("Variables", data=variables)
+
+        def _set_attr_if_missing(key: str, value: str) -> None:
+            if key in handle.attrs:
+                return
+            raw = value.encode("utf-8", errors="ignore")
+            handle.attrs.create(key, np.array(raw, dtype=f"S{len(raw)}"))
+
+        _set_attr_if_missing("File Type", "HEC Land Cover")
+        _set_attr_if_missing("LC Type", "LandCover")
+        _set_attr_if_missing("Version", "2.0")
+        _set_attr_if_missing("GUID", str(uuid.uuid4()))
+
+    LOGGER.info("Synchronized LandCover HDF Manning values: %s", hdf_path)
+    return hdf_path
+
+
+def _set_clipboard_text(text: str) -> None:
+    import win32clipboard
+
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def _paste_text_to_control(control, text: str) -> None:
+    from pywinauto.keyboard import send_keys
+
+    _set_clipboard_text(text)
+    control.click_input()
+    time.sleep(0.2)
+    send_keys("^a")
+    time.sleep(0.1)
+    send_keys("^v")
+    time.sleep(0.2)
+
+
+def _click_control_physical(control) -> None:
+    import win32api
+    import win32con
+
+    rect = control.rectangle()
+    x = int((rect.left + rect.right) / 2)
+    y = int((rect.top + rect.bottom) / 2)
+    win32api.SetCursorPos((x, y))
+    time.sleep(0.1)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, x, y, 0, 0)
+    time.sleep(0.05)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, x, y, 0, 0)
+
+
+def _close_all_rasmapper_windows() -> int:
+    import win32gui
+
+    closed = 0
+    handles: List[int] = []
+
+    def callback(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            if title == "RAS Mapper":
+                handles.append(hwnd)
+        return True
+
+    win32gui.EnumWindows(callback, None)
+    for hwnd in handles:
+        if Win32Primitives.close_window(hwnd):
+            closed += 1
+            time.sleep(0.5)
+    return closed
+
+
+def _select_landcover_source_in_file_dialog(
+    source_shp: Path,
+    timeout: int,
+) -> None:
+    from pywinauto import Desktop
+    from pywinauto.keyboard import send_keys
+
+    start = time.time()
+    dialog = None
+    while time.time() - start < timeout:
+        candidate = Desktop(backend="win32").window(
+            title="Browse for Land Classification Files"
+        )
+        if candidate.exists():
+            dialog = candidate
+            break
+        time.sleep(0.5)
+
+    if dialog is None:
+        raise RuntimeError("LandCover source file dialog did not open")
+
+    dialog.set_focus()
+    edit = dialog.child_window(class_name="Edit", control_id=1148)
+    _paste_text_to_control(edit, str(source_shp))
+    send_keys("{ENTER}")
+
+    start = time.time()
+    while time.time() - start < timeout:
+        if not dialog.exists():
+            return
+        time.sleep(0.5)
+
+    raise RuntimeError("LandCover source file dialog did not close")
+
+
+def _wait_for_path(path: Path, timeout: int) -> bool:
+    start = time.time()
+    while time.time() - start < timeout:
+        if path.exists():
+            return True
+        time.sleep(1.0)
+    return path.exists()
+
+
+@log_call
+def create_landcover_layer_with_rasmapper_gui(
+    config: RasMapperConfig,
+    timeout: int = 300,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    Create the native RAS Mapper LandCover layer through the GUI dialog.
+
+    This matches the manual HEC-RAS path:
+    Map Layers > Create a New RAS Layer > Land Cover Layer > add source
+    shapefile > set cell size/output file > Create.
+    """
+    lookup_df = (
+        pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+        if config.landcover_lookup_csv.exists()
+        else None
+    )
+
+    if config.has_existing_landcover_layer:
+        existing_status = install_existing_landcover_layer(config)
+        if lookup_df is not None:
+            sync_landcover_hdf_mannings(config, lookup_df)
+        _sync_landcover_map_layers(config)
+        return {
+            "type": "existing_ras_landcover",
+            "created_with_gui": False,
+            "existing_ras_layer": existing_status,
+        }
+
+    if config.landcover_hdf.exists() and config.landcover_raster.exists() and not force:
+        if lookup_df is not None:
+            sync_landcover_hdf_mannings(config, lookup_df)
+        _sync_landcover_map_layers(config)
+        return {
+            "type": "generated_rasmapper_landcover",
+            "created_with_gui": False,
+            "landcover_tif": config.landcover_raster,
+            "landcover_hdf": config.landcover_hdf,
+        }
+
+    if not config.create_landcover_with_rasmapper_gui:
+        if lookup_df is None:
+            lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+        create_landcover_raster(config)
+        create_landcover_layer_hdf(config, lookup_df)
+        sync_landcover_hdf_mannings(config, lookup_df)
+        _sync_landcover_map_layers(config)
+        return {
+            "type": "generated_direct_landcover",
+            "created_with_gui": False,
+            "landcover_tif": config.landcover_raster,
+            "landcover_hdf": config.landcover_hdf,
+        }
+
+    for layer_name in ("LandCover", "LandCover Raster"):
+        _remove_map_layer(config.rasmap_path, layer_name)
+    _close_all_rasmapper_windows()
+    for path in (
+        config.landcover_hdf,
+        config.landcover_raster,
+        config.landcover_hdf.with_suffix(".prj"),
+        config.landcover_raster.with_suffix(".prj"),
+    ):
+        if path.exists():
+            try:
+                path.unlink()
+            except PermissionError:
+                LOGGER.warning("Could not delete locked LandCover file: %s", path)
+
+    ras_obj = init_ras_project(
+        config.project_file,
+        str(config.ras_exe),
+        ras_object="new",
+        load_results_summary=False,
+    )
+
+    process = None
+    hecras_hwnd = None
+    rasmapper_hwnd = None
+    try:
+        process, hecras_hwnd = HecRasElements.launch_and_wait(
+            ras_object=ras_obj,
+            timeout=30,
+        )
+        if not hecras_hwnd:
+            raise RuntimeError("Failed to launch HEC-RAS for LandCover creation")
+
+        if not HecRasElements.click_menu_by_path(
+            hecras_hwnd,
+            ["&GIS Tools", "RAS &Mapper"],
+        ):
+            raise RuntimeError("Could not open RAS Mapper from HEC-RAS")
+
+        mapper = RasMapperElements.wait_for_rasmapper(
+            timeout=timeout,
+            check_interval=2,
+        )
+        if not mapper:
+            raise RuntimeError("RAS Mapper did not open for LandCover creation")
+        rasmapper_hwnd = mapper[0]
+
+        RasMapperElements.click_embedded_dialog_button(
+            dialog_title="Create a New Land Cover Layer",
+            button_text="Cancel",
+            max_clicks=2,
+        )
+        if not RasMapperElements.open_tree_context_menu(["Map Layers"]):
+            raise RuntimeError("Could not open Map Layers context menu")
+        if not RasMapperElements.click_menu_item("Create a New RAS Layer"):
+            raise RuntimeError("Could not click Create a New RAS Layer")
+        if not RasMapperElements.click_menu_item("Land Cover Layer"):
+            raise RuntimeError("Could not click Land Cover Layer")
+
+        dialog = RasMapperElements.wait_for_embedded_window(
+            title="Create a New Land Cover Layer",
+            automation_id="CreateLandCoverLayer",
+            timeout=30,
+        )
+        if dialog is None:
+            raise RuntimeError("Create a New Land Cover Layer dialog did not open")
+
+        add_button = RasMapperElements.find_control(
+            control_type="Button",
+            automation_id="btnAddFile",
+            parent=dialog,
+        )
+        if add_button is None:
+            raise RuntimeError("Could not find LandCover add-file button")
+        _click_control_physical(add_button)
+        _select_landcover_source_in_file_dialog(
+            config.landcover_copy,
+            timeout=min(timeout, 60),
+        )
+
+        dialog = RasMapperElements.wait_for_embedded_window(
+            title="Create a New Land Cover Layer",
+            automation_id="CreateLandCoverLayer",
+            timeout=30,
+        )
+        if dialog is None:
+            raise RuntimeError("LandCover dialog disappeared before Create")
+
+        cell_size = RasMapperElements.find_control(
+            control_type="Edit",
+            automation_id="txtCellSize",
+            parent=dialog,
+        )
+        if cell_size is not None:
+            _paste_text_to_control(cell_size, str(config.landcover_cell_size))
+
+        filename = RasMapperElements.find_control(
+            control_type="Edit",
+            automation_id="txtLCFilename",
+            parent=dialog,
+        )
+        if filename is not None:
+            _paste_text_to_control(filename, str(config.landcover_hdf))
+
+        create_button = RasMapperElements.find_control(
+            control_type="Button",
+            automation_id="btnCreate",
+            parent=dialog,
+        )
+        if create_button is None:
+            raise RuntimeError("Could not find LandCover Create button")
+        create_button.click_input()
+
+        if not _wait_for_path(config.landcover_hdf, timeout=min(timeout, 180)):
+            raise RuntimeError(
+                f"RAS Mapper did not create LandCover HDF: {config.landcover_hdf}"
+            )
+        _wait_for_path(config.landcover_raster, timeout=30)
+        if lookup_df is not None:
+            sync_landcover_hdf_mannings(config, lookup_df)
+        _sync_landcover_map_layers(config)
+        return {
+            "type": "generated_rasmapper_landcover",
+            "created_with_gui": True,
+            "source_shapefile": config.landcover_copy,
+            "landcover_tif": config.landcover_raster,
+            "landcover_hdf": config.landcover_hdf,
+            "cell_size": config.landcover_cell_size,
+        }
+    finally:
+        _close_all_rasmapper_windows()
+        HecRasElements.dismiss_save_prompt(timeout=3)
+        if hecras_hwnd:
+            Win32Primitives.close_window(hecras_hwnd)
+        if process:
+            try:
+                process.wait(timeout=10)
+            except Exception:
+                pass
+
+
 @log_call
 def create_boundary_artifacts(
     config: RasMapperConfig,
@@ -1964,6 +2812,7 @@ def create_boundary_artifacts(
     centroid = _polygon_centroid(perimeter_ring)
     storage_area_name = resolve_storage_area_name(config)
     boundary_rows: List[Dict[str, Any]] = []
+    slope_reports: List[Dict[str, Any]] = []
 
     def upstream_coords(section: CrossSectionInfo) -> List[Tuple[float, float]]:
         limited_section = _limit_boundary_section_to_breaklines(
@@ -1987,6 +2836,7 @@ def create_boundary_artifacts(
         method: str,
         branch_name: str,
         normal_depth_slope: Optional[float] = None,
+        flow_hydrograph_slope: Optional[float] = None,
         dss_path: Optional[str] = None,
     ) -> None:
         interior_side = _point_side_of_line(centroid, section.points)
@@ -2003,6 +2853,7 @@ def create_boundary_artifacts(
                 "reverse_if_interior_should_be_left": interior_side == "right",
                 "method": method,
                 "normal_depth_slope": normal_depth_slope,
+                "flow_hydrograph_slope": flow_hydrograph_slope,
                 "dss_path": dss_path,
                 "offset_distance": config.boundary_offset_distance,
                 "storage_area_name": storage_area_name,
@@ -2019,10 +2870,32 @@ def create_boundary_artifacts(
             group for group in groups if group.name == downstream_group_name
         )
         downstream_section = downstream_group.sections[-1]
-        downstream_slope = estimate_normal_depth_slope(downstream_group.sections)
+        downstream_slope_report = estimate_channel_slope(
+            downstream_group.sections,
+            breaklines,
+            mode="downstream",
+            min_distance=config.slope_min_cross_section_distance,
+            min_slope=config.slope_min_value,
+            fallback_slope=config.slope_fallback_value,
+        )
+        downstream_slope_report["role"] = "downstream_normal_depth"
+        downstream_slope_report["branch"] = downstream_group.name
+        slope_reports.append(downstream_slope_report)
+        downstream_slope = float(downstream_slope_report["slope"])
 
         for index, group in enumerate(groups, start=1):
             section = group.sections[0]
+            upstream_slope_report = estimate_channel_slope(
+                group.sections,
+                breaklines,
+                mode="upstream",
+                min_distance=config.slope_min_cross_section_distance,
+                min_slope=config.slope_min_value,
+                fallback_slope=config.slope_fallback_value,
+            )
+            upstream_slope_report["role"] = f"upstream_flow_hydrograph_{index}"
+            upstream_slope_report["branch"] = group.name
+            slope_reports.append(upstream_slope_report)
             append_row(
                 line_name=f"{config.upstream_bc_name} {index}",
                 role="upstream",
@@ -2030,6 +2903,7 @@ def create_boundary_artifacts(
                 coords=upstream_coords(section),
                 method="Flow Hydrograph",
                 branch_name=group.name,
+                flow_hydrograph_slope=float(upstream_slope_report["slope"]),
                 dss_path=(
                     (dss_paths_by_group or {}).get(group.name)
                     or preferred_dss_path
@@ -2051,7 +2925,30 @@ def create_boundary_artifacts(
             normal_depth_slope=downstream_slope,
         )
     else:
-        downstream_slope = estimate_normal_depth_slope(sections)
+        upstream_slope_report = estimate_channel_slope(
+            sections,
+            breaklines,
+            mode="upstream",
+            min_distance=config.slope_min_cross_section_distance,
+            min_slope=config.slope_min_value,
+            fallback_slope=config.slope_fallback_value,
+        )
+        upstream_slope_report["role"] = "upstream_flow_hydrograph"
+        upstream_slope_report["branch"] = "main"
+        slope_reports.append(upstream_slope_report)
+
+        downstream_slope_report = estimate_channel_slope(
+            sections,
+            breaklines,
+            mode="downstream",
+            min_distance=config.slope_min_cross_section_distance,
+            min_slope=config.slope_min_value,
+            fallback_slope=config.slope_fallback_value,
+        )
+        downstream_slope_report["role"] = "downstream_normal_depth"
+        downstream_slope_report["branch"] = "main"
+        slope_reports.append(downstream_slope_report)
+        downstream_slope = float(downstream_slope_report["slope"])
         append_row(
             line_name=config.upstream_bc_name,
             role="upstream",
@@ -2059,6 +2956,7 @@ def create_boundary_artifacts(
             coords=upstream_coords(sections[0]),
             method="Flow Hydrograph",
             branch_name="main",
+            flow_hydrograph_slope=float(upstream_slope_report["slope"]),
             dss_path=preferred_dss_path,
         )
         append_row(
@@ -2090,6 +2988,7 @@ def create_boundary_artifacts(
     writer.field("rev_l", "N", size=1, decimal=0)
     writer.field("method", "C", size=24)
     writer.field("slope", "F", size=12, decimal=6)
+    writer.field("flow_slope", "F", size=12, decimal=6)
     writer.field("dss_path", "C", size=200)
     writer.field("branch", "C", size=64)
     writer.field("storage", "C", size=32)
@@ -2107,6 +3006,7 @@ def create_boundary_artifacts(
             1 if row["reverse_if_interior_should_be_left"] else 0,
             row["method"],
             row["normal_depth_slope"] or 0.0,
+            row["flow_hydrograph_slope"] or 0.0,
             (row["dss_path"] or "")[:200],
             row["branch"][:64],
             row["storage_area_name"][:32],
@@ -2126,6 +3026,25 @@ def create_boundary_artifacts(
                 {
                     "topology": topology,
                     "boundary_rows": boundary_rows,
+                    "slope_reports": slope_reports,
+                }
+            ),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    slope_pngs = write_slope_audit_pngs(
+        config,
+        sections=sections,
+        breaklines=breaklines,
+        slope_reports=slope_reports,
+    )
+    (config.reports_dir / "slope_audit_summary.json").write_text(
+        json.dumps(
+            _to_jsonable(
+                {
+                    "slope_reports": slope_reports,
+                    "pngs": slope_pngs,
                 }
             ),
             indent=2,
@@ -2426,43 +3345,6 @@ def _parse_dss_path_parts(pathname: str) -> Dict[str, str]:
     }
 
 
-def _read_dss_catalog_for_config(config: RasMapperConfig) -> pd.DataFrame:
-    for catalog_path in (config.dss_catalog_csv, config.dss_catalog_copy):
-        if catalog_path.exists():
-            if catalog_path.suffix.lower() == ".csv":
-                return pd.read_csv(catalog_path, dtype=str).fillna("")
-            return parse_dss_catalog(catalog_path)
-    return pd.DataFrame()
-
-
-def resolve_dss_path_from_catalog(
-    config: RasMapperConfig,
-    pathname: str,
-) -> str:
-    normalized = normalize_dss_pathname(pathname)
-    parts = _parse_dss_path_parts(normalized)
-    if parts["D"]:
-        return normalized
-
-    catalog = _read_dss_catalog_for_config(config)
-    required_columns = {"A", "B", "C", "D", "E", "F", "pathname"}
-    if catalog.empty or not required_columns.issubset(catalog.columns):
-        return normalized
-
-    matches = catalog[
-        (catalog["A"].astype(str) == parts["A"])
-        & (catalog["B"].astype(str) == parts["B"])
-        & (catalog["C"].astype(str) == parts["C"])
-        & (catalog["E"].astype(str).str.upper() == parts["E"].upper())
-        & (catalog["F"].astype(str).str.upper() == parts["F"].upper())
-        & (catalog["D"].astype(str).str.strip() != "")
-    ]
-    if matches.empty:
-        return normalized
-
-    return normalize_dss_pathname(str(matches.iloc[0]["pathname"]))
-
-
 def _parse_dss_d_part_date(d_part: str) -> datetime:
     clean = d_part.strip()
     for date_format in ("%d%b%Y", "%d%B%Y", "%d%b%y", "%d%B%y"):
@@ -2514,12 +3396,6 @@ def resolve_plan_simulation_date(
         }
 
     dss_parts = _parse_dss_path_parts(upstream_dss_path)
-    if not dss_parts["D"]:
-        raise ValueError(
-            "Upstream DSS path is missing the D-part date: "
-            f"{upstream_dss_path}. Rerun 'prepare' so boundary_candidates.csv "
-            "can be rebuilt from the DSS catalog."
-        )
     start_date = _parse_dss_d_part_date(dss_parts["D"])
     start_hour, start_minute = _parse_hhmm_time(config.simulation_start_time)
     start_dt = start_date.replace(
@@ -2608,10 +3484,7 @@ def _load_boundary_config_values(config: RasMapperConfig) -> Dict[str, Any]:
                 "rerun 'prepare'."
             )
         row_dict = upstream_row.to_dict()
-        row_dict["dss_path"] = resolve_dss_path_from_catalog(
-            config,
-            raw_dss_path,
-        )
+        row_dict["dss_path"] = normalize_dss_pathname(raw_dss_path)
         upstream_rows.append(row_dict)
 
     if config.downstream_friction_slope is not None:
@@ -2620,7 +3493,19 @@ def _load_boundary_config_values(config: RasMapperConfig) -> Dict[str, Any]:
         raw_slope = downstream_row.get("normal_depth_slope", "")
         if pd.isna(raw_slope) or str(raw_slope).strip() == "":
             sections = load_cross_sections(config.cross_section_copy)
-            downstream_slope = estimate_normal_depth_slope(sections)
+            breaklines = [
+                coords for _, coords in load_polyline_features(config.breakline_copy)
+            ]
+            downstream_slope = float(
+                estimate_channel_slope(
+                    sections,
+                    breaklines,
+                    mode="downstream",
+                    min_distance=config.slope_min_cross_section_distance,
+                    min_slope=config.slope_min_value,
+                    fallback_slope=config.slope_fallback_value,
+                )["slope"]
+            )
         else:
             downstream_slope = float(raw_slope)
 
@@ -2689,6 +3574,12 @@ def create_unsteady_file(config: RasMapperConfig) -> Dict[str, Any]:
             or upstream_row.get("bc_name")
             or config.upstream_bc_name
         )
+        raw_flow_slope = upstream_row.get("flow_hydrograph_slope")
+        flow_hydrograph_slope = (
+            config.upstream_flow_hydrograph_slope
+            if pd.isna(raw_flow_slope) or str(raw_flow_slope).strip() == ""
+            else float(raw_flow_slope)
+        )
         flow_hydrograph_blocks.extend(
             [
                 _format_2d_boundary_location(
@@ -2700,7 +3591,7 @@ def create_unsteady_file(config: RasMapperConfig) -> Dict[str, Any]:
                 "Stage Hydrograph TW Check=0\n",
                 (
                     "Flow Hydrograph Slope= "
-                    f"{config.upstream_flow_hydrograph_slope:.6g} \n"
+                    f"{flow_hydrograph_slope:.6g} \n"
                 ),
                 f"DSS File={dss_file}\n",
                 f"DSS Path={upstream_row['dss_path']}\n",
@@ -3089,41 +3980,6 @@ def verify_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
     }
 
 
-def repair_unsteady_dss_paths(
-    config: RasMapperConfig,
-    unsteady_path: Path,
-) -> Dict[str, Any]:
-    if not unsteady_path.exists():
-        return {"updated": False, "path": unsteady_path, "replacements": []}
-
-    lines = unsteady_path.read_text(
-        encoding="utf-8",
-        errors="replace",
-    ).splitlines(True)
-    replacements: List[Dict[str, str]] = []
-    repaired_lines: List[str] = []
-    for line in lines:
-        if not line.startswith("DSS Path="):
-            repaired_lines.append(line)
-            continue
-        raw_path = line.split("=", 1)[1].strip()
-        repaired_path = resolve_dss_path_from_catalog(config, raw_path)
-        if repaired_path != raw_path:
-            replacements.append({"from": raw_path, "to": repaired_path})
-            repaired_lines.append(f"DSS Path={repaired_path}\n")
-        else:
-            repaired_lines.append(line)
-
-    if replacements:
-        unsteady_path.write_text("".join(repaired_lines), encoding="utf-8")
-
-    return {
-        "updated": bool(replacements),
-        "path": unsteady_path,
-        "replacements": replacements,
-    }
-
-
 def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
     validate_inputs(config)
     if not config.project_file.exists():
@@ -3153,7 +4009,6 @@ def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
         )
 
     unsteady_summary = create_unsteady_file(config)
-    dss_repair = repair_unsteady_dss_paths(config, config.unsteady_path)
     simulation_date_summary = resolve_plan_simulation_date(
         config,
         unsteady_summary["upstream_dss_path"],
@@ -3168,7 +4023,6 @@ def create_unsteady_plan(config: RasMapperConfig) -> Dict[str, Any]:
     summary = {
         "project_file": config.project_file,
         "unsteady": unsteady_summary,
-        "dss_repair": dss_repair,
         "plan": plan_summary,
         "simulation_date": simulation_date_summary,
         "verification": verification,
@@ -3225,105 +4079,6 @@ def _click_ras_button(window: Any, labels: Sequence[str]) -> bool:
     return False
 
 
-def _collect_win32_window_text(hwnd: int) -> List[str]:
-    import win32gui
-
-    texts: List[str] = []
-    title = win32gui.GetWindowText(hwnd).strip()
-    if title:
-        texts.append(title)
-
-    def enum_child(child_hwnd: int, _: Any) -> None:
-        text = win32gui.GetWindowText(child_hwnd).strip()
-        if text:
-            texts.append(text)
-
-    try:
-        win32gui.EnumChildWindows(hwnd, enum_child, None)
-    except Exception:
-        pass
-    return texts
-
-
-def _click_win32_button(hwnd: int, labels: Sequence[str]) -> bool:
-    import win32con
-    import win32gui
-
-    normalized = {label.lower().replace("&", "") for label in labels}
-    clicked = False
-
-    def enum_child(child_hwnd: int, _: Any) -> None:
-        nonlocal clicked
-        if clicked:
-            return
-        text = win32gui.GetWindowText(child_hwnd).strip().lower()
-        text = text.replace("&", "")
-        if text not in normalized:
-            return
-        win32gui.SendMessage(child_hwnd, win32con.BM_CLICK, 0, 0)
-        clicked = True
-
-    try:
-        enum_child(hwnd, None)
-        win32gui.EnumChildWindows(hwnd, enum_child, None)
-    except Exception:
-        return False
-    return clicked
-
-
-def _handle_compute_dialogs_win32(
-    process_id: int,
-    auto_confirm_preprocessor: bool,
-    messages: List[str],
-) -> Optional[str]:
-    try:
-        import win32gui
-        import win32process
-    except Exception:
-        return None
-
-    fatal_message: Optional[str] = None
-
-    def enum_window(hwnd: int, _: Any) -> None:
-        nonlocal fatal_message
-        try:
-            _, window_pid = win32process.GetWindowThreadProcessId(hwnd)
-            if window_pid != process_id or not win32gui.IsWindowVisible(hwnd):
-                return
-        except Exception:
-            return
-
-        texts = _collect_win32_window_text(hwnd)
-        joined = "\n".join(texts)
-        lower_joined = joined.lower()
-        if not joined:
-            return
-
-        if "geometry preprocessor output file was not found" in lower_joined:
-            if auto_confirm_preprocessor:
-                if _click_win32_button(hwnd, ("Yes", "&Yes")):
-                    messages.append(
-                        "Accepted HEC-RAS geometry preprocessor prompt."
-                    )
-            return
-
-        if "error parsing command line parameters" in lower_joined:
-            fatal_message = joined
-            _click_win32_button(hwnd, ("OK", "&OK", "Close"))
-            return
-
-        if "errors were found preparing unsteady flow data" in lower_joined:
-            fatal_message = joined
-            _click_win32_button(hwnd, ("Close", "OK", "&OK"))
-            return
-
-    try:
-        win32gui.EnumWindows(enum_window, None)
-    except Exception:
-        return fatal_message
-    return fatal_message
-
-
 def _handle_compute_dialogs(
     process_id: int,
     auto_confirm_preprocessor: bool,
@@ -3332,11 +4087,7 @@ def _handle_compute_dialogs(
     try:
         from pywinauto import Desktop
     except Exception:
-        return _handle_compute_dialogs_win32(
-            process_id,
-            auto_confirm_preprocessor,
-            messages,
-        )
+        return None
 
     fatal_message: Optional[str] = None
     try:
@@ -3495,8 +4246,6 @@ def compute_plan(
             "Run 'create-unsteady-plan' first."
         )
 
-    geometry_sync = sync_geometry_to_source_shapes(config)
-
     destination = (
         output_dir.resolve()
         if output_dir is not None
@@ -3515,8 +4264,6 @@ def compute_plan(
 
     project_file = destination / config.project_file.name
     plan_file = destination / config.plan_path.name
-    unsteady_file = destination / config.unsteady_path.name
-    dss_repair = repair_unsteady_dss_paths(config, unsteady_file)
     result_hdf = destination / f"{config.project_name}.p{config.plan_id}.hdf"
     command = f'"{config.ras_exe}" -c "{project_file}" "{plan_file}"'
     timeout = (
@@ -3661,10 +4408,8 @@ def compute_plan(
         "success": success,
         "command": command,
         "output_dir": destination,
-        "geometry_sync": geometry_sync,
         "project_file": project_file,
         "plan_file": plan_file,
-        "dss_repair": dss_repair,
         "result_hdf": result_hdf if result_hdf.exists() else None,
         "return_code": return_code,
         "elapsed_seconds": elapsed_seconds,
@@ -3689,32 +4434,9 @@ def set_geometry_title(geom_path: Path, title: str) -> None:
     geom_path.write_text("".join(lines), encoding="utf-8")
 
 
-def set_geometry_storage_area_name(geom_path: Path, storage_area_name: str) -> None:
-    lines = geom_path.read_text(encoding="utf-8", errors="replace").splitlines(True)
-    lines = _upsert_project_line(
-        lines,
-        "Storage Area=",
-        f"{storage_area_name},,",
-        insert_after_prefixes=("Viewing Rectangle=", "Program Version=", "Geom Title="),
-    )
-    lines = [
-        (
-            f"BC Line Storage Area={storage_area_name}\n"
-            if line.startswith("BC Line Storage Area=")
-            else line
-        )
-        for line in lines
-    ]
-    geom_path.write_text("".join(lines), encoding="utf-8")
-
-
 def seed_geometry_from_reference(config: RasMapperConfig) -> None:
     copy_file(config.reference_geom_src, config.geom_path)
     set_geometry_title(config.geom_path, config.geometry_title)
-    set_geometry_storage_area_name(
-        config.geom_path,
-        resolve_storage_area_name(config),
-    )
     ensure_project_has_geom_reference(config)
 
 
@@ -3840,15 +4562,20 @@ def build_exact_region_mannings_from_lookup(
     )
     rows = []
     for name in names:
-        if name == "NoData":
-            value = float(nodata_value)
-        else:
-            value = float(default_value)
+        base_value = _landcover_manning_value(
+            name,
+            lookup_df,
+            nodata_value=nodata_value,
+            default_value=default_value,
+        )
+        region_value = float(default_value)
         rows.append(
             {
                 "Table Number": table_value,
                 "Land Cover Name": str(name).strip(),
-                "MainChannel": value,
+                "Base Manning's n Value": base_value,
+                "Base Mannings n Value": base_value,
+                "MainChannel": region_value,
                 "Region Name": region_name,
             }
         )
@@ -3928,7 +4655,12 @@ def update_hdf_region_mannings_exact(
 
         for idx, (_, row) in enumerate(region_df.iterrows(), start=1):
             rows[idx][name_field] = str(row["Land Cover Name"]).encode("utf-8")
-            rows[idx][base_field] = np.nan
+            if "Base Manning's n Value" in region_df.columns:
+                rows[idx][base_field] = float(row["Base Manning's n Value"])
+            elif "Base Mannings n Value" in region_df.columns:
+                rows[idx][base_field] = float(row["Base Mannings n Value"])
+            else:
+                rows[idx][base_field] = np.nan
             rows[idx][region_field] = float(row["MainChannel"])
 
         parent = handle["Geometry/Land Cover (Manning's n)"]
@@ -3942,6 +4674,7 @@ def sync_landcover_geometry(
     config: RasMapperConfig,
     lookup_df: pd.DataFrame,
 ) -> pd.DataFrame:
+    sync_landcover_hdf_mannings(config, lookup_df)
     region_df = build_exact_region_mannings_from_lookup(
         config.geom_path,
         config.geom_hdf_path,
@@ -3966,6 +4699,465 @@ def _chunk_points(
         list(points[index:index + chunk_size])
         for index in range(0, len(points), chunk_size)
     ]
+
+
+def _distance(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+) -> float:
+    return math.hypot(end[0] - start[0], end[1] - start[1])
+
+
+def _format_ras_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    if math.isnan(number):
+        return ""
+    text = f"{number:.6f}".rstrip("0").rstrip(".")
+    if text == "-0":
+        return "0"
+    if text.startswith("0.") and number > 0:
+        text = text[1:]
+    elif text.startswith("-0.") and number < 0:
+        text = "-" + text[2:]
+    return text
+
+
+def _format_fixed_width_values(
+    values: Sequence[Any],
+    width: int = 8,
+    per_line: int = 10,
+) -> List[str]:
+    lines: List[str] = []
+    for index in range(0, len(values), per_line):
+        chunk = values[index:index + per_line]
+        lines.append("".join(f"{_format_ras_number(value):>{width}}" for value in chunk).rstrip() + "\n")
+    return lines
+
+
+def _station_elevation_values(
+    pairs: Sequence[Tuple[float, float]],
+) -> List[float]:
+    values: List[float] = []
+    for station, elevation in pairs:
+        values.extend([station, elevation])
+    return values
+
+
+def _is_blank_value(value: Any) -> bool:
+    return value is None or str(value).strip() == ""
+
+
+def _row_value(row: Dict[str, str], *names: str) -> str:
+    lookup = {str(key).strip().lower(): value for key, value in row.items()}
+    for name in names:
+        key = name.strip().lower()
+        if key in lookup:
+            return "" if lookup[key] is None else str(lookup[key]).strip()
+    return ""
+
+
+def _row_float(
+    row: Dict[str, str],
+    *names: str,
+    default: Optional[float] = None,
+) -> Optional[float]:
+    for name in names:
+        raw = _row_value(row, name)
+        if _is_blank_value(raw):
+            continue
+        try:
+            return float(raw)
+        except ValueError:
+            continue
+    return default
+
+
+def _row_int(
+    row: Dict[str, str],
+    *names: str,
+    default: int = 0,
+) -> int:
+    value = _row_float(row, *names, default=None)
+    if value is None:
+        return default
+    return int(round(value))
+
+
+def _normalize_structure_type(value: str) -> str:
+    text = re.sub(r"[^0-9A-Za-z]+", "", str(value or "")).lower()
+    if text in {"bridge", "bridges"}:
+        return "bridge"
+    if text in {"pipe", "pipes", "circular", "culvert", "round"}:
+        return "pipe"
+    if text in {"box", "rectangular", "rectangle"}:
+        return "box"
+    if text in {"arch", "pipearch", "arched"}:
+        return "arch"
+    return text or "pipe"
+
+
+def _culvert_shape_code(structure_type: str) -> int:
+    if structure_type == "box":
+        return 2
+    if structure_type == "arch":
+        return 4
+    return 1
+
+
+def _read_structure_csv(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    first_line = path.read_text(
+        encoding="utf-8-sig",
+        errors="ignore",
+    ).splitlines()[0]
+    delimiter = "\t" if "\t" in first_line else ","
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        return [
+            {
+                str(key).strip(): "" if value is None else str(value).strip()
+                for key, value in row.items()
+            }
+            for row in reader
+        ]
+
+
+def _structure_line_from_row(row: Dict[str, str]) -> List[Tuple[float, float]]:
+    up1 = (
+        _row_float(row, "upstream_x1"),
+        _row_float(row, "upstream_y1"),
+    )
+    up2 = (
+        _row_float(row, "upstream_x2"),
+        _row_float(row, "upstream_y2"),
+    )
+    dn1 = (
+        _row_float(row, "downstream_x1"),
+        _row_float(row, "downstream_y1"),
+    )
+    dn2 = (
+        _row_float(row, "downstream_x2"),
+        _row_float(row, "downstream_y2"),
+    )
+    if any(value is None for value in (*up1, *up2)):
+        raise ValueError(
+            "Structure row is missing upstream_x/y coordinates: "
+            f"{_row_value(row, 'structure_id')}"
+        )
+
+    if any(value is None for value in (*dn1, *dn2)):
+        return [(float(up1[0]), float(up1[1])), (float(up2[0]), float(up2[1]))]
+
+    return [
+        ((float(up1[0]) + float(dn1[0])) / 2.0, (float(up1[1]) + float(dn1[1])) / 2.0),
+        ((float(up2[0]) + float(dn2[0])) / 2.0, (float(up2[1]) + float(dn2[1])) / 2.0),
+    ]
+
+
+def _structure_profile_pairs(
+    connection: StructureConnection,
+) -> List[Tuple[float, float]]:
+    length = max(_distance(connection.line[0], connection.line[-1]), 0.001)
+    return [(0.0, connection.deck_max), (length, connection.deck_max)]
+
+
+def load_structure_connections(config: RasMapperConfig) -> List[StructureConnection]:
+    source = config.structure_csv_copy
+    if source is None or not source.exists():
+        source = config.structure_csv_src
+    if source is None or not source.exists():
+        return []
+
+    connections: List[StructureConnection] = []
+    for index, row in enumerate(_read_structure_csv(source), start=1):
+        name = (
+            _row_value(row, "structure_id", "name", "id")
+            or f"Structure {index}"
+        )
+        structure_type = _normalize_structure_type(
+            _row_value(row, "structure_type", "type")
+        )
+        line = _structure_line_from_row(row)
+        line_length = max(_distance(line[0], line[-1]), 0.001)
+        rise = _row_float(
+            row,
+            "min_rise",
+            "rise_upstream",
+            "rise_downstream",
+            default=1.0,
+        )
+        span = _row_float(
+            row,
+            "min_span",
+            "span_upstream",
+            "span_downstream",
+            default=rise,
+        )
+        upstream_invert = _row_float(
+            row,
+            "upstream_invert",
+            default=_row_float(row, "downstream_invert", default=0.0),
+        )
+        downstream_invert = _row_float(
+            row,
+            "downstream_invert",
+            default=upstream_invert,
+        )
+        deck_max = _row_float(
+            row,
+            "deck_max",
+            "upstream_elev",
+            "downstream_elev",
+            default=max(float(upstream_invert) + float(rise), float(downstream_invert) + float(rise)),
+        )
+        culvert_length = _row_float(
+            row,
+            "culvert_len",
+            "culvert_length",
+            default=line_length,
+        )
+        deck_width = _row_float(
+            row,
+            "deck_width",
+            default=max(float(span or rise), float(culvert_length)),
+        )
+        deck_distance = _row_float(row, "deck_distance", default=0.1)
+        deck_weir = _row_float(row, "deck_weir", default=1.4)
+        deck_skew = _row_float(row, "deck_skew", default=0.0)
+        culvert_mannings = _row_float(row, "culvert_mannings", default=0.02)
+        culvert_bottom_mannings = _row_float(
+            row,
+            "culvert_bottom_mannings",
+            default=culvert_mannings,
+        )
+        entrance_loss = _row_float(row, "entrance_loss", default=0.5)
+        exit_loss = _row_float(row, "exit_loss", default=1.0)
+        inlet_type = _row_int(row, "inlet_type", default=1 if structure_type == "pipe" else 8)
+        outlet_type = _row_int(row, "outlet_type", default=1)
+        num_barrels = max(1, _row_int(row, "num_barrels", default=1))
+        opening_offset = _row_float(row, "opening_offset", default=0.0)
+        barrel_center_spacing = _row_float(
+            row,
+            "barrel_center_spacing",
+            default=None,
+        )
+        htab_hwmax = max(
+            float(deck_max) + max(float(rise), 0.1) * 0.2,
+            float(upstream_invert) + float(rise) + 0.1,
+            float(downstream_invert) + float(rise) + 0.1,
+        )
+        connections.append(
+            StructureConnection(
+                name=name,
+                structure_type=structure_type,
+                line=line,
+                rise=float(rise),
+                span=None if span is None else float(span),
+                culvert_length=float(culvert_length),
+                upstream_invert=float(upstream_invert),
+                downstream_invert=float(downstream_invert),
+                deck_distance=float(deck_distance),
+                deck_width=float(deck_width),
+                deck_weir=float(deck_weir),
+                deck_skew=float(deck_skew),
+                deck_max=float(deck_max),
+                culvert_mannings=float(culvert_mannings),
+                culvert_bottom_mannings=float(culvert_bottom_mannings),
+                entrance_loss=float(entrance_loss),
+                exit_loss=float(exit_loss),
+                inlet_type=inlet_type,
+                outlet_type=outlet_type,
+                num_barrels=num_barrels,
+                opening_offset=float(opening_offset),
+                barrel_center_spacing=(
+                    None
+                    if barrel_center_spacing is None
+                    else float(barrel_center_spacing)
+                ),
+                shape_code=_culvert_shape_code(structure_type),
+                htab_hwmax=htab_hwmax,
+            )
+        )
+    return connections
+
+
+def _culvert_station_values(connection: StructureConnection) -> List[float]:
+    line_length = max(_distance(connection.line[0], connection.line[-1]), 0.001)
+    count = max(1, connection.num_barrels)
+    if count == 1:
+        return [line_length / 2.0, line_length / 2.0]
+
+    if connection.barrel_center_spacing is not None:
+        spacing = connection.barrel_center_spacing
+    else:
+        spacing = float(connection.span or connection.rise) + connection.opening_offset
+    spacing = max(spacing, 0.001)
+    first = (line_length - spacing * (count - 1)) / 2.0
+    values: List[float] = []
+    for barrel_index in range(count):
+        station = first + barrel_index * spacing
+        values.extend([station, station])
+    return values
+
+
+def _render_connection_header(
+    connection: StructureConnection,
+    storage_area_name: str,
+) -> List[str]:
+    center_x = sum(point[0] for point in connection.line) / len(connection.line)
+    center_y = sum(point[1] for point in connection.line) / len(connection.line)
+    profile_pairs = _structure_profile_pairs(connection)
+    routing_type = 32 if connection.structure_type == "bridge" else 1
+    overflow_2d = "False" if routing_type == 32 else "True"
+    lines = [
+        f"Connection={connection.name:<16},{_format_ras_number(center_x)},{_format_ras_number(center_y)}\n",
+        "Connection Desc=\n",
+        f"Connection Line={len(connection.line)}\n",
+    ]
+    lines.extend(_fixed_width_xy_line(chunk) for chunk in _chunk_points(connection.line, 2))
+    lines.append(f"Connection Centerline Profile={len(profile_pairs)}\n")
+    lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
+    lines.extend(
+        [
+            f"Connection Last Edited Time={time.strftime('%b/%d/%Y %H:%M:%S')}\n",
+            "Conn CellSize Min=1\n",
+            "Conn Near Repeats=3\n",
+            "Conn Protection Radius=-1\n",
+            f"Connection Up SA={storage_area_name:<16}\n",
+            f"Connection Dn SA={storage_area_name:<16}\n",
+            f"Conn Routing Type= {routing_type} \n",
+            "Conn Use RC Family=False\n",
+            f"Conn OverFlow Method 2D={overflow_2d}\n",
+            f"Conn Weir WD={_format_ras_number(connection.deck_width)}\n",
+            f"Conn Weir Coef={_format_ras_number(connection.deck_weir)}\n",
+            "Conn Weir Is Ogee= 0 \n",
+            "Conn Simple Spill Pos Coef=0.05\n",
+            "Conn Simple Spill Neg Coef=0.05\n",
+            f"Conn Weir SE= {len(profile_pairs)} \n",
+        ]
+    )
+    lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
+    if routing_type == 32:
+        lines.extend(
+            [
+                f"Conn HTab HWMax={_format_ras_number(connection.htab_hwmax)}\n",
+                "\n",
+                "Conn Outlet Rating Curve= 0 ,False,,\n",
+            ]
+        )
+    return lines
+
+
+def _render_connection_culvert_block(
+    connection: StructureConnection,
+) -> List[str]:
+    span_value = (
+        ""
+        if connection.shape_code == 1
+        else _format_ras_number(connection.span or connection.rise)
+    )
+    culvert_name = connection.name[:12]
+    values = [
+        str(connection.shape_code),
+        _format_ras_number(connection.rise),
+        span_value,
+        _format_ras_number(connection.culvert_length),
+        _format_ras_number(connection.culvert_mannings),
+        _format_ras_number(connection.entrance_loss),
+        _format_ras_number(connection.exit_loss),
+        str(connection.inlet_type),
+        str(connection.outlet_type),
+        _format_ras_number(connection.upstream_invert),
+        _format_ras_number(connection.downstream_invert),
+        f" {connection.num_barrels} ",
+        f"{culvert_name:<12}",
+        " 0 ",
+        _format_ras_number(connection.opening_offset),
+    ]
+    return [
+        f"Connection Culv={','.join(values)}\n",
+        *_format_fixed_width_values(_culvert_station_values(connection), per_line=8),
+        f"Conn Culv Bottom n={_format_ras_number(connection.culvert_bottom_mannings)}\n",
+        f"Conn HTab HWMax={_format_ras_number(connection.htab_hwmax)}\n",
+        f"Conn HTab TWMax={_format_ras_number(connection.htab_hwmax)}\n",
+    ]
+
+
+def _render_connection_bridge_block(
+    connection: StructureConnection,
+) -> List[str]:
+    profile_pairs = _structure_profile_pairs(connection)
+    stations = [pair[0] for pair in profile_pairs]
+    deck_high = connection.deck_max
+    deck_low = max(
+        min(connection.upstream_invert, connection.downstream_invert),
+        connection.deck_max - max(connection.rise, 0.1),
+    )
+    manning = (
+        connection.culvert_bottom_mannings
+        if connection.culvert_bottom_mannings > 0
+        else 0.023
+    )
+    lines = [
+        "Conn BR: Bridge=0,0,0,0, 0 ,0.3,0.5\n",
+        "Conn BR: Pressure-Weir=,,,,\n",
+        "Conn BR: Deck Dist Width WeirC Skew NumUp NumDn MinLoCord MaxHiCord MaxSubmerge Is_Ogee\n",
+        (
+            f"{_format_ras_number(connection.deck_distance)},"
+            f"{_format_ras_number(connection.deck_width)},"
+            f"{_format_ras_number(connection.deck_weir)},"
+            f"{_format_ras_number(connection.deck_skew)}, 2, 2, , , 0.98, 0, 0,0,,\n"
+        ),
+    ]
+    for _ in range(2):
+        lines.extend(_format_fixed_width_values(stations, per_line=8))
+        lines.extend(_format_fixed_width_values([deck_high, deck_high], per_line=8))
+        lines.extend(_format_fixed_width_values([deck_low, deck_low], per_line=8))
+
+    for profile_number in (1, 2):
+        lines.append(f"Conn BR: BR SE={profile_number},{len(profile_pairs)}\n")
+        lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
+        lines.append(
+            f"Conn BR: BR Bank Stations={profile_number},"
+            f"{_format_ras_number(stations[0])},{_format_ras_number(stations[-1])}\n"
+        )
+        lines.append(f"Conn BR: BR Mann={profile_number},1\n")
+        lines.extend(_format_fixed_width_values([stations[0], manning], per_line=8))
+
+    lines.extend(
+        [
+            "Conn BR: BR Coef=-1 , 0 , 0 ,,,0.8,-1,,0,\n",
+            f"Conn BR: BR Skew={_format_ras_number(connection.deck_skew)}\n",
+        ]
+    )
+    for profile_number in (1, 2):
+        lines.append(f"Conn BR: XS SE={profile_number},{len(profile_pairs)}\n")
+        lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
+        lines.append(
+            f"Conn BR: XS Bank Stations={profile_number},"
+            f"{_format_ras_number(stations[0])},{_format_ras_number(stations[-1])}\n"
+        )
+        lines.append(f"Conn BR: XS Mann={profile_number},1\n")
+        lines.extend(_format_fixed_width_values([stations[0], manning], per_line=8))
+    return lines
+
+
+def render_structure_connection_blocks(
+    connections: Sequence[StructureConnection],
+    storage_area_name: str,
+) -> List[str]:
+    lines: List[str] = []
+    for connection in connections:
+        lines.extend(_render_connection_header(connection, storage_area_name))
+        if connection.structure_type == "bridge":
+            lines.extend(_render_connection_bridge_block(connection))
+        else:
+            lines.extend(_render_connection_culvert_block(connection))
+    return lines
 
 
 def _point_on_segment(
@@ -4048,42 +5240,6 @@ def _append_unique_point(
     points.append(point)
 
 
-def _spaced_bucket_key(
-    point: Tuple[float, float],
-    spacing: float,
-) -> Tuple[int, int]:
-    return (
-        int(math.floor(point[0] / spacing)),
-        int(math.floor(point[1] / spacing)),
-    )
-
-
-def _build_spaced_point_buckets(
-    points: Sequence[Tuple[float, float]],
-    min_spacing: float,
-) -> Dict[Tuple[int, int], List[Tuple[float, float]]]:
-    buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
-    for point in points:
-        buckets.setdefault(_spaced_bucket_key(point, min_spacing), []).append(point)
-    return buckets
-
-
-def _append_spaced_point(
-    points: List[Tuple[float, float]],
-    buckets: Dict[Tuple[int, int], List[Tuple[float, float]]],
-    point: Tuple[float, float],
-    min_spacing: float,
-) -> None:
-    key = _spaced_bucket_key(point, min_spacing)
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for existing in buckets.get((key[0] + dx, key[1] + dy), []):
-                if math.hypot(point[0] - existing[0], point[1] - existing[1]) < min_spacing:
-                    return
-    buckets.setdefault(key, []).append(point)
-    points.append(point)
-
-
 def _sample_polyline_points(
     coords: Sequence[Tuple[float, float]],
     spacing: float,
@@ -4112,11 +5268,9 @@ def _generate_breakline_seed_points(
     breaklines: Sequence[Sequence[Tuple[float, float]]],
     near_spacing: float,
     near_repeats: int,
-    min_point_spacing: float = 0.0,
 ) -> List[Tuple[float, float]]:
     seed_points: List[Tuple[float, float]] = []
     seen: set[Tuple[int, int]] = set()
-    spaced_buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
 
     for breakline in breaklines:
         for start, end in zip(breakline[:-1], breakline[1:]):
@@ -4145,15 +5299,7 @@ def _generate_breakline_seed_points(
                         if candidate is None:
                             continue
                         if _point_in_ring(candidate, ring):
-                            if min_point_spacing > 0:
-                                _append_spaced_point(
-                                    seed_points,
-                                    spaced_buckets,
-                                    candidate,
-                                    min_point_spacing,
-                                )
-                            else:
-                                _append_unique_point(seed_points, seen, candidate)
+                            _append_unique_point(seed_points, seen, candidate)
     return seed_points
 
 
@@ -4175,9 +5321,14 @@ def _generate_computation_points(
             if _point_in_ring(point, ring):
                 _append_unique_point(points, seen, point)
 
-    # Breakline refinement belongs in the BreakLine records below. Injecting
-    # dense breakline-adjacent points here can make HEC-RAS report
-    # near-duplicate points or negative-area cells during compute.
+    if breaklines and breakline_near_spacing and breakline_near_repeats:
+        for point in _generate_breakline_seed_points(
+            ring,
+            breaklines,
+            breakline_near_spacing,
+            breakline_near_repeats,
+        ):
+            _append_unique_point(points, seen, point)
 
     if not points:
         raise ValueError(
@@ -4832,7 +5983,8 @@ def _limit_boundary_section_to_breaklines(
     breaklines: Sequence[Sequence[Tuple[float, float]]],
 ) -> List[Tuple[float, float]]:
     try:
-        from shapely.geometry import LineString, Point, Polygon
+        from shapely.geometry import LineString, Point
+        from shapely.ops import nearest_points
     except ImportError:
         return list(section_points)
 
@@ -4840,29 +5992,38 @@ def _limit_boundary_section_to_breaklines(
         return list(section_points)
 
     section_line = LineString(section_points)
-    perimeter_boundary = Polygon(perimeter_ring).boundary
     selected: List[Dict[str, Any]] = []
+    near_tolerance = max(2.0, min(10.0, section_line.length * 0.25))
 
     for breakline in breaklines:
-        intersection = LineString(breakline).intersection(perimeter_boundary)
+        breakline_geom = LineString(breakline)
         candidates = _dedupe_xy_points(
-            _extract_point_coords_from_geometry(intersection)
+            _extract_point_coords_from_geometry(
+                section_line.intersection(breakline_geom)
+            )
         )
-        if not candidates:
-            continue
 
-        anchor = min(
+        if not candidates:
+            section_nearest, breakline_nearest = nearest_points(
+                section_line,
+                breakline_geom,
+            )
+            nearest_distance = section_nearest.distance(breakline_nearest)
+            if nearest_distance > near_tolerance:
+                continue
+            candidates = [(float(section_nearest.x), float(section_nearest.y))]
+
+        point = min(
             candidates,
             key=lambda point: math.hypot(
                 point[0] - section_mean[0],
                 point[1] - section_mean[1],
             ),
         )
-        distance = float(section_line.project(Point(anchor)))
+        distance = float(section_line.project(Point(point)))
         projected = section_line.interpolate(distance)
         selected.append(
             {
-                "anchor": anchor,
                 "distance": distance,
                 "projected": (float(projected.x), float(projected.y)),
             }
@@ -4874,8 +6035,14 @@ def _limit_boundary_section_to_breaklines(
     selected.sort(key=lambda item: item["distance"])
     start_info = selected[0]
     end_info = selected[-1]
+    if abs(end_info["distance"] - start_info["distance"]) < 1e-6:
+        return list(section_points)
     return _dedupe_consecutive_points(
-        [start_info["anchor"], end_info["anchor"]]
+        _polyline_subsegment(
+            section_points,
+            start_info["distance"],
+            end_info["distance"],
+        )
     )
 
 
@@ -4950,54 +6117,6 @@ def _distance_point_to_polyline(
     )
 
 
-def _read_hdf_2d_cell_count(handle: h5py.File, base: str) -> int:
-    centers_path = f"{base}/Cells Center Coordinate"
-    if centers_path in handle:
-        return int(handle[centers_path].shape[0])
-
-    attrs_path = f"{base}/Attributes"
-    if attrs_path in handle:
-        attrs = handle[attrs_path][:]
-        if len(attrs) and "Cell Count" in attrs.dtype.names:
-            return int(attrs[0]["Cell Count"])
-
-    cell_info_path = f"{base}/Cell Info"
-    if cell_info_path in handle:
-        cell_info = handle[cell_info_path][:]
-        if len(cell_info):
-            return int(cell_info[0][-1])
-
-    cell_points_path = f"{base}/Cell Points"
-    if cell_points_path in handle:
-        return int(handle[cell_points_path].shape[0])
-
-    raise RuntimeError(f"Could not determine mesh cell count under {base}")
-
-
-def _read_hdf_2d_perimeter(handle: h5py.File, base: str) -> np.ndarray:
-    perimeter_path = f"{base}/Perimeter"
-    if perimeter_path in handle:
-        return handle[perimeter_path][:]
-
-    polygon_points_path = f"{base}/Polygon Points"
-    if polygon_points_path in handle:
-        return handle[polygon_points_path][:]
-
-    raise RuntimeError(f"Could not determine mesh perimeter points under {base}")
-
-
-def _read_hdf_2d_face_points(handle: h5py.File, base: str) -> np.ndarray:
-    face_points_path = f"{base}/FacePoints Coordinate"
-    if face_points_path in handle:
-        return handle[face_points_path][:]
-
-    cell_points_path = f"{base}/Cell Points"
-    if cell_points_path in handle:
-        return handle[cell_points_path][:]
-
-    raise RuntimeError(f"Could not determine mesh face/cell points under {base}")
-
-
 def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
     if not config.geom_hdf_path.exists():
         return {"available": False, "reason": "geometry_hdf_missing"}
@@ -5009,7 +6128,46 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
             handle,
             geom_path=config.geom_path,
         )
-        face_points = _read_hdf_2d_face_points(handle, base)
+        mesh_validation: Dict[str, Any] = {
+            "hdf_2d_area_group": base,
+            "max_facepoints_per_cell": None,
+            "cells_over_8_facepoints": None,
+            "cell_count": None,
+            "attribute_cell_count": None,
+        }
+        attr_path = "Geometry/2D Flow Areas/Attributes"
+        if attr_path in handle:
+            attrs_raw = handle[attr_path][()]
+            if (
+                len(attrs_raw) > 0
+                and attrs_raw.dtype.names
+                and "Cell Count" in attrs_raw.dtype.names
+            ):
+                mesh_validation["attribute_cell_count"] = int(
+                    attrs_raw[0]["Cell Count"]
+                )
+        cell_centers_path = f"{base}/Cells Center Coordinate"
+        if cell_centers_path in handle:
+            mesh_validation["cell_count"] = int(
+                handle[cell_centers_path].shape[0]
+            )
+        cell_facepoints_path = f"{base}/Cells FacePoint Indexes"
+        if cell_facepoints_path in handle:
+            facepoint_indexes = handle[cell_facepoints_path][()]
+            counts = (facepoint_indexes >= 0).sum(axis=1)
+            mesh_validation["max_facepoints_per_cell"] = int(counts.max())
+            mesh_validation["cells_over_8_facepoints"] = int((counts > 8).sum())
+        if f"{base}/FacePoints Coordinate" in handle:
+            face_points = handle[f"{base}/FacePoints Coordinate"][:]
+        elif f"{base}/Cell Points" in handle:
+            face_points = handle[f"{base}/Cell Points"][:]
+        else:
+            return {
+                "available": False,
+                "reason": "mesh_points_missing",
+                "mesh_hdf": str(config.geom_hdf_path),
+                "hdf_2d_area_group": base,
+            }
         attrs = handle["Geometry/2D Flow Area Break Lines/Attributes"][:]
 
     rows = []
@@ -5047,6 +6205,7 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
     summary = {
         "available": True,
         "mesh_hdf": str(config.geom_hdf_path),
+        "mesh_validation": mesh_validation,
         "breaklines": rows,
     }
     config.mesh_qc_json.write_text(
@@ -5059,6 +6218,10 @@ def analyze_mesh_enforcement(config: RasMapperConfig) -> Dict[str, Any]:
 def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     geom_text = config.geom_path.read_text(encoding="utf-8", errors="replace")
     lines = geom_text.splitlines(True)
+
+    perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
+    breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
+    structures = load_structure_connections(config)
     storage_area_name = resolve_storage_area_name(
         config,
         geom_path=config.geom_path,
@@ -5068,11 +6231,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
         lines,
         "Storage Area=",
         f"{storage_area_name},,",
-        insert_after_prefixes=("Viewing Rectangle=", "Program Version=", "Geom Title="),
     )
-
-    perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
-    breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
     if config.boundary_shp.exists():
         boundary_lines = [
             {
@@ -5105,6 +6264,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     view_coord_sets = [
         perimeter_ring,
         *breaklines,
+        *[structure.line for structure in structures],
         *[boundary["coords"] for boundary in boundary_lines],
     ]
     lines = _update_viewing_rectangle(lines, view_coord_sets)
@@ -5173,7 +6333,10 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
         lines,
         "BreakLine Name=",
         "BC Line Name=",
-        breakline_lines,
+        breakline_lines + render_structure_connection_blocks(
+            structures,
+            storage_area_name,
+        ),
     )
 
     bc_lines: List[str] = []
@@ -5213,11 +6376,20 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     _set_rasmap_current_view(config.rasmap_path, view_coord_sets)
 
     return {
+        "storage_area_name": storage_area_name,
         "perimeter_points": len(perimeter_ring),
         "computation_points": len(computation_points),
-        "storage_area_name": storage_area_name,
         "mesh_cell_size": config.mesh_cell_size,
         "breakline_counts": [len(coords) for coords in breaklines],
+        "structure_connections": [
+            {
+                "name": item.name,
+                "type": item.structure_type,
+                "coords": item.line,
+                "num_barrels": item.num_barrels,
+            }
+            for item in structures
+        ],
         "boundary_lines": [
             {
                 "name": item["name"],
@@ -5238,18 +6410,22 @@ def refresh_geometry_display_metadata(config: RasMapperConfig) -> None:
     ).splitlines(True)
     perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
     breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
+    structures = load_structure_connections(config)
+    storage_area_name = resolve_storage_area_name(
+        config,
+        geom_path=config.geom_path,
+        lines=lines,
+    )
+    lines = _upsert_project_line(
+        lines,
+        "Storage Area=",
+        f"{storage_area_name},,",
+    )
     if config.boundary_shp.exists():
         boundary_lines = [
             {
                 "name": str(item["record"].get("bc_name") or f"BC Line {index}"),
-                "storage_area": str(
-                    item["record"].get("storage")
-                    or resolve_storage_area_name(
-                        config,
-                        geom_path=config.geom_path,
-                        lines=lines,
-                    )
-                ),
+                "storage_area": storage_area_name,
                 "coords": item["coords"],
             }
             for index, item in enumerate(
@@ -5267,16 +6443,13 @@ def refresh_geometry_display_metadata(config: RasMapperConfig) -> None:
             downstream_bc_length_multiplier=(
                 config.downstream_bc_length_multiplier
             ),
-            storage_area_name=resolve_storage_area_name(
-                config,
-                geom_path=config.geom_path,
-                lines=lines,
-            ),
+            storage_area_name=storage_area_name,
         )
 
     view_coord_sets = [
         perimeter_ring,
         *breaklines,
+        *[structure.line for structure in structures],
         *[boundary["coords"] for boundary in boundary_lines],
     ]
     lines = _update_viewing_rectangle(lines, view_coord_sets)
@@ -5305,6 +6478,14 @@ def regenerate_geometry_hdf(
     config: RasMapperConfig,
     timeout: int = 300,
 ) -> Dict[str, Any]:
+    native_landcover_status = None
+    if config.landcover_lookup_csv.exists():
+        native_landcover_status = create_landcover_layer_with_rasmapper_gui(
+            config,
+            timeout=timeout,
+            force=False,
+        )
+
     if config.geom_hdf_path.exists():
         config.geom_hdf_path.unlink()
 
@@ -5315,16 +6496,32 @@ def regenerate_geometry_hdf(
         load_results_summary=False,
     )
 
-    regen_kwargs = {
+    mannings_layer_name = (
+        "LandCover"
+        if (
+            config.active_landcover_map_hdf is not None
+            and config.active_landcover_map_hdf.exists()
+        )
+        else None
+    )
+    regenerate_kwargs: Dict[str, Any] = {
         "ras_object": ras_obj,
         "timeout": timeout,
         "close_after": True,
     }
-    regen_signature = inspect.signature(MeshRegenerationWorkflow.regenerate_mesh)
-    if "mannings_layer_name" in regen_signature.parameters:
-        regen_kwargs["mannings_layer_name"] = "LandCover"
+    regenerate_signature = inspect.signature(
+        MeshRegenerationWorkflow.regenerate_mesh
+    )
+    if "mannings_layer_name" in regenerate_signature.parameters:
+        regenerate_kwargs["mannings_layer_name"] = mannings_layer_name
 
-    result = MeshRegenerationWorkflow.regenerate_mesh(**regen_kwargs)
+    result = MeshRegenerationWorkflow.regenerate_mesh(**regenerate_kwargs)
+
+    if not result.success:
+        raise RuntimeError(
+            "RAS Mapper mesh regeneration workflow failed: "
+            f"{result.error or result.steps_failed}"
+        )
 
     if not config.geom_hdf_path.exists():
         raise RuntimeError("Geometry HDF was not recreated by HEC-RAS")
@@ -5339,18 +6536,41 @@ def regenerate_geometry_hdf(
             raise RuntimeError(
                 "Geometry HDF was recreated, but no 2D flow area mesh was found"
             )
-        n_cells = _read_hdf_2d_cell_count(handle, base)
-        perimeter = _read_hdf_2d_perimeter(handle, base)
+        if f"{base}/Cells Center Coordinate" in handle:
+            n_cells = int(handle[f"{base}/Cells Center Coordinate"].shape[0])
+        elif f"{base}/Cell Points" in handle:
+            n_cells = int(handle[f"{base}/Cell Points"].shape[0])
+            attrs_path = f"{base}/Attributes"
+            if attrs_path in handle:
+                attrs = handle[attrs_path][()]
+                if (
+                    len(attrs) > 0
+                    and attrs.dtype.names
+                    and "Cell Count" in attrs.dtype.names
+                ):
+                    n_cells = int(attrs[0]["Cell Count"])
+        else:
+            raise RuntimeError(
+                "Geometry HDF was recreated, but no 2D cell dataset was found"
+            )
+        if f"{base}/Perimeter" in handle:
+            perimeter = handle[f"{base}/Perimeter"][:]
+        elif f"{base}/Polygon Points" in handle:
+            perimeter = handle[f"{base}/Polygon Points"][:]
+        else:
+            perimeter = []
         breakline_attrs = handle["Geometry/2D Flow Area Break Lines/Attributes"][:]
 
     region_records = None
     landcover_status = None
     if config.landcover_lookup_csv.exists():
         lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
-        create_landcover_raster(config)
         create_mannings_raster(config, lookup_df)
-        create_landcover_layer_hdf(config, lookup_df)
-        existing_landcover_status = install_existing_landcover_layer(config)
+        existing_landcover_status = (
+            install_existing_landcover_layer(config)
+            if config.has_existing_landcover_layer
+            else None
+        )
         _sync_landcover_map_layers(config)
         geometry_assoc_updated = _ensure_geometry_landcover_association(config)
         region_df = sync_landcover_geometry(config, lookup_df)
@@ -5364,6 +6584,7 @@ def regenerate_geometry_hdf(
             "lookup_records": lookup_df.to_dict(orient="records"),
             "region_records": region_records,
             "existing_ras_layer": existing_landcover_status,
+            "native_landcover_layer": native_landcover_status,
             "geometry_landcover_association_updated": geometry_assoc_updated,
         }
         config.landcover_status_json.write_text(
@@ -5406,17 +6627,24 @@ def install_reference_geometry(
     seed_geometry_from_reference(config)
 
     source_sync = sync_geometry_to_source_shapes(config)
+    lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+    native_landcover_status = create_landcover_layer_with_rasmapper_gui(
+        config,
+        timeout=timeout,
+        force=not skip_regeneration,
+    )
     regen_summary = None
     if config.geom_hdf_path.exists():
         config.geom_hdf_path.unlink()
     if not skip_regeneration:
         regen_summary = regenerate_geometry_hdf(config, timeout=timeout)
 
-    lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
-    create_landcover_raster(config)
     create_mannings_raster(config, lookup_df)
-    create_landcover_layer_hdf(config, lookup_df)
-    existing_landcover_status = install_existing_landcover_layer(config)
+    existing_landcover_status = (
+        install_existing_landcover_layer(config)
+        if config.has_existing_landcover_layer
+        else None
+    )
     _sync_landcover_map_layers(config)
     geometry_assoc_updated = _ensure_geometry_landcover_association(config)
     expected_region_df = sync_landcover_geometry(config, lookup_df)
@@ -5441,6 +6669,7 @@ def install_reference_geometry(
         "active_landcover_map_hdf": config.active_landcover_map_hdf,
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "existing_ras_layer": existing_landcover_status,
+        "native_landcover_layer": native_landcover_status,
         "geometry_landcover_association_updated": geometry_assoc_updated,
         "region_mannings": expected_region_df.to_dict(orient="records"),
     }
@@ -5463,13 +6692,24 @@ def sync_reference_geometry(config: RasMapperConfig) -> Dict[str, Any]:
         config.geom_hdf_path.unlink()
 
     region_records = None
-    existing_landcover_status = install_existing_landcover_layer(config)
+    existing_landcover_status = (
+        install_existing_landcover_layer(config)
+        if config.has_existing_landcover_layer
+        else None
+    )
+    native_landcover_status = None
     if config.landcover_lookup_csv.exists():
         lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
-        create_landcover_raster(config)
+        native_landcover_status = create_landcover_layer_with_rasmapper_gui(
+            config,
+            force=False,
+        )
         create_mannings_raster(config, lookup_df)
-        create_landcover_layer_hdf(config, lookup_df)
-        existing_landcover_status = install_existing_landcover_layer(config)
+        existing_landcover_status = (
+            install_existing_landcover_layer(config)
+            if config.has_existing_landcover_layer
+            else None
+        )
         _sync_landcover_map_layers(config)
         geometry_assoc_updated = _ensure_geometry_landcover_association(config)
         expected_region_df = sync_landcover_geometry(config, lookup_df)
@@ -5494,6 +6734,7 @@ def sync_reference_geometry(config: RasMapperConfig) -> Dict[str, Any]:
         "active_landcover_map_hdf": config.active_landcover_map_hdf,
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "existing_ras_layer": existing_landcover_status,
+        "native_landcover_layer": native_landcover_status,
         "geometry_landcover_association_updated": geometry_assoc_updated,
         "region_mannings": region_records,
         "geom_hdf_deleted": True,
@@ -5769,6 +7010,8 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         copy_file(source, destination)
     if config.junction_bc_csv_src is not None and config.junction_bc_csv_copy is not None:
         copy_file(config.junction_bc_csv_src, config.junction_bc_csv_copy)
+    if config.structure_csv_src is not None and config.structure_csv_copy is not None:
+        copy_file(config.structure_csv_src, config.structure_csv_copy)
 
     write_minimal_project_file(config)
     ensure_project_has_geom_reference(config)
@@ -5791,7 +7034,6 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
     landcover_lookup.to_csv(config.landcover_lookup_csv, index=False, encoding="utf-8")
     create_landcover_raster(config)
     create_mannings_raster(config, landcover_lookup)
-    create_landcover_layer_hdf(config, landcover_lookup)
     existing_landcover_status = install_existing_landcover_layer(config)
 
     dss_catalog = parse_dss_catalog(config.dss_catalog_copy)
@@ -5909,6 +7151,12 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
             for group in cross_section_groups
         ],
         "boundary_shp": config.boundary_shp,
+        "structure_csv": (
+            config.structure_csv_copy
+            if config.structure_csv_copy is not None
+            and config.structure_csv_copy.exists()
+            else None
+        ),
         "dss_catalog_csv": config.dss_catalog_csv,
         "preferred_dss_path": preferred_dss_path,
         "dss_paths_by_group": dss_paths_by_group,

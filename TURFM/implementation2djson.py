@@ -72,7 +72,7 @@ PREFERRED_DSS_F_PART = "Q100"
 DOWNSTREAM_BC_METHOD = "Normal Depth"
 PLAN_COMPUTATION_INTERVAL = "6SEC"
 SIMULATION_DURATION_HOURS = 24.0
-INSTALL_TIMEOUT_SECONDS = 120
+INSTALL_TIMEOUT_SECONDS = 60
 COMPUTE_TIMEOUT_SECONDS = 1800
 SKIP_GEOMETRY_REGENERATION = False
 COMPUTE_OVERWRITE = True
@@ -92,9 +92,12 @@ EXISTING_LANDCOVER_TIF_PATH: str | None = None
 EXISTING_LANDCOVER_HDF_PATH: str | None = None
 PREPARE_EXISTING_LANDCOVER_INPUTS = True
 EXISTING_LANDCOVER_OUTPUT_DIR: str | None = None
+USE_STRUCTURES = True
+STRUCTURES_CSV_NAME = "structures.csv"
 
 
 logger = logging.getLogger("implementation2djson")
+_STRUCTURE_ROWS_CACHE: dict[Path, list[dict[str, str]]] = {}
 
 
 @dataclass(frozen=True)
@@ -823,6 +826,7 @@ def build_v01_json_config(
         dtm_path=rasmapper_dtm,
         projection_file=projection_file,
     )
+    structure_csv = resolve_structure_csv(config, spec) if USE_STRUCTURES else None
     reference_geom = resolve_reference_geometry_file(rasmapper_script, ".g01")
     reference_geom_hdf = resolve_reference_geometry_file(rasmapper_script, ".g01.hdf")
     template_unsteady = resolve_template_file(rasmapper_script, "UnsteadyTemplate", ".u01")
@@ -860,6 +864,7 @@ def build_v01_json_config(
         "dss_name": str(dss_file),
         "cross_section_name": cross_section_paths,
         "junction_bc_csv_name": str(junction_csv) if junction_csv else None,
+        "structure_csv_name": str(structure_csv) if structure_csv else None,
         "landcover_name": str(landcover_shp),
         "existing_landcover_tif_name": str(existing_landcover_tif) if existing_landcover_tif else None,
         "existing_landcover_hdf_name": str(existing_landcover_hdf) if existing_landcover_hdf else None,
@@ -1007,6 +1012,123 @@ def resolve_landcover_source(
                 return matches[0]
 
     return write_uniform_landcover_shapefile(config, project_name, perimeter_shp)
+
+
+def find_essentials_structures_csv(config: Config) -> Path | None:
+    essentials_path = Path(config.ESSENTIALS_PATH)
+    preferred = essentials_path / STRUCTURES_CSV_NAME
+    if preferred.exists():
+        return preferred
+
+    candidates = sorted(
+        essentials_path.glob("*structure*.csv"),
+        key=version_sort_key,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def read_structure_rows(structures_csv: Path) -> list[dict[str, str]]:
+    structures_csv = structures_csv.resolve()
+    if structures_csv in _STRUCTURE_ROWS_CACHE:
+        return _STRUCTURE_ROWS_CACHE[structures_csv]
+
+    lines = structures_csv.read_text(
+        encoding="utf-8-sig",
+        errors="ignore",
+    ).splitlines()
+    first_line = lines[0] if lines else ""
+    delimiter = "\t" if "\t" in first_line else ","
+    with structures_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        rows = [
+            {
+                str(key).strip(): ("" if value is None else str(value).strip())
+                for key, value in row.items()
+            }
+            for row in reader
+        ]
+
+    _STRUCTURE_ROWS_CACHE[structures_csv] = rows
+    return rows
+
+
+def structure_group_key(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"(?i)(?:[_\-\s]*rev)?[_\-\s]*v\d+$", "", text)
+    return _normalize_name(text)
+
+
+def structure_row_matches_spec(row: dict[str, str], spec: RunSpec) -> bool:
+    row_project = row.get("Project") or row.get("project") or ""
+    row_subproject = (
+        row.get("Subproject")
+        or row.get("SubProject")
+        or row.get("subproject")
+        or ""
+    )
+    if row_project and not names_match(row_project, spec.source_project_name):
+        return False
+
+    candidates = [
+        spec.model_project_name,
+        spec.source_project_name,
+        *spec.sub_project_names,
+    ]
+    row_group = structure_group_key(row_subproject)
+    return any(
+        names_match(row_subproject, candidate)
+        or row_group == structure_group_key(candidate)
+        for candidate in candidates
+    )
+
+
+def write_filtered_structure_table(
+    config: Config,
+    spec: RunSpec,
+    rows: Iterable[dict[str, str]],
+) -> Path | None:
+    rows = list(rows)
+    if not rows:
+        return None
+
+    fieldnames: list[str] = []
+    for row in rows:
+        for field in row:
+            if field not in fieldnames:
+                fieldnames.append(field)
+
+    output_dir = project_temp_2d_dir(config, spec.model_project_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{safe_name(spec.model_project_name)}_structures.csv"
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return output_path
+
+
+def resolve_structure_csv(config: Config, spec: RunSpec) -> Path | None:
+    structures_csv = find_essentials_structures_csv(config)
+    if structures_csv is None:
+        logger.warning("No %s found in %s", STRUCTURES_CSV_NAME, config.ESSENTIALS_PATH)
+        return None
+
+    matched_rows = [
+        row
+        for row in read_structure_rows(structures_csv)
+        if structure_row_matches_spec(row, spec)
+    ]
+    structure_path = write_filtered_structure_table(config, spec, matched_rows)
+    if structure_path is not None:
+        logger.info(
+            "Prepared %s 2D structure row(s) for %s/%s from %s",
+            len(matched_rows),
+            spec.source_project_name,
+            spec.model_project_name,
+            structures_csv,
+        )
+    return structure_path
 
 
 def resolve_existing_landcover_pair(
@@ -1444,6 +1566,8 @@ def validate_v01_config(
         required.append(source_path(files_root, cross_section))
     if config.get("junction_bc_csv_name"):
         required.append(source_path(files_root, config["junction_bc_csv_name"]))
+    if config.get("structure_csv_name"):
+        required.append(source_path(files_root, config["structure_csv_name"]))
     if require_reference_geometry:
         required.extend(
             [
@@ -1762,6 +1886,11 @@ def jsonable(value: Any) -> Any:
 def safe_name(value: Any) -> str:
     safe = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(value)).strip("_")
     return safe or "rasmapper_project"
+
+
+def version_sort_key(path: Path) -> tuple[Any, ...]:
+    numbers = tuple(int(match) for match in re.findall(r"\d+", path.stem))
+    return (numbers, path.stat().st_mtime if path.exists() else 0.0, path.name)
 
 
 def plan_short_identifier(project_name: str) -> str:

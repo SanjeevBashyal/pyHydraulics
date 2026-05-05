@@ -1,0 +1,3 @@
+bc_name,bc_line_name,role,branch,station,mean_z,interior_side,reverse_if_interior_should_be_right,reverse_if_interior_should_be_left,method,normal_depth_slope,flow_hydrograph_slope,dss_path,offset_distance,storage_area_name
+upstream BC,upstream BC,upstream,main,1,1042.372,left,True,False,Flow Hydrograph,,0.05862277846080244,/BUR-ISP-MER-BUYUKGOKCELI/BURDUR/DEBI/01May2025/30Minute/Q1000/,1.0,BUYUKGOKCELI_2D
+downstream BC,downstream BC,downstream,main,37,976.525,right,False,True,Normal Depth,0.028261673250350592,,,1.0,BUYUKGOKCELI_2D

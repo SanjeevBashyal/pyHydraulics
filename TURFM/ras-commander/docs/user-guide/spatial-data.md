@@ -1,0 +1,657 @@
+# Working with Spatial Data and RASMapper
+
+RAS Commander provides comprehensive tools for working with HEC-RAS spatial datasets, including terrain, land cover, infiltration layers, and automated map generation. This guide covers accessing RASMapper configuration data and modifying spatial parameters for model calibration.
+
+## Overview
+
+When you initialize a RAS project, the library automatically parses the RASMapper file (`.rasmap`) and populates the `rasmap_df` DataFrame with paths to all spatial datasets. This provides programmatic access to terrain models, land cover layers, soil data, and more.
+
+## Understanding rasmap_df
+
+The `rasmap_df` DataFrame is automatically populated when you call `init_ras_project()`. It contains paths and metadata for all spatial datasets referenced in your RASMapper configuration.
+
+```python
+from ras_commander import init_ras_project, ras
+
+# Initialize project - automatically parses .rasmap file
+init_ras_project(r"C:\Projects\MyRasModel", "6.6")
+
+# Access rasmap DataFrame
+print(ras.rasmap_df)
+```
+
+### Available Spatial Data Types
+
+The `rasmap_df` typically contains paths to:
+
+- **Terrain data** - Digital elevation models (DEM/DTM)
+- **Land cover datasets** - Manning's n roughness layers
+- **Soil layers** - Hydrologic soil groups for infiltration
+- **Infiltration data** - Green-Ampt or SCS CN parameters
+- **Profile lines** - Cross-section locations
+- **Boundary features** - Flow and stage boundary locations
+
+### Accessing Specific Data Paths
+
+```python
+# Example: Get terrain HDF path
+terrain_path = ras.rasmap_df['terrain_hdf_path'][0]
+
+# Example: Get infiltration data path
+infiltration_path = ras.rasmap_df['infiltration_hdf_path'][0][0]
+
+# Example: Get land cover layer path
+landcover_path = ras.rasmap_df['landcover_hdf_path'][0]
+```
+
+## Map Layer Management
+
+The `RasMap` class provides methods for managing custom map layers in RASMapper, allowing you to add GeoJSON or shapefile layers programmatically.
+
+### Adding Custom Map Layers
+
+```python
+from ras_commander import init_ras_project, RasMap
+
+init_ras_project(r"C:\Projects\MyModel", "6.6")
+
+# Add a GeoJSON layer to RASMapper
+RasMap.add_map_layer(
+    layer_name="Boundary Conditions",
+    file_path="./custom_layers/boundaries.geojson",
+    layer_type="PolylineFeatureLayer"
+)
+```
+
+!!! warning "WGS84 Requirement for GeoJSON"
+    GeoJSON files for RASMapper **must** be in WGS84 (EPSG:4326) coordinate system:
+    ```python
+    # Always reproject before saving GeoJSON for RASMapper
+    gdf_wgs84 = gdf.to_crs("EPSG:4326")
+    gdf_wgs84.to_file("output.geojson", driver="GeoJSON")
+    ```
+
+### Listing and Removing Layers
+
+```python
+# List all custom map layers
+layers = RasMap.list_map_layers()
+for layer in layers:
+    print(f"  {layer['name']}: {layer['filename']}")
+
+# Remove a layer by name
+RasMap.remove_map_layer("Old Analysis Layer")
+```
+
+## Geometry Visibility Control
+
+Control which geometry layers are visible in RASMapper. This is useful when a project has multiple geometries and you want to focus on a specific one.
+
+### Listing Geometries
+
+```python
+# List all geometry layers with visibility status
+geoms = RasMap.list_geometries()
+for g in geoms:
+    status = "✓" if g['checked'] else " "
+    print(f"[{status}] {g['geom_number']}: {g['name']}")
+```
+
+Example output:
+```
+[✓] 06: Original 1D Model
+[ ] 08: 1D-2D Dam Break Model Refined Grid
+[ ] 09: Alternative Geometry
+```
+
+### Setting Visibility
+
+```python
+# Show a specific geometry
+RasMap.set_geometry_visibility("08", visible=True)
+
+# Hide a specific geometry
+RasMap.set_geometry_visibility("06", visible=False)
+
+# Hide all geometries except one
+RasMap.set_all_geometries_visibility(visible=False, except_geom="08")
+RasMap.set_geometry_visibility("08", visible=True)
+```
+
+### Geometry Identifier Formats
+
+The geometry visibility functions accept multiple identifier formats:
+
+| Format | Example | Notes |
+|--------|---------|-------|
+| Number | `"08"` or `"8"` | Geometry number |
+| With prefix | `"g08"` or `"G08"` | Common notation |
+| By name | `"1D-2D Dam Break Model"` | Full geometry name |
+| Filename | `"g08.hdf"` | Filename pattern |
+
+## Terrain Data Access
+
+The `RasMap` class provides methods for working with terrain datasets.
+
+### Getting RASMapper File Path
+
+```python
+from ras_commander import RasMap
+
+# Get path to .rasmap file
+rasmap_file = RasMap.get_rasmap_path()
+print(f"RASMapper file: {rasmap_file}")
+```
+
+### Listing Available Terrains
+
+```python
+# Get list of all terrain names in project
+terrains = RasMap.get_terrain_names(rasmap_file)
+print(f"Available terrains: {terrains}")
+# Output: ['Terrain50', 'Terrain10', 'LiDAR_2020']
+```
+
+This is useful when you have multiple terrain datasets and need to specify which one to use for map generation or analysis.
+
+## Land Cover and Soil Layers
+
+Land cover and soil data are critical for 2D modeling, controlling Manning's n roughness and infiltration parameters.
+
+### Accessing Land Cover Data
+
+Land cover datasets define Manning's n values across 2D flow areas. These are typically stored as HDF files referenced in the RASMapper configuration.
+
+```python
+# Get land cover layer path from rasmap_df
+landcover_path = ras.rasmap_df['landcover_hdf_path'][0]
+
+# Land cover is used for Manning's n assignment
+# See Manning's n Calibration section below for modification
+```
+
+### Accessing Soil Layer Data
+
+Soil layers define hydrologic soil groups (A, B, C, D) used for infiltration calculations.
+
+```python
+# Get soil layer path from rasmap_df
+soil_path = ras.rasmap_df['soil_hdf_path'][0]
+
+# Soil data is used with infiltration methods
+# See Infiltration Data Handling section below
+```
+
+## Automating Stored Map Generation
+
+HEC-RAS can generate stored maps (raster outputs like depth and water surface elevation) through the GUI. RAS Commander provides two approaches for automation:
+
+1. **`RasProcess.store_maps()`** - Headless CLI-based generation (recommended)
+2. **`RasMap.postprocess_stored_maps()`** - GUI automation approach
+
+### Headless Generation with RasProcess (Recommended)
+
+The `RasProcess` class uses the undocumented RasProcess.exe CLI tool bundled with HEC-RAS to generate stored maps without opening the GUI. This is faster and more reliable for batch processing.
+
+```python
+from ras_commander import RasCmdr, RasProcess
+
+# First, ensure the simulation has been run
+RasCmdr.compute_plan("01")
+
+# Generate stored maps (headless - no GUI)
+results = RasProcess.store_maps(
+    plan_number="01",
+    profile="Max",
+    wse=True,
+    depth=True,
+    velocity=True
+)
+
+# Results is a dict of generated file paths
+for map_type, files in results.items():
+    print(f"{map_type}: {len(files)} file(s)")
+    for f in files:
+        print(f"  - {f}")
+```
+
+#### Available Map Types
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `wse` | Water Surface Elevation | True |
+| `depth` | Water Depth | True |
+| `velocity` | Velocity Magnitude | True |
+| `froude` | Froude Number | False |
+| `shear_stress` | Bed Shear Stress | False |
+| `depth_x_velocity` | D×V Hazard Index | False |
+| `depth_x_velocity_sq` | D×V² Impact Index | False |
+
+#### Profile Selection
+
+```python
+# Generate Max values (default)
+results = RasProcess.store_maps(plan_number="01", profile="Max")
+
+# Generate Min values
+results = RasProcess.store_maps(plan_number="01", profile="Min")
+
+# Generate for specific timestep
+timestamps = RasProcess.get_plan_timestamps("01")
+results = RasProcess.store_maps(plan_number="01", profile=timestamps[10])
+```
+
+#### Batch Processing All Plans
+
+```python
+# Generate maps for ALL plans with HDF results
+all_results = RasProcess.store_all_maps(
+    profile="Max",
+    wse=True,
+    depth=True,
+    velocity=True,
+    froude=True
+)
+
+for plan_num, files in all_results.items():
+    total = sum(len(f) for f in files.values())
+    print(f"Plan {plan_num}: {total} files generated")
+```
+
+### GUI-Based Generation with RasMap
+
+The `RasMap.postprocess_stored_maps()` method opens the HEC-RAS GUI to generate maps. Use this when RasProcess is not available or for compatibility with older HEC-RAS versions.
+
+```python
+from ras_commander import RasCmdr, RasMap
+
+# First, ensure the simulation has been run
+RasCmdr.compute_plan("01")
+
+# Generate stored maps (opens HEC-RAS GUI)
+success = RasMap.postprocess_stored_maps(
+    plan_number="01",
+    specify_terrain="Terrain50",
+    layers=["Depth", "WSEL"]
+)
+
+if success:
+    print("Stored maps generated successfully!")
+```
+
+### Available Map Layers
+
+Common layer types you can generate:
+
+- `"Depth"` - Flow depth (ft or m)
+- `"WSEL"` - Water surface elevation (ft or m)
+- `"Velocity"` - Flow velocity magnitude (ft/s or m/s)
+- `"Shear"` - Bed shear stress (lb/ft² or N/m²)
+- `"Froude Number"` - Froude number (dimensionless)
+
+### Advanced Map Generation Options
+
+```python
+# Generate multiple layers for multiple plans
+for plan_num in ["01", "02", "03"]:
+    RasMap.postprocess_stored_maps(
+        plan_number=plan_num,
+        specify_terrain="Terrain50",
+        layers=["Depth", "WSEL", "Velocity"]
+    )
+
+# Generate maximum values for unsteady flow
+RasMap.postprocess_stored_maps(
+    plan_number="05",
+    specify_terrain="LiDAR_2020",
+    layers=["Depth (Max)", "WSEL (Max)", "Velocity (Max)"]
+)
+```
+
+### Custom Output Path
+
+By default, RasProcess.exe writes output to a folder named after the plan's ShortID (e.g., `./PlanShortID/`). This is hardcoded in RasProcess.exe and cannot be overridden via CLI arguments.
+
+The `output_path` parameter works around this by using individual `StoreMap` XML commands with an absolute `OutputBaseFilename`, writing files directly to your requested directory:
+
+```python
+# Output to a custom directory
+results = RasProcess.store_maps(
+    plan_number="01",
+    output_path="C:/MyProject/FloodMaps",
+    profile="Max",
+    wse=True,
+    depth=True
+)
+
+# Files are now in C:/MyProject/FloodMaps/
+for map_type, files in results.items():
+    for f in files:
+        print(f"  {f}")
+```
+
+Relative paths are resolved against the project folder:
+
+```python
+# Relative path - resolves to <project_folder>/exported_rasters/
+results = RasProcess.store_maps(
+    plan_number="01",
+    output_path="exported_rasters",
+    depth=True
+)
+```
+
+!!! note "How It Works"
+    The default `StoreAllMaps` CLI command hardcodes output to `<project_folder>/<Plan ShortID>/` with no override. When `output_path` is specified, `store_maps()` uses individual `StoreMap` XML commands instead, passing the resolved absolute path as `OutputBaseFilename`. C#'s `Path.Combine()` discards the ShortID prefix when the second argument is absolute, so files are written directly to the requested directory.
+
+### Default Output Location
+
+Without `output_path`, generated stored maps are saved in the project directory:
+
+```
+MyRasModel/
+├── MyRasModel.rasmap
+├── MyRasModel.p01
+├── MyRasModel.p01.hdf
+└── MyRasModel.p01/
+    ├── Depth (Max).tif
+    ├── WSEL (Max).tif
+    └── Velocity (Max).tif
+```
+
+## Manning's n Calibration Workflow
+
+Calibrating Manning's n roughness coefficients is a common modeling task. RAS Commander provides tools to programmatically adjust Manning's n values for 2D flow areas.
+
+### Reading Current Manning's n Values
+
+```python
+from ras_commander import RasGeo, RasPlan
+
+# Get geometry file path for the plan
+geom_path = RasPlan.get_geom_path("01")
+
+# Extract current Manning's n values
+mannings_df = RasGeo.get_mannings_baseoverrides(geom_path)
+print(mannings_df)
+```
+
+The returned DataFrame contains:
+
+- `Land Cover Class` - Land cover type name
+- `Base Manning's n Value` - Current roughness coefficient
+- Other metadata depending on your model configuration
+
+### Modifying Manning's n Values
+
+```python
+# Increase all Manning's n values by 20%
+mannings_df['Base Manning\'s n Value'] *= 1.2
+
+# Or modify specific land cover classes
+mannings_df.loc[
+    mannings_df['Land Cover Class'] == 'Forest',
+    'Base Manning\'s n Value'
+] = 0.15
+
+# Write modified values back to geometry file
+RasGeo.set_mannings_baseoverrides(geom_path, mannings_df)
+```
+
+### Clearing Geometry Preprocessor Files
+
+!!! warning "Critical Step: Clear Geometry Preprocessor"
+    After modifying Manning's n values (or any geometry parameters), you **must** clear the geometry preprocessor files. Otherwise, HEC-RAS will use the cached preprocessed geometry and ignore your changes.
+
+```python
+# Clear preprocessed geometry files
+RasGeo.clear_geompre_files()
+
+# Now re-run the simulation with updated Manning's n
+RasCmdr.compute_plan("01")
+```
+
+### Calibration Loop Example
+
+```python
+# Automated calibration loop
+calibration_factors = [0.8, 1.0, 1.2, 1.4]
+
+for factor in calibration_factors:
+    # Modify Manning's n
+    geom_path = RasPlan.get_geom_path("01")
+    mannings_df = RasGeo.get_mannings_baseoverrides(geom_path)
+    mannings_df['Base Manning\'s n Value'] *= factor
+    RasGeo.set_mannings_baseoverrides(geom_path, mannings_df)
+
+    # Clear preprocessor and run
+    RasGeo.clear_geompre_files()
+    RasCmdr.compute_plan("01", dest_folder=f"run_n_factor_{factor}")
+
+    # Extract and compare results
+    # (See HDF data extraction guide)
+```
+
+## Infiltration Data Handling
+
+For 2D unsteady flow models with infiltration, RAS Commander provides the `HdfInfiltration` class to read and modify infiltration parameters stored in HDF files.
+
+### Reading Infiltration Parameters
+
+```python
+from ras_commander import HdfInfiltration, ras
+
+# Get infiltration HDF path from rasmap_df
+infiltration_path = ras.rasmap_df['infiltration_hdf_path'][0][0]
+
+# Extract current infiltration parameters
+infil_df = HdfInfiltration.get_infiltration_baseoverrides(infiltration_path)
+print(infil_df)
+```
+
+The DataFrame typically contains columns like:
+
+- `Land Cover Class` - Land cover type
+- `Maximum Deficit` - Maximum infiltration deficit (in)
+- `Initial Deficit` - Initial infiltration deficit (in)
+- `Potential Percolation Rate` - Percolation rate (in/hr)
+- `Hydraulic Conductivity` - Soil hydraulic conductivity (in/hr)
+
+### Scaling Infiltration Parameters
+
+```python
+# Define scale factors for each parameter
+scale_factors = {
+    'Maximum Deficit': 1.2,        # Increase by 20%
+    'Initial Deficit': 1.0,         # No change
+    'Potential Percolation Rate': 0.8  # Decrease by 20%
+}
+
+# Apply scaling and get updated DataFrame
+updated_df = HdfInfiltration.scale_infiltration_data(
+    infiltration_path,
+    infil_df,
+    scale_factors
+)
+
+# The scaled values are automatically written to the HDF file
+```
+
+### Infiltration Calibration Workflow
+
+```python
+from ras_commander import HdfInfiltration, RasGeo, RasCmdr
+
+# 1. Get infiltration data path
+infiltration_path = ras.rasmap_df['infiltration_hdf_path'][0][0]
+infil_df = HdfInfiltration.get_infiltration_baseoverrides(infiltration_path)
+
+# 2. Modify infiltration parameters
+scale_factors = {
+    'Maximum Deficit': 1.3,
+    'Initial Deficit': 1.1,
+    'Potential Percolation Rate': 0.9
+}
+updated_df = HdfInfiltration.scale_infiltration_data(
+    infiltration_path,
+    infil_df,
+    scale_factors
+)
+
+# 3. Clear geometry preprocessor
+RasGeo.clear_geompre_files()
+
+# 4. Re-run simulation
+RasCmdr.compute_plan("01", dest_folder="calibration_infil_run1")
+```
+
+### Common Infiltration Parameters
+
+**Green-Ampt Method:**
+
+- `Hydraulic Conductivity` - Rate of water movement through soil
+- `Suction Head` - Soil capillary suction
+- `Initial Moisture Deficit` - Initial soil moisture deficit
+
+**SCS Curve Number Method:**
+
+- `Curve Number` - Composite CN based on soil type and land use
+- `Initial Abstraction Ratio` - Ia/S ratio (typically 0.2)
+
+## Complete Spatial Data Workflow Example
+
+This example demonstrates a complete workflow combining terrain, Manning's n, and infiltration adjustments:
+
+```python
+from ras_commander import (
+    init_ras_project, ras, RasMap, RasGeo, RasPlan,
+    RasCmdr, HdfInfiltration
+)
+
+# 1. Initialize project
+init_ras_project(r"C:\Projects\FloodModel", "6.6")
+
+# 2. Check available spatial data
+print("Available terrains:", RasMap.get_terrain_names(RasMap.get_rasmap_path()))
+print("Rasmap data:\n", ras.rasmap_df)
+
+# 3. Calibration: Adjust Manning's n
+geom_path = RasPlan.get_geom_path("01")
+mannings_df = RasGeo.get_mannings_baseoverrides(geom_path)
+
+# Increase forest roughness
+mannings_df.loc[
+    mannings_df['Land Cover Class'] == 'Forest',
+    'Base Manning\'s n Value'
+] = 0.18
+
+RasGeo.set_mannings_baseoverrides(geom_path, mannings_df)
+
+# 4. Calibration: Adjust infiltration
+infiltration_path = ras.rasmap_df['infiltration_hdf_path'][0][0]
+infil_df = HdfInfiltration.get_infiltration_baseoverrides(infiltration_path)
+
+scale_factors = {
+    'Maximum Deficit': 1.25,
+    'Potential Percolation Rate': 0.85
+}
+HdfInfiltration.scale_infiltration_data(infiltration_path, infil_df, scale_factors)
+
+# 5. Clear preprocessor and run
+RasGeo.clear_geompre_files()
+RasCmdr.compute_plan("01", dest_folder="calibrated_run")
+
+# 6. Generate result maps
+RasMap.postprocess_stored_maps(
+    plan_number="01",
+    specify_terrain="Terrain50",
+    layers=["Depth (Max)", "WSEL (Max)", "Velocity (Max)"]
+)
+
+print("Calibration run complete with updated spatial parameters!")
+```
+
+## Best Practices
+
+### Always Clear Geometry Preprocessor
+
+!!! warning "Critical for Geometry Changes"
+    Whenever you modify geometry-related data (Manning's n, cross sections, structures, etc.), always call:
+    ```python
+    RasGeo.clear_geompre_files()
+    ```
+    This ensures HEC-RAS rebuilds the geometry from your modified files rather than using cached preprocessed data.
+
+### Version Control Spatial Data
+
+When calibrating models:
+
+1. Keep original spatial datasets backed up
+2. Use `dest_folder` parameter to create separate run directories
+3. Document scaling factors and modifications in your scripts
+4. Track which parameters changed between calibration iterations
+
+### Verify Changes Before Running
+
+```python
+# Good practice: Verify changes before running expensive simulations
+mannings_df = RasGeo.get_mannings_baseoverrides(geom_path)
+print("Manning's n summary:")
+print(mannings_df['Base Manning\'s n Value'].describe())
+
+# Check for unrealistic values
+if (mannings_df['Base Manning\'s n Value'] > 0.5).any():
+    print("Warning: Some Manning's n values exceed 0.5!")
+```
+
+### Use Descriptive Folder Names
+
+```python
+# Good: Descriptive folder names for calibration runs
+RasCmdr.compute_plan("01", dest_folder="n_increased_20pct_infil_decreased_15pct")
+
+# Bad: Generic folder names
+RasCmdr.compute_plan("01", dest_folder="run1")
+```
+
+## Troubleshooting
+
+### Maps Not Generating
+
+If `postprocess_stored_maps()` fails:
+
+1. Verify the simulation completed successfully
+2. Check that the HDF file exists (`MyModel.p01.hdf`)
+3. Ensure terrain name matches exactly (case-sensitive)
+4. Confirm RASMapper file is not corrupted
+
+### Manning's n Changes Not Applied
+
+If Manning's n modifications don't affect results:
+
+1. **Most common:** Forgot to call `RasGeo.clear_geompre_files()`
+2. Check that you're modifying the correct geometry file
+3. Verify the plan references the geometry file you modified
+4. Ensure no errors in `set_mannings_baseoverrides()`
+
+### Infiltration Changes Not Applied
+
+If infiltration modifications don't affect results:
+
+1. Call `RasGeo.clear_geompre_files()` after infiltration changes
+2. Verify the infiltration HDF path is correct
+3. Check that your plan uses infiltration (2D unsteady flow)
+4. Ensure infiltration is enabled in the unsteady flow file
+
+## Related Topics
+
+- [Geometry Operations](geometry-operations.md) - Modifying cross sections, structures, and connections
+- [HDF Data Extraction](hdf-data-extraction.md) - Reading simulation results from HDF files
+- [Plan Execution](plan-execution.md) - Running simulations and parallel execution
+- [Workflows & Patterns](workflows-and-patterns.md) - Common workflow patterns including calibration
+
+## Additional Resources
+
+- HEC-RAS Mapper User's Manual - Understanding RASMapper data structures
+- HEC-RAS 2D Modeling User's Manual - Manning's n and infiltration guidance
+- RAS Commander API Reference - Complete method documentation

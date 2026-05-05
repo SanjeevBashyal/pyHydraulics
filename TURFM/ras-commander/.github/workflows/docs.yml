@@ -1,0 +1,67 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'examples/**'  # Trigger on notebook changes
+      - 'ras_commander/**'
+      - '.claude/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: write  # Needed for gh-pages deployment
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # For git-revision-date-localized plugin
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-docs-${{ hashFiles('docs/requirements-docs.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-docs-
+
+      - name: Install documentation dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r docs/requirements-docs.txt
+          pip install -e .
+
+      - name: Prepare notebooks for docs
+        run: |
+          # Pre-convert notebooks to markdown (30x faster than mkdocs-jupyter)
+          python .claude/scripts/prepare_notebooks_for_docs.py
+          # Copy supporting files
+          cp examples/README.md docs/notebooks/ || true
+          cp examples/AGENTS.md docs/notebooks/ || true
+
+      - name: Generate cognitive infrastructure docs
+        run: |
+          python .claude/scripts/generate_cognitive_docs.py
+
+      - name: Build and deploy documentation
+        run: |
+          mkdocs gh-deploy --force

@@ -1,0 +1,204 @@
+{
+  "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\Land Classification\\LandCover.tif",
+  "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\Land Classification\\LandCover.hdf",
+  "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\Land Classification\\LandCover.tif",
+  "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\Land Classification\\LandCover.hdf",
+  "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\LandCover\\LC_BUYUKGOKCELI_ManningN_2m.tif",
+  "lookup_records": [
+    {
+      "KodText": "1122",
+      "Adi": "Kesikli k?rsal yap?s?",
+      "Manningn": 0.013
+    },
+    {
+      "KodText": "2222",
+      "Adi": "S\u00fcrekli sulanan meyve bah\u00e7esi",
+      "Manningn": 0.08
+    },
+    {
+      "KodText": "2422",
+      "Adi": "S\u00fcrekli sulanan kar???k tar?m",
+      "Manningn": 0.04
+    },
+    {
+      "KodText": "243",
+      "Adi": "Ba?l?ca tar?m ama\u00e7l? kullan?lan, \u00f6nemli do",
+      "Manningn": 0.05
+    },
+    {
+      "KodText": "324",
+      "Adi": "Ge\u00e7i? orman-\u00e7al? alanlar?",
+      "Manningn": 0.06
+    }
+  ],
+  "region_records": [
+    {
+      "Table Number": "20",
+      "Land Cover Name": "NoData",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "111",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "121",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "133",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "142",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "243",
+      "Base Manning's n Value": 0.05,
+      "Base Mannings n Value": 0.05,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "312",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "321",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "323",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "324",
+      "Base Manning's n Value": 0.06,
+      "Base Mannings n Value": 0.06,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "333",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "411",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "421",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "512",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "1122",
+      "Base Manning's n Value": 0.013,
+      "Base Mannings n Value": 0.013,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "2111",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "2121",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "2222",
+      "Base Manning's n Value": 0.08,
+      "Base Mannings n Value": 0.08,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "2421",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "20",
+      "Land Cover Name": "2422",
+      "Base Manning's n Value": 0.04,
+      "Base Mannings n Value": 0.04,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    }
+  ],
+  "existing_ras_layer": null,
+  "native_landcover_layer": {
+    "type": "generated_rasmapper_landcover",
+    "created_with_gui": false,
+    "landcover_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\Land Classification\\LandCover.tif",
+    "landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\BUYUKGOKCELI\\Land Classification\\LandCover.hdf"
+  },
+  "geometry_landcover_association_updated": true
+}
