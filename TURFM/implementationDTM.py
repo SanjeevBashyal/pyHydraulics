@@ -17,6 +17,7 @@ BUFFER_M = 20.0
 BLEND_TYPE = "cubic"
 BANK_OFFSET_M = 0.2
 SKEWNESS_CORRECTION = True
+CENTERLINE_NORMAL_SAMPLE_DISTANCE_M = 3.0
 FULL_CROSS_SECTION_WEIGHT_DISTANCE_M = 1.5
 TRANSITION_TO_DTM_DISTANCE_M = 5.0
 JUNCTION_TOLERANCE = 50.0
@@ -75,6 +76,7 @@ if __name__ == "__main__":
         blend_type=BLEND_TYPE,
         bank_offset_m=BANK_OFFSET_M,
         skewness_correction=SKEWNESS_CORRECTION,
+        centerline_normal_sample_distance_m=CENTERLINE_NORMAL_SAMPLE_DISTANCE_M,
         full_cross_section_weight_distance_m=FULL_CROSS_SECTION_WEIGHT_DISTANCE_M,
         transition_to_dtm_distance_m=TRANSITION_TO_DTM_DISTANCE_M,
         junction_tolerance=JUNCTION_TOLERANCE,

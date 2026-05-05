@@ -1,0 +1,41 @@
+{
+  "cross_section_csv":"C:\\Users\\Ripple\\Downloads\\Turkey Flood\\Group-4-Model\\1 Bur-Bur\\ARDICLI\\BUR-ISP-KEC-ARDICLI\\BUR-ISP-KEC-ARDICLI_KESIT_TESLIM_V1\\BUR-ISP-KEC-ARDICLI_KESIT_TESLIM_V1.csv",
+  "bank_shp":"C:\\Users\\Ripple\\Downloads\\Turkey Flood\\Group-4-Model\\1 Bur-Bur\\ARDICLI\\BUR-ISP-KEC-ARDICLI\\SEV_USTU\\BUR-ISP-KEC-ARDICLI_SEV_USTU_V1.shp",
+  "source_dtm":"C:\\Users\\Ripple\\Downloads\\Turkey Flood\\Group-4-Model\\0 Essentials\\DTMs\\SET7_36_dtm.tif",
+  "previous_tif":"C:\\Users\\Ripple\\Downloads\\Turkey Flood\\Group-4-Model\\3 GIS\\ARDICLI\\DTM\\ARDICLI_channel_terrain.tif",
+  "diagnostic_tif":"E:\\0_Python\\pyHydraulics\\TURFM\\_diagnostics\\ardicli_centerline_weighted\\ARDICLI_channel_terrain_centerline_weighted.tif",
+  "station_pair":[
+    "2",
+    "1"
+  ],
+  "centerline_measure_pair_m":[
+    409.3533867611,
+    493.2232873567
+  ],
+  "previous_profile":{
+    "max_step_m":3.6994628906,
+    "p95_step_m":0.2864807129,
+    "p99_step_m":0.8745623779,
+    "total_variation_m":28.8508911133,
+    "largest_jump_offset_m":-16.25
+  },
+  "centerline_weighted_profile":{
+    "max_step_m":1.4776000977,
+    "p95_step_m":0.245916748,
+    "p99_step_m":1.1401898193,
+    "total_variation_m":25.596496582,
+    "largest_jump_offset_m":-25.5
+  },
+  "previous_corridor_gradient":{
+    "sample_cells":29697,
+    "p95_gradient_m_per_m":0.7262076464,
+    "p99_gradient_m_per_m":2.9185758046,
+    "max_gradient_m_per_m":5.5997421321
+  },
+  "centerline_weighted_corridor_gradient":{
+    "sample_cells":29697,
+    "p95_gradient_m_per_m":0.6542477609,
+    "p99_gradient_m_per_m":2.3921303652,
+    "max_gradient_m_per_m":3.9599479151
+  }
+}

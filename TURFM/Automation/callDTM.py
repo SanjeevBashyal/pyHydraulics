@@ -148,6 +148,7 @@ class DTM:
         junction_half_section_interpolation=True,
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
         split_disconnected_components=True,
     ):
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
@@ -239,6 +240,7 @@ class DTM:
                 junction_half_section_interpolation=junction_half_section_interpolation,
                 junction_bank_structure_protection_m=junction_bank_structure_protection_m,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             result["dtm_path"] = str(dtm_path)
             result["component"] = output_context["stem"]
@@ -316,6 +318,7 @@ class DTM:
         junction_half_section_interpolation=True,
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
         split_disconnected_components=True,
     ):
         project_subprojects = self.discover_project_subprojects()
@@ -359,6 +362,7 @@ class DTM:
                     junction_half_section_interpolation=junction_half_section_interpolation,
                     junction_bank_structure_protection_m=junction_bank_structure_protection_m,
                     skewness_correction=skewness_correction,
+                    centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
                     split_disconnected_components=split_disconnected_components,
                 )
             )
@@ -378,6 +382,7 @@ class DTM:
         full_cross_section_weight_distance_m=1.5,
         transition_to_dtm_distance_m=5.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         """
         Generates the interpolated DTM channel terrain for the active sub-project.
@@ -402,6 +407,7 @@ class DTM:
             full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
             transition_to_dtm_distance_m=transition_to_dtm_distance_m,
             skewness_correction=skewness_correction,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
 
         if modifier is None:

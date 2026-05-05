@@ -431,7 +431,44 @@ class DTMChannelModifier:
         return np.array([1.0, 0.0], dtype=float)
 
     @staticmethod
-    def _compute_cross_section_skewness(line, centerline, centerline_distance):
+    def _centerline_unit_tangents(centerline, centerline_distances, sample_distance=3.0):
+        """Vectorized bend-smoothed tangents sampled around each centerline chainage."""
+        distances = np.asarray(centerline_distances, dtype=float)
+        tangents = np.zeros((distances.size, 2), dtype=float)
+        cl_length = float(centerline.length)
+        if cl_length <= 0.0 or distances.size == 0:
+            tangents[:, 0] = 1.0
+            return tangents
+
+        sample = max(float(sample_distance), 0.05)
+        d1 = np.maximum(0.0, distances - sample)
+        d2 = np.minimum(cl_length, distances + sample)
+        collapsed = d2 <= d1
+        if np.any(collapsed):
+            d1[collapsed] = np.maximum(0.0, distances[collapsed] - 1e-3)
+            d2[collapsed] = np.minimum(cl_length, distances[collapsed] + 1e-3)
+
+        try:
+            import shapely
+
+            p1 = shapely.line_interpolate_point(centerline, d1)
+            p2 = shapely.line_interpolate_point(centerline, d2)
+            tangents[:, 0] = shapely.get_x(p2) - shapely.get_x(p1)
+            tangents[:, 1] = shapely.get_y(p2) - shapely.get_y(p1)
+        except Exception:
+            for index, (start_d, end_d) in enumerate(zip(d1, d2)):
+                p1 = centerline.interpolate(float(start_d))
+                p2 = centerline.interpolate(float(end_d))
+                tangents[index] = (p2.x - p1.x, p2.y - p1.y)
+
+        norms = np.linalg.norm(tangents, axis=1)
+        valid = norms > 0.0
+        tangents[valid] = tangents[valid] / norms[valid, None]
+        tangents[~valid] = np.array([1.0, 0.0], dtype=float)
+        return tangents
+
+    @staticmethod
+    def _compute_cross_section_skewness(line, centerline, centerline_distance, centerline_normal_sample_distance_m=3.0):
         coords = np.asarray(line.coords)[:, :2]
         if len(coords) < 2:
             return 0.0, 0.0, 1.0
@@ -445,6 +482,7 @@ class DTMChannelModifier:
         tangent = DTMChannelModifier._centerline_unit_tangent(
             centerline,
             centerline_distance,
+            sample_distance=centerline_normal_sample_distance_m,
         )
         normal = np.array([-tangent[1], tangent[0]], dtype=float)
         normal_norm = np.linalg.norm(normal)
@@ -459,6 +497,35 @@ class DTMChannelModifier:
         return angle_radians, angle_degrees, cosine_safe
 
     @staticmethod
+    def _cross_section_positive_side_direction(
+        line,
+        centerline,
+        centerline_distance,
+        center_point,
+        centerline_normal_sample_distance_m=3.0,
+    ):
+        """Returns the profile direction (+1 end, -1 start) for centerline-positive side."""
+        coords = np.asarray(line.coords)[:, :2]
+        if len(coords) < 2:
+            return 1.0
+
+        tangent = DTMChannelModifier._centerline_unit_tangent(
+            centerline,
+            centerline_distance,
+            sample_distance=centerline_normal_sample_distance_m,
+        )
+        normal = np.array([-tangent[1], tangent[0]], dtype=float)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm <= 0:
+            return 1.0
+        normal /= normal_norm
+
+        center_xy = np.array([center_point.x, center_point.y], dtype=float)
+        start_dot = float(np.dot(coords[0] - center_xy, normal))
+        end_dot = float(np.dot(coords[-1] - center_xy, normal))
+        return -1.0 if start_dot > end_dot else 1.0
+
+    @staticmethod
     def _build_corrected_section_profile(
         line,
         centerline,
@@ -466,6 +533,7 @@ class DTMChannelModifier:
         center_point,
         bank_lines=None,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         coords = np.asarray(line.coords)
         if coords.shape[0] < 2:
@@ -485,6 +553,7 @@ class DTMChannelModifier:
             line,
             centerline,
             centerline_distance,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
         distance_cosine = cosine_safe if skewness_correction else 1.0
 
@@ -648,7 +717,16 @@ class DTMChannelModifier:
         return coords, distances
 
     @staticmethod
-    def _cell_signed_offsets_and_bank_widths(centerline, bank_lines, xs, ys, cxs, cys, centerline_distances):
+    def _cell_signed_offsets_and_bank_widths(
+        centerline,
+        bank_lines,
+        xs,
+        ys,
+        cxs,
+        cys,
+        centerline_distances,
+        centerline_normal_sample_distance_m=3.0,
+    ):
         if len(bank_lines) < 2:
             fallback = np.full_like(np.asarray(xs, dtype=float), 1.0, dtype=float)
             return np.asarray(xs, dtype=float) * 0.0, fallback
@@ -660,8 +738,13 @@ class DTMChannelModifier:
 
         positive_width_samples = np.zeros(len(cl_coords), dtype=float)
         negative_width_samples = np.zeros(len(cl_coords), dtype=float)
+        width_tangents = DTMChannelModifier._centerline_unit_tangents(
+            centerline,
+            cl_distances,
+            sample_distance=centerline_normal_sample_distance_m,
+        )
         for index, coord in enumerate(cl_coords):
-            tangent = DTMChannelModifier._centerline_unit_tangent(centerline, cl_distances[index])
+            tangent = width_tangents[index]
             normal = np.array([-tangent[1], tangent[0]], dtype=float)
             point = Point(float(coord[0]), float(coord[1]))
             signed_widths = []
@@ -685,15 +768,15 @@ class DTMChannelModifier:
             )
 
         centerline_distances = np.asarray(centerline_distances, dtype=float)
-        segment_index = np.searchsorted(cl_distances, centerline_distances, side="right") - 1
-        segment_index = np.clip(segment_index, 0, len(cl_coords) - 2)
-        segment_vectors = cl_coords[segment_index + 1] - cl_coords[segment_index]
-        segment_lengths = np.linalg.norm(segment_vectors, axis=1)
-        safe_lengths = np.maximum(segment_lengths, 1e-6)
+        tangent_vectors = DTMChannelModifier._centerline_unit_tangents(
+            centerline,
+            centerline_distances,
+            sample_distance=centerline_normal_sample_distance_m,
+        )
         normals = np.column_stack(
             (
-                -segment_vectors[:, 1] / safe_lengths,
-                segment_vectors[:, 0] / safe_lengths,
+                -tangent_vectors[:, 1],
+                tangent_vectors[:, 0],
             )
         )
         cell_vectors = np.column_stack((np.asarray(xs) - np.asarray(cxs), np.asarray(ys) - np.asarray(cys)))
@@ -759,6 +842,7 @@ class DTMChannelModifier:
         full_cross_section_weight_distance_m=1.5,
         transition_to_dtm_distance_m=5.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         """
         Iterates through every cell in the DTM, checks if it lies inside the
@@ -851,7 +935,16 @@ class DTMChannelModifier:
                 centerline=centerline,
                 centerline_distance=d_xs,
                 center_point=pt_C,
+                bank_lines=bank_lines,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
+            )
+            positive_side_direction = DTMChannelModifier._cross_section_positive_side_direction(
+                line=line,
+                centerline=centerline,
+                centerline_distance=d_xs,
+                center_point=pt_C,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             
             stations_list.append({
@@ -863,6 +956,7 @@ class DTMChannelModifier:
                 "d_C_xs_corrected": section_profile["corrected_center_distance"],
                 "skewness_angle_degrees": section_profile["skewness_angle_degrees"],
                 "skewness_cosine": section_profile["skewness_cosine"],
+                "positive_side_direction": positive_side_direction,
                 "z_func": section_profile["z_func"],
             })
             
@@ -889,6 +983,7 @@ class DTMChannelModifier:
             modifier.banks_gdf,
             interval=1.0,
             skewness_correction=skewness_correction,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
         xs_mask = rasterize(
             [xs_poly],
@@ -978,6 +1073,18 @@ class DTMChannelModifier:
                 
             d_cells = cl_cum_dist[best_j] + best_t * np.hypot(cl_coords[best_j+1, 0] - cl_coords[best_j, 0], cl_coords[best_j+1, 1] - cl_coords[best_j, 1])
 
+        signed_offsets, _ = DTMChannelModifier._cell_signed_offsets_and_bank_widths(
+            centerline=centerline,
+            bank_lines=bank_lines,
+            xs=xs,
+            ys=ys,
+            cxs=cxs,
+            cys=cys,
+            centerline_distances=d_cells,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
+        )
+        dists_cl = np.abs(signed_offsets)
+
         idx_dn = np.searchsorted(d_xs_array, d_cells)
         idx_dn = np.clip(idx_dn, 1, len(d_xs_array) - 1)
         idx_up = idx_dn - 1
@@ -999,44 +1106,47 @@ class DTMChannelModifier:
             y_m = ys[mask]
             bw_m = np.maximum(bws[mask], 1e-6)
             dist_cl_m = dists_cl[mask]
+            signed_offset_m = signed_offsets[mask]
+            d_cell_m = d_cells[mask]
             
             if has_shapely2:
                 pts_shp = shapely.points(x_m, y_m)
                 dist_up_m = shapely.distance(pts_shp, st_up['line'])
                 dist_dn_m = shapely.distance(pts_shp, st_dn['line'])
-                d_cell_up_m = shapely.line_locate_point(st_up['line'], pts_shp)
-                d_cell_dn_m = shapely.line_locate_point(st_dn['line'], pts_shp)
             else:
                 dist_up_m = np.zeros(len(x_m))
                 dist_dn_m = np.zeros(len(x_m))
-                d_cell_up_m = np.zeros(len(x_m))
-                d_cell_dn_m = np.zeros(len(x_m))
                 for k in range(len(x_m)):
                     p = Point(x_m[k], y_m[k])
                     dist_up_m[k] = p.distance(st_up['line'])
                     dist_dn_m[k] = p.distance(st_dn['line'])
-                    d_cell_up_m[k] = st_up['line'].project(p)
-                    d_cell_dn_m[k] = st_dn['line'].project(p)
             
             dist_up_array[mask] = dist_up_m
             dist_dn_array[mask] = dist_dn_m
 
             # Up Z
             mapped_up = dist_cl_m * (st_up['bw_xs'] / bw_m)
-            dir_up = np.where(d_cell_up_m >= st_up['d_C_xs'], 1, -1)
+            dir_up = np.where(
+                signed_offset_m >= 0.0,
+                st_up["positive_side_direction"],
+                -st_up["positive_side_direction"],
+            )
             offset_up = st_up['d_C_xs_corrected'] + dir_up * mapped_up
             z_up = st_up['z_func'](offset_up)
 
             # Dn Z
             mapped_dn = dist_cl_m * (st_dn['bw_xs'] / bw_m)
-            dir_dn = np.where(d_cell_dn_m >= st_dn['d_C_xs'], 1, -1)
+            dir_dn = np.where(
+                signed_offset_m >= 0.0,
+                st_dn["positive_side_direction"],
+                -st_dn["positive_side_direction"],
+            )
             offset_dn = st_dn['d_C_xs_corrected'] + dir_dn * mapped_dn
             z_dn = st_dn['z_func'](offset_dn)
             
-            tot = dist_up_m + dist_dn_m
-            tot_safe = np.maximum(tot, 1e-6)
-            w1 = np.where(tot == 0, 1.0, dist_dn_m / tot_safe)
-            w2 = np.where(tot == 0, 0.0, dist_up_m / tot_safe)
+            reach_length = max(float(st_dn["d_xs"] - st_up["d_xs"]), 1e-6)
+            w2 = np.clip((d_cell_m - st_up["d_xs"]) / reach_length, 0.0, 1.0)
+            w1 = 1.0 - w2
             
             new_zs[mask] = w1 * z_up + w2 * z_dn
 
@@ -1118,6 +1228,7 @@ class DTMChannelModifier:
         junction_half_section_interpolation=True,
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         """
         Builds a junction-aware channel terrain for one river system.
@@ -1179,6 +1290,7 @@ class DTMChannelModifier:
                 full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
                 transition_to_dtm_distance_m=transition_to_dtm_distance_m,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             modifiers.append(modifier)
 
@@ -1198,6 +1310,7 @@ class DTMChannelModifier:
                 full_cross_section_weight_distance_m=full_cross_section_weight_distance_m,
                 transition_to_dtm_distance_m=transition_to_dtm_distance_m,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
         final_data = DTMChannelModifier._overlay_channel_rasters(
             modifiers=modifiers,
@@ -1218,6 +1331,7 @@ class DTMChannelModifier:
                     blend_type=blend_type,
                     bank_structure_protection_m=junction_bank_structure_protection_m,
                     skewness_correction=skewness_correction,
+                    centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
                 )
             )
         final_modifier.dtm_data = final_data
@@ -1282,6 +1396,7 @@ class DTMChannelModifier:
             "junction_half_section_interpolation": bool(junction_half_section_interpolation),
             "junction_bank_structure_protection_m": float(junction_bank_structure_protection_m),
             "skewness_correction": bool(skewness_correction),
+            "centerline_normal_sample_distance_m": float(centerline_normal_sample_distance_m),
             "network_csv_path": str(network_csv_path) if network_csv_path else None,
             "junction_coordinates_csv": str(junction_coordinates_csv_path) if junction_coordinates_csv_path else None,
             "dtm_path": str(dtm_path),
@@ -1318,6 +1433,7 @@ class DTMChannelModifier:
         blend_type="cubic",
         bank_structure_protection_m=1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         updated = np.array(base_data, copy=True)
         original = np.asarray(original_dtm_data if original_dtm_data is not None else base_data)
@@ -1340,6 +1456,7 @@ class DTMChannelModifier:
                 bank_offset_m=bank_offset_m,
                 bank_structure_protection_m=bank_structure_protection_m,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             clipped_banks = DTMChannelModifier._junction_bank_lines_between_cross_sections(
                 tributary=tributary,
@@ -1518,6 +1635,7 @@ class DTMChannelModifier:
         transition_to_dtm_distance_m=5.0,
         bank_structure_protection_m=1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         height, width = base_modifier.dtm_data.shape
         mask = np.zeros((height, width), dtype=bool)
@@ -1536,6 +1654,7 @@ class DTMChannelModifier:
                 bank_offset_m=bank_offset_m,
                 bank_structure_protection_m=bank_structure_protection_m,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             clipped_banks = DTMChannelModifier._junction_bank_lines_between_cross_sections(
                 tributary=tributary,
@@ -1609,6 +1728,7 @@ class DTMChannelModifier:
         bank_offset_m=0.2,
         bank_structure_protection_m=1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         sections = DTMChannelModifier._junction_cross_sections_for_interpolation(
             tributary=tributary,
@@ -1617,6 +1737,7 @@ class DTMChannelModifier:
             junction_point=junction_point,
             bank_offset_m=bank_offset_m,
             skewness_correction=skewness_correction,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
         profiles = []
         for section_key, role, channel, section in sections:
@@ -1639,6 +1760,7 @@ class DTMChannelModifier:
         junction_point,
         bank_offset_m=0.2,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         main_bank_lines = DTMChannelModifier._offset_bank_lines_outward(
             DTMChannelModifier._line_strings(main["banks_gdf"]),
@@ -1655,12 +1777,14 @@ class DTMChannelModifier:
             centerline=main["centerline"],
             bank_lines=main_bank_lines,
             skewness_correction=skewness_correction,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
         tributary_sections = DTMChannelModifier._cross_sections_by_centerline_measure(
             cross_section_csv=tributary["cross_section_csv"],
             centerline=tributary["centerline"],
             bank_lines=tributary_bank_lines,
             skewness_correction=skewness_correction,
+            centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
         if len(main_sections) < 2 or not tributary_sections:
             return []
@@ -1941,6 +2065,7 @@ class DTMChannelModifier:
         centerline,
         bank_lines=None,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         df = DTMChannelModifier._read_csv_auto(
             cross_section_csv,
@@ -1971,6 +2096,7 @@ class DTMChannelModifier:
                 center_point=center_point,
                 bank_lines=bank_lines,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             sections.append(
                 {
@@ -3386,6 +3512,7 @@ class DTMChannelModifier:
         bank_shp_path: str,
         interval: float = 1.0,
         skewness_correction=True,
+        centerline_normal_sample_distance_m=3.0,
     ):
         """
         Creates a custom polygon mask by walking the centerline at 'interval' meters and interpolating 
@@ -3431,7 +3558,9 @@ class DTMChannelModifier:
                 centerline=centerline,
                 centerline_distance=d_xs,
                 center_point=pt_C,
+                bank_lines=bank_lines,
                 skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
             )
             left_width = section_profile['corrected_left_width']
             right_width = section_profile['corrected_right_width']
@@ -3455,24 +3584,13 @@ class DTMChannelModifier:
             rw = np.interp(d, d_xs_arr, rw_arr)
             pt = centerline.interpolate(d)
             
-            d1 = max(0, d - 0.1)
-            d2 = min(cl_length, d + 0.1)
-            if d1 == d2:
-                left_pts.append((pt.x, pt.y))
-                right_pts.append((pt.x, pt.y))
-                continue
-                
-            p1 = centerline.interpolate(d1)
-            p2 = centerline.interpolate(d2)
-            
-            dx = p2.x - p1.x
-            dy = p2.y - p1.y
-            length = np.hypot(dx, dy)
-            if length == 0:
-                nx = ny = 0
-            else:
-                nx = -dy / length
-                ny = dx / length
+            tangent = DTMChannelModifier._centerline_unit_tangent(
+                centerline,
+                d,
+                sample_distance=centerline_normal_sample_distance_m,
+            )
+            nx = -tangent[1]
+            ny = tangent[0]
                 
             left_pts.append((pt.x + nx * lw, pt.y + ny * lw))
             right_pts.append((pt.x - nx * rw, pt.y - ny * rw))

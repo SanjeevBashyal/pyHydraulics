@@ -31,7 +31,8 @@ SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
-PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
+# PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
+PROJECTS_TO_RUN = ["ARDICLI"]
 
 RASMAPPER_V01_ROOT = PWD / "rasmapper_v01"
 PROJECT_NAME_TEMPLATE = "{project}_2D"
@@ -89,6 +90,8 @@ TEMPLATE_UNSTEADY_HDF_PATH: str | None = None
 TEMPLATE_PLAN_PATH: str | None = None
 EXISTING_LANDCOVER_TIF_PATH: str | None = None
 EXISTING_LANDCOVER_HDF_PATH: str | None = None
+PREPARE_EXISTING_LANDCOVER_INPUTS = True
+EXISTING_LANDCOVER_OUTPUT_DIR: str | None = None
 
 
 logger = logging.getLogger("implementation2djson")
@@ -813,6 +816,13 @@ def build_v01_json_config(
     landcover_shp = resolve_landcover_source(config, spec.source_project_name, perimeter_shp)
     projection_file = resolve_projection_file(config)
     dss_file = resolve_dss_file(config)
+    existing_landcover_tif, existing_landcover_hdf = resolve_existing_landcover_pair(
+        config,
+        model_project_name,
+        landcover_shp=landcover_shp,
+        dtm_path=rasmapper_dtm,
+        projection_file=projection_file,
+    )
     reference_geom = resolve_reference_geometry_file(rasmapper_script, ".g01")
     reference_geom_hdf = resolve_reference_geometry_file(rasmapper_script, ".g01.hdf")
     template_unsteady = resolve_template_file(rasmapper_script, "UnsteadyTemplate", ".u01")
@@ -851,8 +861,8 @@ def build_v01_json_config(
         "cross_section_name": cross_section_paths,
         "junction_bc_csv_name": str(junction_csv) if junction_csv else None,
         "landcover_name": str(landcover_shp),
-        "existing_landcover_tif_name": existing_path_string(EXISTING_LANDCOVER_TIF_PATH),
-        "existing_landcover_hdf_name": existing_path_string(EXISTING_LANDCOVER_HDF_PATH),
+        "existing_landcover_tif_name": str(existing_landcover_tif) if existing_landcover_tif else None,
+        "existing_landcover_hdf_name": str(existing_landcover_hdf) if existing_landcover_hdf else None,
         "reference_geom_name": str(reference_geom) if reference_geom else "reference_geometry.g01",
         "reference_geom_hdf_name": str(reference_geom_hdf) if reference_geom_hdf else "reference_geometry.g01.hdf",
         "terrain_layer_name": "Prepared Interpolated DTM",
@@ -997,6 +1007,235 @@ def resolve_landcover_source(
                 return matches[0]
 
     return write_uniform_landcover_shapefile(config, project_name, perimeter_shp)
+
+
+def resolve_existing_landcover_pair(
+    config: Config,
+    model_project_name: str,
+    *,
+    landcover_shp: Path,
+    dtm_path: Path,
+    projection_file: Path,
+) -> tuple[Path | None, Path | None]:
+    if EXISTING_LANDCOVER_TIF_PATH or EXISTING_LANDCOVER_HDF_PATH:
+        tif = Path(EXISTING_LANDCOVER_TIF_PATH) if EXISTING_LANDCOVER_TIF_PATH else None
+        hdf = Path(EXISTING_LANDCOVER_HDF_PATH) if EXISTING_LANDCOVER_HDF_PATH else None
+        if tif is None or hdf is None:
+            raise FileNotFoundError(
+                "Existing native landcover layer is incomplete: both "
+                "EXISTING_LANDCOVER_TIF_PATH and EXISTING_LANDCOVER_HDF_PATH are required."
+            )
+        missing = [path for path in (tif, hdf) if not path.exists()]
+        if missing:
+            details = "\n".join(f"- {path}" for path in missing)
+            raise FileNotFoundError(f"Existing native landcover inputs missing:\n{details}")
+        return tif, hdf
+
+    if not PREPARE_EXISTING_LANDCOVER_INPUTS:
+        return None, None
+
+    return prepare_existing_landcover_pair(
+        config,
+        model_project_name,
+        landcover_shp=landcover_shp,
+        dtm_path=dtm_path,
+        projection_file=projection_file,
+    )
+
+
+def prepare_existing_landcover_pair(
+    config: Config,
+    model_project_name: str,
+    *,
+    landcover_shp: Path,
+    dtm_path: Path,
+    projection_file: Path,
+) -> tuple[Path, Path]:
+    output_dir = (
+        Path(EXISTING_LANDCOVER_OUTPUT_DIR)
+        if EXISTING_LANDCOVER_OUTPUT_DIR
+        else Path(config.ESSENTIALS_PATH) / "LandCover" / "Prepared2D"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_name = f"LC_{safe_name(model_project_name)}_clip_V1"
+    output_tif = output_dir / f"{base_name}.tif"
+    output_hdf = output_dir / f"{base_name}.hdf"
+
+    create_prepared_landcover_raster(
+        config,
+        landcover_shp=landcover_shp,
+        dtm_path=dtm_path,
+        projection_file=projection_file,
+        output_tif=output_tif,
+    )
+    create_prepared_landcover_hdf(
+        landcover_shp=landcover_shp,
+        projection_file=projection_file,
+        output_hdf=output_hdf,
+    )
+    logger.info(
+        "Prepared existing landcover inputs for %s: %s | %s",
+        model_project_name,
+        output_tif,
+        output_hdf,
+    )
+    return output_tif, output_hdf
+
+
+def create_prepared_landcover_raster(
+    config: Config,
+    *,
+    landcover_shp: Path,
+    dtm_path: Path,
+    projection_file: Path,
+    output_tif: Path,
+) -> Path:
+    import rasterio
+
+    with rasterio.open(dtm_path) as src:
+        bounds = src.bounds
+
+    if output_tif.exists():
+        output_tif.unlink()
+
+    gdal_rasterize = Path(config.RAS_EXE_PATH).parent / "GDAL" / "bin64" / "gdal_rasterize.exe"
+    command = [
+        str(gdal_rasterize),
+        "-a",
+        "KodText",
+        "-ot",
+        "UInt16",
+        "-a_nodata",
+        "0",
+        "-tr",
+        str(LANDCOVER_CELL_SIZE),
+        str(LANDCOVER_CELL_SIZE),
+        "-tap",
+        "-te",
+        str(bounds.left),
+        str(bounds.bottom),
+        str(bounds.right),
+        str(bounds.top),
+        "-of",
+        "GTiff",
+        "-l",
+        landcover_shp.stem,
+        str(landcover_shp),
+        str(output_tif),
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "gdal_rasterize failed while preparing the existing LandCover input:\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+    shutil.copy2(projection_file, output_tif.with_suffix(".prj"))
+    return output_tif
+
+
+def create_prepared_landcover_hdf(
+    *,
+    landcover_shp: Path,
+    projection_file: Path,
+    output_hdf: Path,
+) -> Path:
+    import h5py
+    import numpy as np
+    import uuid
+
+    records = load_landcover_records(landcover_shp)
+    all_rows = [("NoData", 0)]
+    for row in records:
+        code = normalize_landcover_code(row["KodText"])
+        all_rows.append((code, int(code)))
+
+    max_name_len = max(6, min(64, max(len(name) for name, _ in all_rows)))
+    raster_map_dtype = np.dtype([("ID", "<i4"), ("Name", np.dtype(f"S{max_name_len}"))])
+    variables_dtype = np.dtype(
+        [
+            ("Name", np.dtype(f"S{max_name_len}")),
+            ("ManningsN", "<f4"),
+            ("Percent Impervious", "<f4"),
+        ]
+    )
+    raster_map = np.zeros(len(all_rows), dtype=raster_map_dtype)
+    variables = np.zeros(len(all_rows), dtype=variables_dtype)
+    mannings_lookup = {
+        normalize_landcover_code(row["KodText"]): float(row["Manningn"])
+        for row in records
+    }
+
+    for idx, (name, code) in enumerate(all_rows):
+        name_bytes = name.encode("utf-8", errors="ignore")[:max_name_len]
+        raster_map[idx]["ID"] = int(code)
+        raster_map[idx]["Name"] = name_bytes
+        variables[idx]["Name"] = name_bytes
+        variables[idx]["ManningsN"] = (
+            float(mannings_lookup.get(name, 0.025)) if int(code) != 0 else 0.025
+        )
+        variables[idx]["Percent Impervious"] = -9999.0
+
+    if output_hdf.exists():
+        output_hdf.unlink()
+
+    projection = projection_file.read_text(encoding="utf-8", errors="ignore").strip()
+    with h5py.File(output_hdf, "w") as handle:
+        handle.create_dataset("Raster Map", data=raster_map)
+        handle.create_dataset("Variables", data=variables)
+
+        def set_fixed_bytes_attr(key: str, value: str) -> None:
+            raw = (value or "").encode("utf-8", errors="ignore")
+            handle.attrs.create(key, np.array(raw, dtype=f"S{max(1, len(raw))}"))
+
+        set_fixed_bytes_attr("File Type", "HEC Land Cover")
+        set_fixed_bytes_attr("LC Type", "LandCover")
+        set_fixed_bytes_attr("Version", "2.0")
+        set_fixed_bytes_attr("Projection", projection)
+        set_fixed_bytes_attr("GUID", str(uuid.uuid4()))
+    return output_hdf
+
+
+def load_landcover_records(landcover_shp: Path) -> list[dict[str, Any]]:
+    import shapefile
+
+    try:
+        reader = shapefile.Reader(str(landcover_shp), encoding="utf-8")
+    except LookupError:
+        reader = shapefile.Reader(str(landcover_shp))
+
+    field_names = [field[0] for field in reader.fields[1:]]
+    required = {"KodText", "Adi", "Manningn"}
+    missing = required - set(field_names)
+    if missing:
+        raise ValueError(f"Landcover shapefile missing attributes: {sorted(missing)}")
+
+    by_code: dict[str, dict[str, Any]] = {}
+    for record in reader.records():
+        row = dict(zip(field_names, record))
+        code = normalize_landcover_code(row["KodText"])
+        if not code or code in by_code:
+            continue
+        by_code[code] = {
+            "KodText": code,
+            "Adi": str(row["Adi"]),
+            "Manningn": float(row["Manningn"]),
+        }
+    return sorted(by_code.values(), key=lambda row: landcover_sort_key(row["KodText"]))
+
+
+def normalize_landcover_code(value: Any) -> str:
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+def landcover_sort_key(value: Any) -> tuple[int, Any]:
+    text = normalize_landcover_code(value)
+    try:
+        return (0, int(text))
+    except ValueError:
+        return (1, text)
 
 
 def resolve_projection_file(config: Config) -> Path:
