@@ -1499,8 +1499,37 @@ class DTMChannelModifier:
             )
             max_influence = max_profile_width + hold_distance + transition_distance + float(bank_offset_m)
             max_influence = max(max_influence, hold_distance + transition_distance, 1.0)
+            junction_zone = DTMChannelModifier._junction_interpolation_zone_geometry(
+                profiles=profiles,
+                bank_lines=bank_lines,
+                junction_point=junction_point,
+                pad_m=max(float(bank_offset_m), 0.25),
+            )
+            if junction_zone is None or junction_zone.is_empty:
+                summaries.append(summary)
+                continue
 
-            for bank_line in bank_lines:
+            influence_mask = rasterize(
+                [junction_zone],
+                out_shape=(height, width),
+                transform=transform,
+                fill=0,
+                default_value=1,
+                dtype="uint8",
+                all_touched=True,
+            )
+            rows, cols = np.where(influence_mask == 1)
+            for row, col in zip(rows, cols):
+                terrain_z = float(original[row, col])
+                current_z = float(updated[row, col])
+                if not np.isfinite(terrain_z) or not np.isfinite(current_z):
+                    continue
+                if nodata is not None and np.isclose(terrain_z, nodata):
+                    continue
+
+                x, y = transform * (col + 0.5, row + 0.5)
+                cell_point = Point(float(x), float(y))
+                bank_line = min(bank_lines, key=lambda line: cell_point.distance(line))
                 selected_profiles = DTMChannelModifier._profiles_for_junction_bank_line(
                     profiles=profiles,
                     bank_line=bank_line,
@@ -1508,102 +1537,117 @@ class DTMChannelModifier:
                 if len(selected_profiles) < 2:
                     continue
 
-                influence_polygon = bank_line.buffer(max_influence)
-                if influence_polygon.is_empty:
+                bank_measure = bank_line.project(cell_point)
+                bank_point = bank_line.interpolate(bank_measure)
+                center_point, bank_to_center = DTMChannelModifier._nearest_centerline_point_and_distance(
+                    bank_point,
+                    centerlines,
+                )
+                if bank_to_center <= 1e-6:
+                    bank_to_center = max(
+                        profile["bank_to_center_distance"] for profile in selected_profiles
+                    )
+                if bank_to_center <= 1e-6:
                     continue
 
-                influence_mask = rasterize(
-                    [influence_polygon],
-                    out_shape=(height, width),
-                    transform=transform,
-                    fill=0,
-                    default_value=1,
-                    dtype="uint8",
-                    all_touched=True,
+                vector_to_center = np.array(
+                    [center_point.x - bank_point.x, center_point.y - bank_point.y],
+                    dtype=float,
                 )
-                rows, cols = np.where(influence_mask == 1)
-                for row, col in zip(rows, cols):
-                    terrain_z = float(original[row, col])
-                    current_z = float(updated[row, col])
-                    if not np.isfinite(terrain_z) or not np.isfinite(current_z):
-                        continue
-                    if nodata is not None and np.isclose(terrain_z, nodata):
-                        continue
+                vector_to_cell = np.array(
+                    [cell_point.x - bank_point.x, cell_point.y - bank_point.y],
+                    dtype=float,
+                )
+                dist_from_bank = float(np.linalg.norm(vector_to_cell))
+                inside_channel_side = float(np.dot(vector_to_center, vector_to_cell)) >= -1e-9
 
-                    x, y = transform * (col + 0.5, row + 0.5)
-                    cell_point = Point(float(x), float(y))
-                    bank_measure = bank_line.project(cell_point)
-                    bank_point = bank_line.interpolate(bank_measure)
-                    center_point, bank_to_center = DTMChannelModifier._nearest_centerline_point_and_distance(
-                        bank_point,
-                        centerlines,
-                    )
-                    if bank_to_center <= 1e-6:
-                        bank_to_center = max(
-                            profile["bank_to_center_distance"] for profile in selected_profiles
-                        )
-                    if bank_to_center <= 1e-6:
-                        continue
+                if inside_channel_side:
+                    half_fraction = min(dist_from_bank / bank_to_center, 1.0)
+                    blend_distance = 0.0
+                else:
+                    half_fraction = None
+                    blend_distance = dist_from_bank
 
-                    vector_to_center = np.array(
-                        [center_point.x - bank_point.x, center_point.y - bank_point.y],
-                        dtype=float,
-                    )
-                    vector_to_cell = np.array(
-                        [cell_point.x - bank_point.x, cell_point.y - bank_point.y],
-                        dtype=float,
-                    )
-                    dist_from_bank = float(np.linalg.norm(vector_to_cell))
-                    inside_channel_side = float(np.dot(vector_to_center, vector_to_cell)) >= -1e-9
+                terrain_weight = DTMChannelModifier._terrain_transition_weight(
+                    distance_from_bank=blend_distance,
+                    hold_distance=hold_distance,
+                    transition_distance=transition_distance,
+                    blend_type=blend_type,
+                )
+                if terrain_weight >= 1.0:
+                    continue
 
-                    if inside_channel_side:
-                        if dist_from_bank > bank_to_center:
-                            continue
-                        half_fraction = min(dist_from_bank / bank_to_center, 1.0)
-                        blend_distance = 0.0
+                weighted_z_sum = 0.0
+                weight_sum = 0.0
+                for profile in selected_profiles:
+                    if half_fraction is None:
+                        profile_z = profile["z_from_outside_bank_distance"](dist_from_bank)
                     else:
-                        half_fraction = None
-                        blend_distance = dist_from_bank
+                        profile_z = profile["z_from_inside_bank_distance"](
+                            distance_from_bank=dist_from_bank,
+                            local_bank_to_center_distance=bank_to_center,
+                        )
+                    profile_distance = max(cell_point.distance(profile["half_line"]), 1e-6)
+                    profile_weight = 1.0 / profile_distance
+                    weighted_z_sum += profile_weight * profile_z
+                    weight_sum += profile_weight
 
-                    terrain_weight = DTMChannelModifier._terrain_transition_weight(
-                        distance_from_bank=blend_distance,
-                        hold_distance=hold_distance,
-                        transition_distance=transition_distance,
-                        blend_type=blend_type,
-                    )
-                    if terrain_weight >= 1.0:
-                        continue
+                if weight_sum <= 0.0:
+                    continue
 
-                    weighted_z_sum = 0.0
-                    weight_sum = 0.0
-                    for profile in selected_profiles:
-                        if half_fraction is None:
-                            profile_z = profile["z_from_outside_bank_distance"](dist_from_bank)
-                        else:
-                            profile_z = profile["z_from_inside_bank_distance"](
-                                distance_from_bank=dist_from_bank,
-                                local_bank_to_center_distance=bank_to_center,
-                            )
-                        profile_distance = max(cell_point.distance(profile["half_line"]), 1e-6)
-                        profile_weight = 1.0 / profile_distance
-                        weighted_z_sum += profile_weight * profile_z
-                        weight_sum += profile_weight
+                cross_section_z = weighted_z_sum / weight_sum
+                blended_z = terrain_weight * terrain_z + (1.0 - terrain_weight) * cross_section_z
+                if not np.isfinite(blended_z):
+                    continue
 
-                    if weight_sum <= 0.0:
-                        continue
-
-                    cross_section_z = weighted_z_sum / weight_sum
-                    blended_z = terrain_weight * terrain_z + (1.0 - terrain_weight) * cross_section_z
-                    if not np.isfinite(blended_z):
-                        continue
-
-                    updated[row, col] = float(blended_z)
-                    if not np.isclose(current_z, blended_z):
-                        summary["cells_updated"] += 1
+                updated[row, col] = float(blended_z)
+                if not np.isclose(current_z, blended_z):
+                    summary["cells_updated"] += 1
 
             summaries.append(summary)
 
         return updated, summaries
+
+    @staticmethod
+    def _junction_interpolation_zone_geometry(profiles, bank_lines, junction_point, pad_m=0.25):
+        """
+        Builds a bounded junction overlay zone from clipped junction banks and
+        the controlling half cross-sections. This prevents bank-buffer strips
+        from painting beyond the junction while also filling the middle.
+        """
+        geometries = []
+        for line in bank_lines or []:
+            if line is not None and not line.is_empty:
+                geometries.append(line)
+
+        for profile in profiles or []:
+            half_line = profile.get("half_line")
+            if half_line is not None and not half_line.is_empty:
+                geometries.append(half_line)
+            bank_point = profile.get("bank_point")
+            center_point = profile.get("center_point")
+            if bank_point is not None and not bank_point.is_empty:
+                geometries.append(bank_point)
+            if center_point is not None and not center_point.is_empty:
+                geometries.append(center_point)
+
+        if junction_point is not None and not junction_point.is_empty:
+            geometries.append(junction_point)
+
+        if not geometries:
+            return None
+
+        zone = unary_union(geometries).convex_hull
+        if zone.is_empty:
+            return None
+        if zone.geom_type in {"Point", "LineString", "MultiLineString"}:
+            zone = zone.buffer(max(float(pad_m), 0.25))
+        else:
+            zone = zone.buffer(max(float(pad_m), 0.0))
+
+        if not zone.is_valid:
+            zone = zone.buffer(0)
+        return zone
 
     @staticmethod
     def _overlay_channel_rasters(modifiers, base_data, exclusion_mask=None):
@@ -1687,7 +1731,17 @@ class DTMChannelModifier:
             )
             max_influence = max_profile_width + hold_distance + transition_distance + float(bank_offset_m)
             max_influence = max(max_influence, hold_distance + transition_distance, 1.0)
-            influence_geometry = unary_union([line.buffer(max_influence) for line in bank_lines])
+            junction_zone = DTMChannelModifier._junction_interpolation_zone_geometry(
+                profiles=profiles,
+                bank_lines=bank_lines,
+                junction_point=junction_point,
+                pad_m=max(float(bank_offset_m), 0.25),
+            )
+            if junction_zone is None or junction_zone.is_empty:
+                continue
+            influence_geometry = unary_union(
+                [line.buffer(max_influence) for line in bank_lines]
+            ).intersection(junction_zone)
             if influence_geometry.is_empty:
                 continue
             mask |= rasterize(
@@ -2717,6 +2771,27 @@ class DTMChannelModifier:
                 pass
 
     @staticmethod
+    def _write_gdf_with_locked_file_fallback(gdf, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            gdf.to_file(output_path)
+            return output_path
+        except PermissionError:
+            for index in range(1, 100):
+                fallback = output_path.with_name(f"{output_path.stem}_new{index}{output_path.suffix}")
+                try:
+                    gdf.to_file(fallback)
+                    print(
+                        f"Warning: {output_path} is locked by another process; "
+                        f"wrote {fallback} instead."
+                    )
+                    return fallback
+                except PermissionError:
+                    continue
+            raise
+
+    @staticmethod
     def _export_network_centerlines(channels, output_path):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2990,7 +3065,10 @@ class DTMChannelModifier:
             )
 
             merged_path = output_dir / f"{safe_pair_name}_SEV_USTU_combined.shp"
-            merged_banks.to_file(merged_path)
+            merged_path = DTMChannelModifier._write_gdf_with_locked_file_fallback(
+                merged_banks,
+                merged_path,
+            )
 
             clipped_banks = DTMChannelModifier._junction_bank_lines_between_cross_sections(
                 tributary=tributary,
@@ -3003,7 +3081,10 @@ class DTMChannelModifier:
                 tolerance=1.0,
             )
             clipped_path = output_dir / f"{safe_pair_name}_SEV_USTU_junction_clipped.shp"
-            clipped_banks.to_file(clipped_path)
+            clipped_path = DTMChannelModifier._write_gdf_with_locked_file_fallback(
+                clipped_banks,
+                clipped_path,
+            )
 
             products.append(
                 {

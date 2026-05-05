@@ -241,41 +241,86 @@ def find_combined_bank_lines_shp(
     main_model: ModelInput,
     tributary_model: ModelInput,
 ) -> Path | None:
-    project_root = Path(config.PROJECT_FOLDER)
-    search_roots = [
-        Path(config.get_gis_project_path(main_model.project_name)),
-        project_root / "working" / "fixed_shp",
-        Path(config.get_temp_project_path(main_model.project_name)),
-        Path(config.TEMP_PATH),
-        Path(main_model.paths.project_path),
-    ]
-    name_pairs = [
-        (main_model.sub_project_name, tributary_model.sub_project_name),
-        (tributary_model.sub_project_name, main_model.sub_project_name),
-        (
-            main_model.project_stem.replace("BUR-BUR-MER-", ""),
-            tributary_model.project_stem.replace("BUR-BUR-MER-", ""),
-        ),
-        (
-            tributary_model.project_stem.replace("BUR-BUR-MER-", ""),
-            main_model.project_stem.replace("BUR-BUR-MER-", ""),
-        ),
-    ]
+    gis_project_path = Path(config.get_gis_project_path(main_model.project_name))
+    if not gis_project_path.is_dir():
+        logger.warning(
+            "GIS project folder was not found for %s; junction run will not use "
+            "a DTM combined SEV_USTU bank-line shapefile: %s",
+            main_model.project_name,
+            gis_project_path,
+        )
+        return None
 
-    for root in search_roots:
-        if not root.is_dir():
-            continue
-        for first, second in name_pairs:
-            candidates = sorted(
-                root.rglob(f"{first}__{second}*_combined.shp"),
-                key=version_sort_key,
-                reverse=True,
-            )
-            if candidates:
-                return candidates[0]
-        candidates = sorted(root.rglob("*combined*.shp"), key=version_sort_key, reverse=True)
-        if candidates:
-            return candidates[0]
+    candidates = sorted(
+        gis_project_path.rglob("*_SEV_USTU_combined.shp"),
+        key=version_sort_key,
+        reverse=True,
+    )
+    if not candidates:
+        logger.warning(
+            "No DTM combined bank-line shapefile matching '*_SEV_USTU_combined.shp' "
+            "was found in %s for junction %s + %s.",
+            gis_project_path,
+            main_model.sub_project_name,
+            tributary_model.sub_project_name,
+        )
+        return None
+
+    main_identifiers = {
+        _normalize_name(value)
+        for value in (
+            main_model.sub_project_name,
+            main_model.project_stem,
+            main_model.project_stem.replace("BUR-BUR-MER-", ""),
+        )
+        if value
+    }
+    tributary_identifiers = {
+        _normalize_name(value)
+        for value in (
+            tributary_model.sub_project_name,
+            tributary_model.project_stem,
+            tributary_model.project_stem.replace("BUR-BUR-MER-", ""),
+        )
+        if value
+    }
+
+    def mentions_model(path: Path, identifiers: set[str]) -> bool:
+        stem = _normalize_name(path.stem)
+        return any(identifier and identifier in stem for identifier in identifiers)
+
+    matched_candidates = [
+        candidate
+        for candidate in candidates
+        if mentions_model(candidate, main_identifiers)
+        and mentions_model(candidate, tributary_identifiers)
+    ]
+    if matched_candidates:
+        selected = matched_candidates[0]
+        logger.info("Using DTM combined SEV_USTU bank lines for junction: %s", selected)
+        return selected
+
+    if len(candidates) == 1:
+        selected = candidates[0]
+        logger.warning(
+            "Using the only DTM combined SEV_USTU bank-line shapefile found in %s, "
+            "but its name did not match both junction reaches %s and %s: %s",
+            gis_project_path,
+            main_model.sub_project_name,
+            tributary_model.sub_project_name,
+            selected,
+        )
+        return selected
+
+    logger.warning(
+        "Found %s DTM combined SEV_USTU bank-line shapefiles in %s, but none matched "
+        "both junction reaches %s and %s. Junction run will fall back to source "
+        "SEV_USTU remapping.",
+        len(candidates),
+        gis_project_path,
+        main_model.sub_project_name,
+        tributary_model.sub_project_name,
+    )
 
     return None
 
