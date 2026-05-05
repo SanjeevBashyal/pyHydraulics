@@ -1229,6 +1229,8 @@ class DTMChannelModifier:
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
+        buildings_shp_path=None,
+        building_lift_m=0.0,
     ):
         """
         Builds a junction-aware channel terrain for one river system.
@@ -1335,6 +1337,11 @@ class DTMChannelModifier:
                 )
             )
         final_modifier.dtm_data = final_data
+        building_lift_summary = DTMChannelModifier._apply_building_lift_to_modifier(
+            modifier=final_modifier,
+            buildings_shp_path=buildings_shp_path,
+            lift_m=building_lift_m,
+        )
         DTMChannelModifier._write_modifier_geotiff(final_modifier, output_tif_path)
 
         centerline_output_path = (
@@ -1397,6 +1404,7 @@ class DTMChannelModifier:
             "junction_bank_structure_protection_m": float(junction_bank_structure_protection_m),
             "skewness_correction": bool(skewness_correction),
             "centerline_normal_sample_distance_m": float(centerline_normal_sample_distance_m),
+            "building_lift": building_lift_summary,
             "network_csv_path": str(network_csv_path) if network_csv_path else None,
             "junction_coordinates_csv": str(junction_coordinates_csv_path) if junction_coordinates_csv_path else None,
             "dtm_path": str(dtm_path),
@@ -2758,6 +2766,72 @@ class DTMChannelModifier:
         )
         with rasterio.open(output_path, "w", **meta) as dest:
             dest.write(modifier.dtm_data.astype("float32"), 1)
+
+    @staticmethod
+    def _apply_building_lift_to_modifier(modifier, buildings_shp_path=None, lift_m=0.0):
+        lift = float(lift_m or 0.0)
+        summary = {
+            "enabled": bool(buildings_shp_path) and abs(lift) > 1e-9,
+            "buildings_shp": str(buildings_shp_path) if buildings_shp_path else None,
+            "lift_m": lift,
+            "cells_lifted": 0,
+        }
+        if not summary["enabled"]:
+            return summary
+
+        buildings_path = Path(buildings_shp_path)
+        if not buildings_path.exists():
+            summary["warning"] = f"Building shapefile not found: {buildings_path}"
+            print(f"Warning: {summary['warning']}")
+            return summary
+
+        buildings_gdf = gpd.read_file(buildings_path)
+        if buildings_gdf.empty:
+            summary["warning"] = f"Building shapefile has no features: {buildings_path}"
+            print(f"Warning: {summary['warning']}")
+            return summary
+
+        if modifier.dtm_crs is not None:
+            if buildings_gdf.crs is None:
+                buildings_gdf = buildings_gdf.set_crs(modifier.dtm_crs, allow_override=True)
+            elif buildings_gdf.crs != modifier.dtm_crs:
+                buildings_gdf = buildings_gdf.to_crs(modifier.dtm_crs)
+
+        geometries = [
+            geometry
+            for geometry in buildings_gdf.geometry
+            if geometry is not None and not geometry.is_empty
+        ]
+        if not geometries:
+            summary["warning"] = f"Building shapefile has no valid polygon geometry: {buildings_path}"
+            print(f"Warning: {summary['warning']}")
+            return summary
+
+        mask = rasterize(
+            geometries,
+            out_shape=modifier.dtm_data.shape,
+            transform=modifier.dtm_transform,
+            fill=0,
+            default_value=1,
+            dtype="uint8",
+            all_touched=True,
+        ).astype(bool)
+
+        nodata = modifier.dtm_meta.get("nodata") if modifier.dtm_meta else None
+        if nodata is not None:
+            mask &= ~np.isclose(modifier.dtm_data, nodata)
+
+        cell_count = int(np.count_nonzero(mask))
+        if cell_count:
+            modifier.dtm_data = np.array(modifier.dtm_data, copy=True)
+            modifier.dtm_data[mask] = modifier.dtm_data[mask].astype(float) + lift
+
+        summary["cells_lifted"] = cell_count
+        print(
+            f"Applied building lift of {lift:g} m to {cell_count} raster cells "
+            f"using {buildings_path}."
+        )
+        return summary
 
     @staticmethod
     def _delete_vector_sidecars(path):

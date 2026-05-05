@@ -61,6 +61,16 @@ class DTM:
             return candidates[0]
         return None
 
+    def get_buildings_shp_path(self):
+        preferred = Path(self.config.ESSENTIALS_PATH) / "Building" / "BuildingsAll.shp"
+        if preferred.exists():
+            return preferred
+
+        candidates = sorted(Path(self.config.PROJECT_FOLDER).glob("0*Essentials*/Building/BuildingsAll.shp"))
+        if candidates:
+            return candidates[0]
+        return preferred
+
     def preflight_project_dtms(self, project_subprojects):
         missing = []
         for project_name, sub_project_names in project_subprojects.items():
@@ -149,6 +159,8 @@ class DTM:
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
+        buildings_shp_path=None,
+        building_lift_m=0.0,
         split_disconnected_components=True,
     ):
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
@@ -158,6 +170,7 @@ class DTM:
         temp_project_dir.mkdir(parents=True, exist_ok=True)
         resolved_blend_type = blend_type or self.config.BLEND_TYPE
         resolved_network_csv_path = network_csv_path or self.get_network_csv_path()
+        resolved_buildings_shp_path = buildings_shp_path or self.get_buildings_shp_path()
         network_connections = DTMChannelModifier.read_network_connections(resolved_network_csv_path)
         connected_groups = (
             self.group_connected_channel_inputs(channel_inputs, network_connections)
@@ -241,6 +254,8 @@ class DTM:
                 junction_bank_structure_protection_m=junction_bank_structure_protection_m,
                 skewness_correction=skewness_correction,
                 centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
+                buildings_shp_path=resolved_buildings_shp_path,
+                building_lift_m=building_lift_m,
             )
             result["dtm_path"] = str(dtm_path)
             result["component"] = output_context["stem"]
@@ -319,6 +334,8 @@ class DTM:
         junction_bank_structure_protection_m=1.0,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
+        buildings_shp_path=None,
+        building_lift_m=0.0,
         split_disconnected_components=True,
     ):
         project_subprojects = self.discover_project_subprojects()
@@ -363,6 +380,8 @@ class DTM:
                     junction_bank_structure_protection_m=junction_bank_structure_protection_m,
                     skewness_correction=skewness_correction,
                     centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
+                    buildings_shp_path=buildings_shp_path,
+                    building_lift_m=building_lift_m,
                     split_disconnected_components=split_disconnected_components,
                 )
             )
