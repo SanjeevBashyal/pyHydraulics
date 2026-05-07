@@ -11,8 +11,7 @@ site-specific file names and paths.
 from __future__ import annotations
 
 import argparse
-import csv
-import inspect
+import difflib
 import json
 import math
 import os
@@ -87,6 +86,426 @@ HELPER_MAP_LAYER_NAMES = (
 )
 
 
+def _patch_rasmapper_elements_compatibility() -> None:
+    """
+    Add GUI helper methods when the installed ras_commander lacks them.
+
+    The workflow relies on these helpers for HEC-RAS 6.6 RAS Mapper dialog
+    automation. Keeping fallbacks here makes the script portable to PCs that
+    have a vanilla ras_commander install instead of the locally patched copy.
+    """
+    try:
+        import win32con
+        import win32gui
+        from pywinauto import Application, Desktop
+        from pywinauto.keyboard import send_keys
+    except ImportError as exc:
+        LOGGER.warning("RAS Mapper GUI compatibility helpers unavailable: %s", exc)
+        return
+
+    def normalize_menu_text(text: str) -> str:
+        return (
+            str(text)
+            .replace("&", "")
+            .replace("...", "")
+            .replace("\u2026", "")
+            .strip()
+            .lower()
+        )
+
+    def get_rasmapper_wrapper():
+        try:
+            windows = Desktop(backend="uia").windows()
+        except Exception as exc:
+            LOGGER.warning("Could not enumerate UIA windows: %s", exc)
+            return None
+        for window in windows:
+            try:
+                if window.window_text() == "RAS Mapper":
+                    return window
+            except Exception:
+                continue
+        return None
+
+    def iter_uia_matches(
+        control_type: Optional[str] = None,
+        title: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        parent=None,
+    ) -> List[Any]:
+        container = parent or get_rasmapper_wrapper()
+        if container is None:
+            return []
+
+        matches = []
+        seen = set()
+        for control in container.descendants():
+            try:
+                element = control.element_info
+                if control_type and element.control_type != control_type:
+                    continue
+                if title is not None and control.window_text() != title:
+                    continue
+                if automation_id is not None:
+                    element_id = getattr(element, "automation_id", "")
+                    if element_id != automation_id:
+                        continue
+                rect = control.rectangle()
+                key = (
+                    getattr(control, "handle", None),
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    control.window_text(),
+                    element.control_type,
+                    getattr(element, "automation_id", ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(control)
+            except Exception:
+                continue
+        return matches
+
+    def get_rasmapper_win32_wrapper():
+        try:
+            found = RasMapperElements.find_rasmapper_window()
+            if found:
+                hwnd, _ = found
+                return Desktop(backend="win32").window(handle=hwnd)
+            app = Application(backend="win32").connect(title="RAS Mapper")
+            return app.window(title="RAS Mapper")
+        except Exception as exc:
+            LOGGER.warning("Could not connect to RAS Mapper wrapper: %s", exc)
+            return None
+
+    def get_treeview_wrapper():
+        window = get_rasmapper_win32_wrapper()
+        if window is None:
+            return None
+        try:
+            for child in window.children():
+                if child.friendly_class_name() == "TreeView":
+                    return child
+        except Exception as exc:
+            LOGGER.warning("Could not enumerate RAS Mapper children: %s", exc)
+        return None
+
+    def select_tree_path(path: List[str]):
+        tree = get_treeview_wrapper()
+        if tree is None:
+            return None
+        try:
+            item = tree.get_item(path)
+            item.select()
+            return item
+        except Exception as exc:
+            LOGGER.warning("Could not select tree path %s: %s", path, exc)
+            return None
+
+    def open_tree_context_menu(path: List[str]) -> bool:
+        window = get_rasmapper_win32_wrapper()
+        item = select_tree_path(path)
+        if window is None or item is None:
+            return False
+        try:
+            window.set_focus()
+            time.sleep(0.2)
+            send_keys("+{F10}")
+            time.sleep(0.8)
+            return True
+        except Exception as exc:
+            LOGGER.warning("Could not open context menu for %s: %s", path, exc)
+            return False
+
+    def find_embedded_window(title: str, automation_id: Optional[str] = None):
+        matches = iter_uia_matches(
+            control_type="Window",
+            title=title,
+            automation_id=automation_id,
+        )
+        return matches[0] if matches else None
+
+    def wait_for_embedded_window(
+        title: str,
+        automation_id: Optional[str] = None,
+        timeout: int = 60,
+        check_interval: float = 1.0,
+    ):
+        start = time.time()
+        while time.time() - start < timeout:
+            window = find_embedded_window(title, automation_id)
+            if window is not None:
+                return window
+            time.sleep(check_interval)
+        return None
+
+    def find_control(
+        control_type: str,
+        title: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        parent=None,
+    ):
+        matches = iter_uia_matches(
+            control_type=control_type,
+            title=title,
+            automation_id=automation_id,
+            parent=parent,
+        )
+        return matches[0] if matches else None
+
+    def get_status_list_items() -> List[str]:
+        main = get_rasmapper_wrapper()
+        if main is None:
+            return []
+        items = []
+        for control in iter_uia_matches(control_type="ListItem", parent=main):
+            try:
+                text = control.window_text()
+                if text:
+                    items.append(text)
+            except Exception:
+                continue
+        return items
+
+    def get_mesh_status_text() -> str:
+        editor = find_embedded_window(
+            title="2D Flow Area Editor",
+            automation_id="D2Editor",
+        )
+        if editor is None:
+            return ""
+        control = find_control(
+            control_type="Document",
+            automation_id="rtbMetadata",
+            parent=editor,
+        )
+        if control is None:
+            return ""
+        try:
+            return control.window_text()
+        except Exception:
+            return ""
+
+    def click_menu_item(title: str) -> bool:
+        target = normalize_menu_text(title)
+        candidates = []
+        for candidate in iter_uia_matches(control_type="MenuItem"):
+            try:
+                normalized = normalize_menu_text(candidate.window_text())
+                if normalized == target or target in normalized:
+                    rect = candidate.rectangle()
+                    area = max(0, rect.right - rect.left) * max(
+                        0,
+                        rect.bottom - rect.top,
+                    )
+                    candidates.append((area, candidate))
+            except Exception:
+                continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        if not candidates:
+            LOGGER.warning("Could not find menu item: %s", title)
+            return False
+        try:
+            candidates[0][1].click_input()
+            time.sleep(0.8)
+            return True
+        except Exception as exc:
+            LOGGER.warning("Could not click menu item '%s': %s", title, exc)
+            return False
+
+    def get_combobox_selected_text(
+        title: str,
+        automation_id: Optional[str] = None,
+        parent=None,
+    ) -> str:
+        combo = find_control(
+            control_type="ComboBox",
+            title=title,
+            automation_id=automation_id,
+            parent=parent,
+        )
+        if combo is None:
+            return ""
+        try:
+            selected = combo.selected_text()
+        except Exception:
+            return ""
+        if selected in {None, "(None)"}:
+            return ""
+        return str(selected).strip()
+
+    def set_combobox_selection_via_keys(
+        title: str,
+        value: str,
+        automation_id: Optional[str] = None,
+        parent=None,
+    ) -> bool:
+        combo = find_control(
+            control_type="ComboBox",
+            title=title,
+            automation_id=automation_id,
+            parent=parent,
+        )
+        if combo is None:
+            LOGGER.warning("Could not find RAS Mapper combo box: %s", title)
+            return False
+        if get_combobox_selected_text(title, automation_id, parent).lower() == value.lower():
+            return True
+        try:
+            combo.click_input()
+            time.sleep(0.5)
+            send_keys(value)
+            time.sleep(0.2)
+            send_keys("{ENTER}")
+            time.sleep(0.8)
+        except Exception as exc:
+            LOGGER.warning("Could not set combo '%s' to '%s': %s", title, value, exc)
+            return False
+        return get_combobox_selected_text(title, automation_id, parent).lower() == value.lower()
+
+    def click_embedded_dialog_button(
+        dialog_title: str,
+        button_text: str,
+        max_clicks: int = 4,
+    ) -> int:
+        main = get_rasmapper_wrapper()
+        if main is None:
+            return 0
+        clicks = 0
+        for window in iter_uia_matches(
+            control_type="Window",
+            title=dialog_title,
+            parent=main,
+        ):
+            try:
+                for button in window.descendants(control_type="Button"):
+                    if button.window_text() == button_text:
+                        button.click_input()
+                        clicks += 1
+                        time.sleep(0.4)
+                        break
+                if clicks >= max_clicks:
+                    break
+            except Exception:
+                continue
+        return clicks
+
+    def get_embedded_dialog_list_items(dialog_title: str) -> List[str]:
+        main = get_rasmapper_wrapper()
+        if main is None:
+            return []
+        items = []
+        seen = set()
+        for window in iter_uia_matches(
+            control_type="Window",
+            title=dialog_title,
+            parent=main,
+        ):
+            try:
+                for list_item in window.descendants(control_type="ListItem"):
+                    text = list_item.window_text()
+                    if text and text not in seen:
+                        seen.add(text)
+                        items.append(text)
+            except Exception:
+                continue
+        return items
+
+    def post_button_click(
+        title: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        parent=None,
+    ) -> bool:
+        button = find_control(
+            control_type="Button",
+            title=title,
+            automation_id=automation_id,
+            parent=parent,
+        )
+        if button is None:
+            LOGGER.warning("Could not find RAS Mapper button: %s", title)
+            return False
+        handle = getattr(button, "handle", None)
+        if not handle:
+            LOGGER.warning("RAS Mapper button has no HWND: %s", title)
+            return False
+        try:
+            win32gui.PostMessage(handle, win32con.BM_CLICK, 0, 0)
+            return True
+        except Exception as exc:
+            LOGGER.warning("Could not post button click: %s", exc)
+            return False
+
+    def set_checkbox_state(
+        title: str,
+        checked: bool,
+        automation_id: Optional[str] = None,
+        parent=None,
+    ) -> bool:
+        checkbox = find_control(
+            control_type="CheckBox",
+            title=title,
+            automation_id=automation_id,
+            parent=parent,
+        )
+        if checkbox is None:
+            LOGGER.warning("Could not find RAS Mapper checkbox: %s", title)
+            return False
+        try:
+            current = bool(checkbox.get_toggle_state())
+        except Exception:
+            return False
+        if current == checked:
+            return True
+        handle = getattr(checkbox, "handle", None)
+        if not handle:
+            return False
+        try:
+            win32gui.PostMessage(handle, win32con.BM_CLICK, 0, 0)
+            time.sleep(0.5)
+            return bool(checkbox.get_toggle_state()) == checked
+        except Exception:
+            return False
+
+    helpers = {
+        "_normalize_menu_text": normalize_menu_text,
+        "_iter_uia_matches": iter_uia_matches,
+        "get_rasmapper_wrapper": get_rasmapper_wrapper,
+        "get_rasmapper_win32_wrapper": get_rasmapper_win32_wrapper,
+        "get_treeview_wrapper": get_treeview_wrapper,
+        "select_tree_path": select_tree_path,
+        "open_tree_context_menu": open_tree_context_menu,
+        "find_embedded_window": find_embedded_window,
+        "wait_for_embedded_window": wait_for_embedded_window,
+        "find_control": find_control,
+        "get_status_list_items": get_status_list_items,
+        "get_mesh_status_text": get_mesh_status_text,
+        "click_menu_item": click_menu_item,
+        "get_combobox_selected_text": get_combobox_selected_text,
+        "set_combobox_selection_via_keys": set_combobox_selection_via_keys,
+        "click_embedded_dialog_button": click_embedded_dialog_button,
+        "get_embedded_dialog_list_items": get_embedded_dialog_list_items,
+        "post_button_click": post_button_click,
+        "set_checkbox_state": set_checkbox_state,
+    }
+    added = []
+    for name, func in helpers.items():
+        if not hasattr(RasMapperElements, name):
+            setattr(RasMapperElements, name, staticmethod(func))
+            added.append(name)
+    if added:
+        LOGGER.info(
+            "Patched missing RasMapperElements GUI helpers: %s",
+            ", ".join(added),
+        )
+
+
+_patch_rasmapper_elements_compatibility()
+
+
 @dataclass(frozen=True)
 class CrossSectionInfo:
     station_label: str
@@ -106,34 +525,6 @@ class CrossSectionGroup:
 
 
 @dataclass(frozen=True)
-class StructureConnection:
-    name: str
-    structure_type: str
-    line: List[Tuple[float, float]]
-    rise: float
-    span: Optional[float]
-    culvert_length: float
-    upstream_invert: float
-    downstream_invert: float
-    deck_distance: float
-    deck_width: float
-    deck_weir: float
-    deck_skew: float
-    deck_max: float
-    culvert_mannings: float
-    culvert_bottom_mannings: float
-    entrance_loss: float
-    exit_loss: float
-    inlet_type: int
-    outlet_type: int
-    num_barrels: int
-    opening_offset: float
-    barrel_center_spacing: Optional[float]
-    shape_code: int
-    htab_hwmax: float
-
-
-@dataclass(frozen=True)
 class RasMapperConfig:
     files_root: Path
     working_root: Path
@@ -148,8 +539,8 @@ class RasMapperConfig:
     dss_name: str = "boundary.dss"
     cross_section_name: Any = "cross_sections.csv"
     junction_bc_csv_name: Optional[str] = None
-    structure_csv_name: Optional[str] = None
     landcover_name: str = "landcover.shp"
+    calibration_region_name: Optional[str] = None
     existing_landcover_tif_name: Optional[str] = None
     existing_landcover_hdf_name: Optional[str] = None
     reference_geom_name: str = "reference_geometry.g01"
@@ -167,10 +558,12 @@ class RasMapperConfig:
     create_landcover_with_rasmapper_gui: bool = True
     landcover_nodata_manning: float = 0.025
     region_default_manning: float = 0.025
+    calibrated_region_manning: Optional[float] = None
     boundary_offset_distance: float = 1.0
     downstream_bc_length_multiplier: float = 10.0
     preferred_dss_a_part: str = "A_PART"
     preferred_dss_f_part: str = "Q100"
+    allow_dss_fallback: bool = False
     downstream_bc_method: str = "Normal Depth"
     junction_bc_name: str = "junction BC"
     junction_snap_tolerance: float = 100.0
@@ -316,14 +709,14 @@ class RasMapperConfig:
         return _source_path(self.files_root, self.junction_bc_csv_name)
 
     @property
-    def structure_csv_src(self) -> Optional[Path]:
-        if not self.structure_csv_name:
-            return None
-        return _source_path(self.files_root, self.structure_csv_name)
-
-    @property
     def landcover_src(self) -> Path:
         return self.files_root / self.landcover_name
+
+    @property
+    def calibration_region_src(self) -> Optional[Path]:
+        if not self.calibration_region_name:
+            return None
+        return _source_path(self.files_root, self.calibration_region_name)
 
     @property
     def reference_geom_src(self) -> Path:
@@ -364,6 +757,16 @@ class RasMapperConfig:
         return self.inputs_dir / "LandCover" / Path(self.landcover_name).name
 
     @property
+    def calibration_region_copy(self) -> Optional[Path]:
+        if not self.calibration_region_src:
+            return None
+        return (
+            self.inputs_dir
+            / "Calibration_Region"
+            / Path(self.calibration_region_src).name
+        )
+
+    @property
     def dss_copy(self) -> Path:
         return self.boundary_dir / Path(self.dss_name).name
 
@@ -387,12 +790,6 @@ class RasMapperConfig:
         if not self.junction_bc_csv_src:
             return None
         return self.boundary_dir / Path(self.junction_bc_csv_src).name
-
-    @property
-    def structure_csv_copy(self) -> Optional[Path]:
-        if not self.structure_csv_src:
-            return None
-        return self.boundary_dir / "Structures" / Path(self.structure_csv_src).name
 
     @property
     def terrain_hdf(self) -> Path:
@@ -693,7 +1090,6 @@ def load_study_area_overrides(config_json: Path) -> Dict[str, Any]:
         "gdal_grid_exe",
         "existing_landcover_tif_name",
         "existing_landcover_hdf_name",
-        "structure_csv_name",
     }
     for key, value in raw.items():
         if key in path_fields:
@@ -832,8 +1228,8 @@ def validate_inputs(
     required.extend(config.cross_section_srcs)
     if config.junction_bc_csv_src is not None:
         required.append(config.junction_bc_csv_src)
-    if config.structure_csv_src is not None:
-        required.append(config.structure_csv_src)
+    if config.calibration_region_src is not None:
+        required.append(config.calibration_region_src)
     if require_reference_geometry:
         required.extend(
             [
@@ -1604,26 +2000,65 @@ def normalize_dss_pathname(pathname: str) -> str:
 
 @log_call
 def parse_dss_catalog(dsc_h5_path: Path) -> pd.DataFrame:
-    part_map = {
-        "A": ("UniqueAs", 1),
-        "B": ("UniqueBs", 0),
-        "C": ("UniqueCs", 2),
-        "D": ("UniqueDs", 4),
-        "E": ("UniqueEs", 6),
-        "F": ("UniqueFs", 7),
+    part_datasets = {
+        "A": "UniqueAs",
+        "B": "UniqueBs",
+        "C": "UniqueCs",
+        "D": "UniqueDs",
+        "E": "UniqueEs",
+        "F": "UniqueFs",
     }
+    candidate_column_maps = [
+        # HEC-RAS 6.6 dsc.h5 catalog layout observed in merged catalogs.
+        {"A": 1, "B": 2, "C": 3, "D": 4, "E": 6, "F": 7},
+        # Older/local layout that some previous catalogs used.
+        {"A": 1, "B": 0, "C": 2, "D": 4, "E": 6, "F": 7},
+        # Zero-based A-F compact fallback.
+        {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5},
+    ]
 
     with h5py.File(dsc_h5_path, "r") as handle:
         unique_parts = {
             part: [_decode_hdf_bytes(v) for v in handle[dataset][()]]
-            for part, (dataset, _) in part_map.items()
+            for part, dataset in part_datasets.items()
         }
         path_indices = handle["PathIndices"][()]
+
+    def _column_map_is_valid(column_map: Dict[str, int]) -> bool:
+        if not len(path_indices):
+            return True
+        for part, column_index in column_map.items():
+            if column_index >= path_indices.shape[1]:
+                return False
+            values = path_indices[:, column_index]
+            non_empty = values[values >= 0]
+            if len(non_empty) and int(non_empty.max()) >= len(unique_parts[part]):
+                return False
+        return True
+
+    selected_column_map = next(
+        (
+            column_map
+            for column_map in candidate_column_maps
+            if _column_map_is_valid(column_map)
+        ),
+        None,
+    )
+    if selected_column_map is None:
+        maxima = {
+            f"col_{index}": int(path_indices[:, index].max())
+            for index in range(path_indices.shape[1])
+        }
+        lengths = {part: len(values) for part, values in unique_parts.items()}
+        raise ValueError(
+            "Could not determine DSS catalog PathIndices column layout. "
+            f"Unique part lengths={lengths}; PathIndices maxima={maxima}"
+        )
 
     rows: List[Dict[str, Any]] = []
     for row_index, index_row in enumerate(path_indices):
         row: Dict[str, Any] = {"catalog_row": int(row_index)}
-        for part, (_, column_index) in part_map.items():
+        for part, column_index in selected_column_map.items():
             value_index = int(index_row[column_index])
             row[part] = unique_parts[part][value_index] if value_index >= 0 else ""
         row["pathname"] = normalize_dss_pathname(
@@ -1639,6 +2074,7 @@ def choose_preferred_dss_path(
     catalog_df: pd.DataFrame,
     preferred_a_part: str,
     preferred_f_part: str,
+    allow_fallback: bool = False,
 ) -> Tuple[Optional[str], pd.DataFrame]:
     catalog = catalog_df.copy()
     catalog["selected"] = False
@@ -1655,6 +2091,25 @@ def choose_preferred_dss_path(
         selected_index = filtered.index[0]
         catalog.loc[selected_index, "selected"] = True
         return str(catalog.loc[selected_index, "pathname"]), catalog
+
+    if not allow_fallback:
+        available_a = sorted({str(value) for value in catalog["A"].dropna().unique()})
+        close = difflib.get_close_matches(
+            preferred_a_part,
+            available_a,
+            n=10,
+            cutoff=0.45,
+        )
+        available_f = sorted({str(value) for value in catalog["F"].dropna().unique()})
+        raise ValueError(
+            "Preferred DSS path was not found. "
+            f"Requested A='{preferred_a_part}', F='{preferred_f_part}'. "
+            f"Close A-part matches={close}. "
+            f"Available F-parts={available_f}. "
+            "Set preferred_dss_a_part/preferred_dss_f_part to an existing DSS "
+            "pathname, or set allow_dss_fallback=true to permit first-record "
+            "fallback."
+        )
 
     if not catalog.empty:
         catalog.loc[catalog.index[0], "selected"] = True
@@ -2391,6 +2846,12 @@ def _landcover_manning_value(
     if match is None:
         return float(default_value)
     return float(match["Manningn"])
+
+
+def _calibrated_region_manning_value(config: RasMapperConfig) -> float:
+    if config.calibrated_region_manning is not None:
+        return float(config.calibrated_region_manning)
+    return float(config.region_default_manning)
 
 
 def _landcover_hdf_names_and_ids(
@@ -3485,6 +3946,25 @@ def _load_boundary_config_values(config: RasMapperConfig) -> Dict[str, Any]:
             )
         row_dict = upstream_row.to_dict()
         row_dict["dss_path"] = normalize_dss_pathname(raw_dss_path)
+        if not config.allow_dss_fallback:
+            dss_parts = _parse_dss_path_parts(row_dict["dss_path"])
+            if (
+                dss_parts.get("A") != config.preferred_dss_a_part
+                or (
+                    config.preferred_dss_f_part
+                    and dss_parts.get("F") != config.preferred_dss_f_part
+                )
+            ):
+                raise ValueError(
+                    "Boundary candidate DSS path does not match the current "
+                    "JSON preferences. "
+                    f"Boundary path={row_dict['dss_path']}; "
+                    f"requested A='{config.preferred_dss_a_part}', "
+                    f"F='{config.preferred_dss_f_part}'. "
+                    "Rerun 'prepare' after correcting the JSON/DSS catalog, "
+                    "or set allow_dss_fallback=true if this mismatch is "
+                    "intentional."
+                )
         upstream_rows.append(row_dict)
 
     if config.downstream_friction_slope is not None:
@@ -4582,9 +5062,85 @@ def build_exact_region_mannings_from_lookup(
     return pd.DataFrame(rows)
 
 
+def _shape_parts(points: Sequence[Tuple[float, float]], parts: Sequence[int]):
+    starts = list(parts) if parts else [0]
+    starts.append(len(points))
+    for index in range(len(starts) - 1):
+        yield points[starts[index]:starts[index + 1]]
+
+
+def load_calibration_region_polygon(
+    config: RasMapperConfig,
+) -> Optional[List[Tuple[float, float]]]:
+    shp_path = config.calibration_region_copy
+    if shp_path is None or not shp_path.exists():
+        shp_path = config.calibration_region_src
+    if shp_path is None or not shp_path.exists():
+        return None
+
+    try:
+        from shapely.geometry import LineString, MultiLineString, Polygon
+        from shapely.ops import polygonize, snap, unary_union
+    except ImportError as exc:
+        raise RuntimeError(
+            "shapely is required to read calibration-region polygons"
+        ) from exc
+
+    reader = shapefile.Reader(str(shp_path))
+    polygons = []
+    lines = []
+
+    for shape in reader.shapes():
+        raw_points = [(float(x), float(y)) for x, y in shape.points]
+        for part in _shape_parts(raw_points, shape.parts):
+            if len(part) < 2:
+                continue
+            if shape.shapeTypeName.upper().startswith("POLYGON"):
+                polygon = Polygon(part)
+                if not polygon.is_valid:
+                    polygon = polygon.buffer(0)
+                if not polygon.is_empty and polygon.area > 0:
+                    polygons.append(polygon)
+            else:
+                lines.append(LineString(part))
+
+    if not polygons and lines:
+        multiline = MultiLineString(lines)
+        tolerances = [
+            0.0,
+            min(float(config.mesh_cell_size) * 0.025, 0.25),
+            0.5,
+            1.0,
+            2.0,
+            5.0,
+        ]
+        for tolerance in tolerances:
+            network = (
+                snap(multiline, multiline, tolerance)
+                if tolerance > 0
+                else multiline
+            )
+            polygons = list(polygonize(unary_union(network)))
+            if polygons:
+                break
+
+    if not polygons:
+        raise ValueError(
+            "Calibration region shapefile could not be converted to a "
+            f"polygon: {shp_path}"
+        )
+
+    polygon = max(polygons, key=lambda item: item.area)
+    coords = [(float(x), float(y)) for x, y in polygon.exterior.coords]
+    if coords and coords[0] != coords[-1]:
+        coords.append(coords[0])
+    return coords
+
+
 def set_region_mannings_exact(
     geom_path: Path,
     region_df: pd.DataFrame,
+    polygon_points: Optional[Sequence[Tuple[float, float]]] = None,
 ) -> None:
     lines = geom_path.read_text(encoding="utf-8", errors="replace").splitlines(True)
 
@@ -4615,7 +5171,20 @@ def set_region_mannings_exact(
             f"{row['Land Cover Name']},{float(row['MainChannel'])}\n"
         )
 
-    updated = lines[:region_start] + new_region_lines + lines[polygon_idx:]
+    if polygon_points:
+        point_count = len(polygon_points)
+        polygon_line = lines[polygon_idx].strip()
+        old_count = int(polygon_line.split("=", 1)[1])
+        old_polygon_end = polygon_idx + 1 + math.ceil(old_count / 2)
+        new_region_lines.append(f"LCMann Region Polygon={point_count}\n")
+        new_region_lines.extend(
+            _fixed_width_xy_line(chunk)
+            for chunk in _chunk_points(polygon_points, 2)
+        )
+        updated = lines[:region_start] + new_region_lines + lines[old_polygon_end:]
+    else:
+        updated = lines[:region_start] + new_region_lines + lines[polygon_idx:]
+
     current_time = time.strftime("%b/%d/%Y %H:%M:%S")
     for idx, line in enumerate(updated):
         if line.strip().startswith("LCMann Region Time="):
@@ -4627,6 +5196,7 @@ def set_region_mannings_exact(
 def update_hdf_region_mannings_exact(
     geom_hdf_path: Path,
     region_df: pd.DataFrame,
+    polygon_points: Optional[Sequence[Tuple[float, float]]] = None,
 ) -> None:
     calibration_path = "Geometry/Land Cover (Manning's n)/Calibration Table"
     if not geom_hdf_path.exists():
@@ -4648,12 +5218,9 @@ def update_hdf_region_mannings_exact(
             if field not in (name_field, base_field)
         )
 
-        rows = np.zeros(len(region_df) + 1, dtype=dtype)
-        rows[0][name_field] = b""
-        rows[0][base_field] = np.nan
-        rows[0][region_field] = np.nan
+        rows = np.zeros(len(region_df), dtype=dtype)
 
-        for idx, (_, row) in enumerate(region_df.iterrows(), start=1):
+        for idx, (_, row) in enumerate(region_df.iterrows()):
             rows[idx][name_field] = str(row["Land Cover Name"]).encode("utf-8")
             if "Base Manning's n Value" in region_df.columns:
                 rows[idx][base_field] = float(row["Base Manning's n Value"])
@@ -4669,21 +5236,89 @@ def update_hdf_region_mannings_exact(
         for key, value in attrs.items():
             new_ds.attrs[key] = value
 
+        if polygon_points:
+            point_array = np.asarray(polygon_points, dtype=np.float64)
+            point_count = int(point_array.shape[0])
+
+            polygon_info = np.asarray(
+                [[0, point_count, 0, 1]],
+                dtype=np.int32,
+            )
+            polygon_parts = np.asarray([[0, point_count]], dtype=np.int32)
+
+            dataset_attrs = {}
+            for dataset_name in (
+                "Polygon Info",
+                "Polygon Parts",
+                "Polygon Points",
+            ):
+                if dataset_name in parent:
+                    dataset_attrs[dataset_name] = dict(parent[dataset_name].attrs)
+                    del parent[dataset_name]
+
+            info_ds = parent.create_dataset("Polygon Info", data=polygon_info)
+            parts_ds = parent.create_dataset("Polygon Parts", data=polygon_parts)
+            points_ds = parent.create_dataset("Polygon Points", data=point_array)
+
+            default_attrs = {
+                "Polygon Info": {
+                    "Column": np.asarray(
+                        [
+                            b"Point Starting Index",
+                            b"Point Count",
+                            b"Part Starting Index",
+                            b"Part Count",
+                        ],
+                        dtype="S20",
+                    ),
+                    "Feature Type": b"Polygon",
+                    "Row": b"Feature",
+                },
+                "Polygon Parts": {
+                    "Column": np.asarray(
+                        [b"Point Starting Index", b"Point Count"],
+                        dtype="S20",
+                    ),
+                    "Row": b"Part",
+                },
+                "Polygon Points": {
+                    "Column": np.asarray([b"X", b"Y"], dtype="S1"),
+                    "Row": b"Points",
+                },
+            }
+            for name, dataset in (
+                ("Polygon Info", info_ds),
+                ("Polygon Parts", parts_ds),
+                ("Polygon Points", points_ds),
+            ):
+                attrs = dataset_attrs.get(name) or default_attrs[name]
+                for key, value in attrs.items():
+                    dataset.attrs[key] = value
+
 
 def sync_landcover_geometry(
     config: RasMapperConfig,
     lookup_df: pd.DataFrame,
 ) -> pd.DataFrame:
     sync_landcover_hdf_mannings(config, lookup_df)
+    calibration_polygon = load_calibration_region_polygon(config)
     region_df = build_exact_region_mannings_from_lookup(
         config.geom_path,
         config.geom_hdf_path,
         lookup_df,
         nodata_value=config.landcover_nodata_manning,
-        default_value=config.region_default_manning,
+        default_value=_calibrated_region_manning_value(config),
     )
-    set_region_mannings_exact(config.geom_path, region_df)
-    update_hdf_region_mannings_exact(config.geom_hdf_path, region_df)
+    set_region_mannings_exact(
+        config.geom_path,
+        region_df,
+        polygon_points=calibration_polygon,
+    )
+    update_hdf_region_mannings_exact(
+        config.geom_hdf_path,
+        region_df,
+        polygon_points=calibration_polygon,
+    )
     return region_df
 
 
@@ -4699,465 +5334,6 @@ def _chunk_points(
         list(points[index:index + chunk_size])
         for index in range(0, len(points), chunk_size)
     ]
-
-
-def _distance(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
-) -> float:
-    return math.hypot(end[0] - start[0], end[1] - start[1])
-
-
-def _format_ras_number(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value).strip()
-    if math.isnan(number):
-        return ""
-    text = f"{number:.6f}".rstrip("0").rstrip(".")
-    if text == "-0":
-        return "0"
-    if text.startswith("0.") and number > 0:
-        text = text[1:]
-    elif text.startswith("-0.") and number < 0:
-        text = "-" + text[2:]
-    return text
-
-
-def _format_fixed_width_values(
-    values: Sequence[Any],
-    width: int = 8,
-    per_line: int = 10,
-) -> List[str]:
-    lines: List[str] = []
-    for index in range(0, len(values), per_line):
-        chunk = values[index:index + per_line]
-        lines.append("".join(f"{_format_ras_number(value):>{width}}" for value in chunk).rstrip() + "\n")
-    return lines
-
-
-def _station_elevation_values(
-    pairs: Sequence[Tuple[float, float]],
-) -> List[float]:
-    values: List[float] = []
-    for station, elevation in pairs:
-        values.extend([station, elevation])
-    return values
-
-
-def _is_blank_value(value: Any) -> bool:
-    return value is None or str(value).strip() == ""
-
-
-def _row_value(row: Dict[str, str], *names: str) -> str:
-    lookup = {str(key).strip().lower(): value for key, value in row.items()}
-    for name in names:
-        key = name.strip().lower()
-        if key in lookup:
-            return "" if lookup[key] is None else str(lookup[key]).strip()
-    return ""
-
-
-def _row_float(
-    row: Dict[str, str],
-    *names: str,
-    default: Optional[float] = None,
-) -> Optional[float]:
-    for name in names:
-        raw = _row_value(row, name)
-        if _is_blank_value(raw):
-            continue
-        try:
-            return float(raw)
-        except ValueError:
-            continue
-    return default
-
-
-def _row_int(
-    row: Dict[str, str],
-    *names: str,
-    default: int = 0,
-) -> int:
-    value = _row_float(row, *names, default=None)
-    if value is None:
-        return default
-    return int(round(value))
-
-
-def _normalize_structure_type(value: str) -> str:
-    text = re.sub(r"[^0-9A-Za-z]+", "", str(value or "")).lower()
-    if text in {"bridge", "bridges"}:
-        return "bridge"
-    if text in {"pipe", "pipes", "circular", "culvert", "round"}:
-        return "pipe"
-    if text in {"box", "rectangular", "rectangle"}:
-        return "box"
-    if text in {"arch", "pipearch", "arched"}:
-        return "arch"
-    return text or "pipe"
-
-
-def _culvert_shape_code(structure_type: str) -> int:
-    if structure_type == "box":
-        return 2
-    if structure_type == "arch":
-        return 4
-    return 1
-
-
-def _read_structure_csv(path: Path) -> List[Dict[str, str]]:
-    if not path.exists():
-        return []
-    first_line = path.read_text(
-        encoding="utf-8-sig",
-        errors="ignore",
-    ).splitlines()[0]
-    delimiter = "\t" if "\t" in first_line else ","
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter=delimiter)
-        return [
-            {
-                str(key).strip(): "" if value is None else str(value).strip()
-                for key, value in row.items()
-            }
-            for row in reader
-        ]
-
-
-def _structure_line_from_row(row: Dict[str, str]) -> List[Tuple[float, float]]:
-    up1 = (
-        _row_float(row, "upstream_x1"),
-        _row_float(row, "upstream_y1"),
-    )
-    up2 = (
-        _row_float(row, "upstream_x2"),
-        _row_float(row, "upstream_y2"),
-    )
-    dn1 = (
-        _row_float(row, "downstream_x1"),
-        _row_float(row, "downstream_y1"),
-    )
-    dn2 = (
-        _row_float(row, "downstream_x2"),
-        _row_float(row, "downstream_y2"),
-    )
-    if any(value is None for value in (*up1, *up2)):
-        raise ValueError(
-            "Structure row is missing upstream_x/y coordinates: "
-            f"{_row_value(row, 'structure_id')}"
-        )
-
-    if any(value is None for value in (*dn1, *dn2)):
-        return [(float(up1[0]), float(up1[1])), (float(up2[0]), float(up2[1]))]
-
-    return [
-        ((float(up1[0]) + float(dn1[0])) / 2.0, (float(up1[1]) + float(dn1[1])) / 2.0),
-        ((float(up2[0]) + float(dn2[0])) / 2.0, (float(up2[1]) + float(dn2[1])) / 2.0),
-    ]
-
-
-def _structure_profile_pairs(
-    connection: StructureConnection,
-) -> List[Tuple[float, float]]:
-    length = max(_distance(connection.line[0], connection.line[-1]), 0.001)
-    return [(0.0, connection.deck_max), (length, connection.deck_max)]
-
-
-def load_structure_connections(config: RasMapperConfig) -> List[StructureConnection]:
-    source = config.structure_csv_copy
-    if source is None or not source.exists():
-        source = config.structure_csv_src
-    if source is None or not source.exists():
-        return []
-
-    connections: List[StructureConnection] = []
-    for index, row in enumerate(_read_structure_csv(source), start=1):
-        name = (
-            _row_value(row, "structure_id", "name", "id")
-            or f"Structure {index}"
-        )
-        structure_type = _normalize_structure_type(
-            _row_value(row, "structure_type", "type")
-        )
-        line = _structure_line_from_row(row)
-        line_length = max(_distance(line[0], line[-1]), 0.001)
-        rise = _row_float(
-            row,
-            "min_rise",
-            "rise_upstream",
-            "rise_downstream",
-            default=1.0,
-        )
-        span = _row_float(
-            row,
-            "min_span",
-            "span_upstream",
-            "span_downstream",
-            default=rise,
-        )
-        upstream_invert = _row_float(
-            row,
-            "upstream_invert",
-            default=_row_float(row, "downstream_invert", default=0.0),
-        )
-        downstream_invert = _row_float(
-            row,
-            "downstream_invert",
-            default=upstream_invert,
-        )
-        deck_max = _row_float(
-            row,
-            "deck_max",
-            "upstream_elev",
-            "downstream_elev",
-            default=max(float(upstream_invert) + float(rise), float(downstream_invert) + float(rise)),
-        )
-        culvert_length = _row_float(
-            row,
-            "culvert_len",
-            "culvert_length",
-            default=line_length,
-        )
-        deck_width = _row_float(
-            row,
-            "deck_width",
-            default=max(float(span or rise), float(culvert_length)),
-        )
-        deck_distance = _row_float(row, "deck_distance", default=0.1)
-        deck_weir = _row_float(row, "deck_weir", default=1.4)
-        deck_skew = _row_float(row, "deck_skew", default=0.0)
-        culvert_mannings = _row_float(row, "culvert_mannings", default=0.02)
-        culvert_bottom_mannings = _row_float(
-            row,
-            "culvert_bottom_mannings",
-            default=culvert_mannings,
-        )
-        entrance_loss = _row_float(row, "entrance_loss", default=0.5)
-        exit_loss = _row_float(row, "exit_loss", default=1.0)
-        inlet_type = _row_int(row, "inlet_type", default=1 if structure_type == "pipe" else 8)
-        outlet_type = _row_int(row, "outlet_type", default=1)
-        num_barrels = max(1, _row_int(row, "num_barrels", default=1))
-        opening_offset = _row_float(row, "opening_offset", default=0.0)
-        barrel_center_spacing = _row_float(
-            row,
-            "barrel_center_spacing",
-            default=None,
-        )
-        htab_hwmax = max(
-            float(deck_max) + max(float(rise), 0.1) * 0.2,
-            float(upstream_invert) + float(rise) + 0.1,
-            float(downstream_invert) + float(rise) + 0.1,
-        )
-        connections.append(
-            StructureConnection(
-                name=name,
-                structure_type=structure_type,
-                line=line,
-                rise=float(rise),
-                span=None if span is None else float(span),
-                culvert_length=float(culvert_length),
-                upstream_invert=float(upstream_invert),
-                downstream_invert=float(downstream_invert),
-                deck_distance=float(deck_distance),
-                deck_width=float(deck_width),
-                deck_weir=float(deck_weir),
-                deck_skew=float(deck_skew),
-                deck_max=float(deck_max),
-                culvert_mannings=float(culvert_mannings),
-                culvert_bottom_mannings=float(culvert_bottom_mannings),
-                entrance_loss=float(entrance_loss),
-                exit_loss=float(exit_loss),
-                inlet_type=inlet_type,
-                outlet_type=outlet_type,
-                num_barrels=num_barrels,
-                opening_offset=float(opening_offset),
-                barrel_center_spacing=(
-                    None
-                    if barrel_center_spacing is None
-                    else float(barrel_center_spacing)
-                ),
-                shape_code=_culvert_shape_code(structure_type),
-                htab_hwmax=htab_hwmax,
-            )
-        )
-    return connections
-
-
-def _culvert_station_values(connection: StructureConnection) -> List[float]:
-    line_length = max(_distance(connection.line[0], connection.line[-1]), 0.001)
-    count = max(1, connection.num_barrels)
-    if count == 1:
-        return [line_length / 2.0, line_length / 2.0]
-
-    if connection.barrel_center_spacing is not None:
-        spacing = connection.barrel_center_spacing
-    else:
-        spacing = float(connection.span or connection.rise) + connection.opening_offset
-    spacing = max(spacing, 0.001)
-    first = (line_length - spacing * (count - 1)) / 2.0
-    values: List[float] = []
-    for barrel_index in range(count):
-        station = first + barrel_index * spacing
-        values.extend([station, station])
-    return values
-
-
-def _render_connection_header(
-    connection: StructureConnection,
-    storage_area_name: str,
-) -> List[str]:
-    center_x = sum(point[0] for point in connection.line) / len(connection.line)
-    center_y = sum(point[1] for point in connection.line) / len(connection.line)
-    profile_pairs = _structure_profile_pairs(connection)
-    routing_type = 32 if connection.structure_type == "bridge" else 1
-    overflow_2d = "False" if routing_type == 32 else "True"
-    lines = [
-        f"Connection={connection.name:<16},{_format_ras_number(center_x)},{_format_ras_number(center_y)}\n",
-        "Connection Desc=\n",
-        f"Connection Line={len(connection.line)}\n",
-    ]
-    lines.extend(_fixed_width_xy_line(chunk) for chunk in _chunk_points(connection.line, 2))
-    lines.append(f"Connection Centerline Profile={len(profile_pairs)}\n")
-    lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
-    lines.extend(
-        [
-            f"Connection Last Edited Time={time.strftime('%b/%d/%Y %H:%M:%S')}\n",
-            "Conn CellSize Min=1\n",
-            "Conn Near Repeats=3\n",
-            "Conn Protection Radius=-1\n",
-            f"Connection Up SA={storage_area_name:<16}\n",
-            f"Connection Dn SA={storage_area_name:<16}\n",
-            f"Conn Routing Type= {routing_type} \n",
-            "Conn Use RC Family=False\n",
-            f"Conn OverFlow Method 2D={overflow_2d}\n",
-            f"Conn Weir WD={_format_ras_number(connection.deck_width)}\n",
-            f"Conn Weir Coef={_format_ras_number(connection.deck_weir)}\n",
-            "Conn Weir Is Ogee= 0 \n",
-            "Conn Simple Spill Pos Coef=0.05\n",
-            "Conn Simple Spill Neg Coef=0.05\n",
-            f"Conn Weir SE= {len(profile_pairs)} \n",
-        ]
-    )
-    lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
-    if routing_type == 32:
-        lines.extend(
-            [
-                f"Conn HTab HWMax={_format_ras_number(connection.htab_hwmax)}\n",
-                "\n",
-                "Conn Outlet Rating Curve= 0 ,False,,\n",
-            ]
-        )
-    return lines
-
-
-def _render_connection_culvert_block(
-    connection: StructureConnection,
-) -> List[str]:
-    span_value = (
-        ""
-        if connection.shape_code == 1
-        else _format_ras_number(connection.span or connection.rise)
-    )
-    culvert_name = connection.name[:12]
-    values = [
-        str(connection.shape_code),
-        _format_ras_number(connection.rise),
-        span_value,
-        _format_ras_number(connection.culvert_length),
-        _format_ras_number(connection.culvert_mannings),
-        _format_ras_number(connection.entrance_loss),
-        _format_ras_number(connection.exit_loss),
-        str(connection.inlet_type),
-        str(connection.outlet_type),
-        _format_ras_number(connection.upstream_invert),
-        _format_ras_number(connection.downstream_invert),
-        f" {connection.num_barrels} ",
-        f"{culvert_name:<12}",
-        " 0 ",
-        _format_ras_number(connection.opening_offset),
-    ]
-    return [
-        f"Connection Culv={','.join(values)}\n",
-        *_format_fixed_width_values(_culvert_station_values(connection), per_line=8),
-        f"Conn Culv Bottom n={_format_ras_number(connection.culvert_bottom_mannings)}\n",
-        f"Conn HTab HWMax={_format_ras_number(connection.htab_hwmax)}\n",
-        f"Conn HTab TWMax={_format_ras_number(connection.htab_hwmax)}\n",
-    ]
-
-
-def _render_connection_bridge_block(
-    connection: StructureConnection,
-) -> List[str]:
-    profile_pairs = _structure_profile_pairs(connection)
-    stations = [pair[0] for pair in profile_pairs]
-    deck_high = connection.deck_max
-    deck_low = max(
-        min(connection.upstream_invert, connection.downstream_invert),
-        connection.deck_max - max(connection.rise, 0.1),
-    )
-    manning = (
-        connection.culvert_bottom_mannings
-        if connection.culvert_bottom_mannings > 0
-        else 0.023
-    )
-    lines = [
-        "Conn BR: Bridge=0,0,0,0, 0 ,0.3,0.5\n",
-        "Conn BR: Pressure-Weir=,,,,\n",
-        "Conn BR: Deck Dist Width WeirC Skew NumUp NumDn MinLoCord MaxHiCord MaxSubmerge Is_Ogee\n",
-        (
-            f"{_format_ras_number(connection.deck_distance)},"
-            f"{_format_ras_number(connection.deck_width)},"
-            f"{_format_ras_number(connection.deck_weir)},"
-            f"{_format_ras_number(connection.deck_skew)}, 2, 2, , , 0.98, 0, 0,0,,\n"
-        ),
-    ]
-    for _ in range(2):
-        lines.extend(_format_fixed_width_values(stations, per_line=8))
-        lines.extend(_format_fixed_width_values([deck_high, deck_high], per_line=8))
-        lines.extend(_format_fixed_width_values([deck_low, deck_low], per_line=8))
-
-    for profile_number in (1, 2):
-        lines.append(f"Conn BR: BR SE={profile_number},{len(profile_pairs)}\n")
-        lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
-        lines.append(
-            f"Conn BR: BR Bank Stations={profile_number},"
-            f"{_format_ras_number(stations[0])},{_format_ras_number(stations[-1])}\n"
-        )
-        lines.append(f"Conn BR: BR Mann={profile_number},1\n")
-        lines.extend(_format_fixed_width_values([stations[0], manning], per_line=8))
-
-    lines.extend(
-        [
-            "Conn BR: BR Coef=-1 , 0 , 0 ,,,0.8,-1,,0,\n",
-            f"Conn BR: BR Skew={_format_ras_number(connection.deck_skew)}\n",
-        ]
-    )
-    for profile_number in (1, 2):
-        lines.append(f"Conn BR: XS SE={profile_number},{len(profile_pairs)}\n")
-        lines.extend(_format_fixed_width_values(_station_elevation_values(profile_pairs)))
-        lines.append(
-            f"Conn BR: XS Bank Stations={profile_number},"
-            f"{_format_ras_number(stations[0])},{_format_ras_number(stations[-1])}\n"
-        )
-        lines.append(f"Conn BR: XS Mann={profile_number},1\n")
-        lines.extend(_format_fixed_width_values([stations[0], manning], per_line=8))
-    return lines
-
-
-def render_structure_connection_blocks(
-    connections: Sequence[StructureConnection],
-    storage_area_name: str,
-) -> List[str]:
-    lines: List[str] = []
-    for connection in connections:
-        lines.extend(_render_connection_header(connection, storage_area_name))
-        if connection.structure_type == "bridge":
-            lines.extend(_render_connection_bridge_block(connection))
-        else:
-            lines.extend(_render_connection_culvert_block(connection))
-    return lines
 
 
 def _point_on_segment(
@@ -6221,7 +6397,6 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
 
     perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
     breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
-    structures = load_structure_connections(config)
     storage_area_name = resolve_storage_area_name(
         config,
         geom_path=config.geom_path,
@@ -6264,7 +6439,6 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
     view_coord_sets = [
         perimeter_ring,
         *breaklines,
-        *[structure.line for structure in structures],
         *[boundary["coords"] for boundary in boundary_lines],
     ]
     lines = _update_viewing_rectangle(lines, view_coord_sets)
@@ -6333,10 +6507,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
         lines,
         "BreakLine Name=",
         "BC Line Name=",
-        breakline_lines + render_structure_connection_blocks(
-            structures,
-            storage_area_name,
-        ),
+        breakline_lines,
     )
 
     bc_lines: List[str] = []
@@ -6381,15 +6552,6 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
         "computation_points": len(computation_points),
         "mesh_cell_size": config.mesh_cell_size,
         "breakline_counts": [len(coords) for coords in breaklines],
-        "structure_connections": [
-            {
-                "name": item.name,
-                "type": item.structure_type,
-                "coords": item.line,
-                "num_barrels": item.num_barrels,
-            }
-            for item in structures
-        ],
         "boundary_lines": [
             {
                 "name": item["name"],
@@ -6410,7 +6572,6 @@ def refresh_geometry_display_metadata(config: RasMapperConfig) -> None:
     ).splitlines(True)
     perimeter_ring = _ensure_closed_ring(load_polygon_rings(config.perimeter_src)[0])
     breaklines = [coords for _, coords in load_polyline_features(config.breakline_src)]
-    structures = load_structure_connections(config)
     storage_area_name = resolve_storage_area_name(
         config,
         geom_path=config.geom_path,
@@ -6449,7 +6610,6 @@ def refresh_geometry_display_metadata(config: RasMapperConfig) -> None:
     view_coord_sets = [
         perimeter_ring,
         *breaklines,
-        *[structure.line for structure in structures],
         *[boundary["coords"] for boundary in boundary_lines],
     ]
     lines = _update_viewing_rectangle(lines, view_coord_sets)
@@ -6496,26 +6656,19 @@ def regenerate_geometry_hdf(
         load_results_summary=False,
     )
 
-    mannings_layer_name = (
-        "LandCover"
-        if (
-            config.active_landcover_map_hdf is not None
-            and config.active_landcover_map_hdf.exists()
-        )
-        else None
+    result = MeshRegenerationWorkflow.regenerate_mesh(
+        ras_object=ras_obj,
+        timeout=timeout,
+        close_after=True,
+        mannings_layer_name=(
+            "LandCover"
+            if (
+                config.active_landcover_map_hdf is not None
+                and config.active_landcover_map_hdf.exists()
+            )
+            else None
+        ),
     )
-    regenerate_kwargs: Dict[str, Any] = {
-        "ras_object": ras_obj,
-        "timeout": timeout,
-        "close_after": True,
-    }
-    regenerate_signature = inspect.signature(
-        MeshRegenerationWorkflow.regenerate_mesh
-    )
-    if "mannings_layer_name" in regenerate_signature.parameters:
-        regenerate_kwargs["mannings_layer_name"] = mannings_layer_name
-
-    result = MeshRegenerationWorkflow.regenerate_mesh(**regenerate_kwargs)
 
     if not result.success:
         raise RuntimeError(
@@ -6863,17 +7016,31 @@ def apply_mannings(config: RasMapperConfig, geom: Optional[str]) -> Path:
             f"No base or region Manning table found in geometry: {geom_path}"
         )
 
-    expected_region_df = build_expected_region_mannings(
-        region_df,
-        lookup_df,
-        default_value=config.region_default_manning,
+    geom_hdf_path = geom_path.with_suffix(geom_path.suffix + ".hdf")
+    calibration_polygon = (
+        load_calibration_region_polygon(config)
+        if geom_path == config.geom_path
+        else None
     )
-    GeomLandCover.set_region_mannings_n(geom_path, expected_region_df)
-    if geom_path.with_suffix(geom_path.suffix + ".hdf").exists():
-        update_hdf_region_mannings(
-            geom_path.with_suffix(geom_path.suffix + ".hdf"),
-            expected_region_df,
-        )
+    expected_region_df = build_exact_region_mannings_from_lookup(
+        geom_path,
+        geom_hdf_path,
+        lookup_df,
+        nodata_value=config.landcover_nodata_manning,
+        default_value=_calibrated_region_manning_value(config),
+    )
+    set_region_mannings_exact(
+        geom_path,
+        expected_region_df,
+        polygon_points=calibration_polygon,
+    )
+    update_hdf_region_mannings_exact(
+        geom_hdf_path,
+        expected_region_df,
+        polygon_points=calibration_polygon,
+    )
+    if geom_path == config.geom_path:
+        sync_landcover_hdf_mannings(config, lookup_df)
 
     audit_path = config.reports_dir / "final_region_mannings_from_geom.csv"
     expected_region_df.to_csv(audit_path, index=False)
@@ -6915,10 +7082,12 @@ def check_mannings(config: RasMapperConfig, geom: Optional[str]) -> Path:
             f"No base or region Manning table found in geometry: {geom_path}"
         )
 
-    expected_region_df = build_expected_region_mannings(
-        region_df,
+    expected_region_df = build_exact_region_mannings_from_lookup(
+        geom_path,
+        geom_path.with_suffix(geom_path.suffix + ".hdf"),
         lookup_df,
-        default_value=config.region_default_manning,
+        nodata_value=config.landcover_nodata_manning,
+        default_value=_calibrated_region_manning_value(config),
     )
     merged = region_df.merge(
         expected_region_df[
@@ -7001,6 +7170,11 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
     copy_shapefile_family(config.perimeter_src, config.perimeter_copy.parent)
     copy_shapefile_family(config.breakline_src, config.breakline_copy.parent)
     copy_shapefile_family(config.landcover_src, config.landcover_copy.parent)
+    if config.calibration_region_src is not None and config.calibration_region_copy is not None:
+        copy_shapefile_family(
+            config.calibration_region_src,
+            config.calibration_region_copy.parent,
+        )
     copy_file(config.dss_src, config.dss_copy)
     copy_file(config.dss_catalog_src, config.dss_catalog_copy)
     for source, destination in zip(
@@ -7010,8 +7184,6 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         copy_file(source, destination)
     if config.junction_bc_csv_src is not None and config.junction_bc_csv_copy is not None:
         copy_file(config.junction_bc_csv_src, config.junction_bc_csv_copy)
-    if config.structure_csv_src is not None and config.structure_csv_copy is not None:
-        copy_file(config.structure_csv_src, config.structure_csv_copy)
 
     write_minimal_project_file(config)
     ensure_project_has_geom_reference(config)
@@ -7041,6 +7213,7 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
         dss_catalog,
         preferred_a_part=config.preferred_dss_a_part,
         preferred_f_part=config.preferred_dss_f_part,
+        allow_fallback=config.allow_dss_fallback,
     )
     dss_paths_by_group = choose_dss_paths_for_groups(
         dss_catalog,
@@ -7151,12 +7324,6 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
             for group in cross_section_groups
         ],
         "boundary_shp": config.boundary_shp,
-        "structure_csv": (
-            config.structure_csv_copy
-            if config.structure_csv_copy is not None
-            and config.structure_csv_copy.exists()
-            else None
-        ),
         "dss_catalog_csv": config.dss_catalog_csv,
         "preferred_dss_path": preferred_dss_path,
         "dss_paths_by_group": dss_paths_by_group,

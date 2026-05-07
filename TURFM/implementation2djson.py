@@ -30,11 +30,14 @@ MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
+# Default Group-4 batch. Use --all-projects only after every discovered project
+# has prepared DTM/GIS outputs.
 # PROJECTS_TO_RUN: list[str] | None = None
 # PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
 PROJECTS_TO_RUN = ["ARDICLI"]
 
 RASMAPPER_V01_ROOT = PWD / "rasmapper_v01"
+RASMAPPER_JSON_TEMPLATE: str | None = str(RASMAPPER_V01_ROOT / "BUYUKGOKCELI.json")
 PROJECT_NAME_TEMPLATE = "{project}_2D"
 
 # IDE/GUI run-button defaults. With no command-line arguments, pressing Run on
@@ -68,7 +71,7 @@ BREAKLINE_NEAR_SPACING = 0.5
 BREAKLINE_NEAR_REPEATS = 5
 BREAKLINE_FAR_SPACING = 3.0
 LANDCOVER_CELL_SIZE = 2.0
-PREFERRED_DSS_F_PART = "Q100"
+PREFERRED_DSS_F_PART = "Q1000"
 DOWNSTREAM_BC_METHOD = "Normal Depth"
 PLAN_COMPUTATION_INTERVAL = "6SEC"
 SIMULATION_DURATION_HOURS = 24.0
@@ -88,6 +91,7 @@ REFERENCE_GEOM_HDF_PATH: str | None = None
 TEMPLATE_UNSTEADY_PATH: str | None = None
 TEMPLATE_UNSTEADY_HDF_PATH: str | None = None
 TEMPLATE_PLAN_PATH: str | None = None
+CALIBRATION_REGION_SHP: str | None = None
 EXISTING_LANDCOVER_TIF_PATH: str | None = None
 EXISTING_LANDCOVER_HDF_PATH: str | None = None
 PREPARE_EXISTING_LANDCOVER_INPUTS = True
@@ -827,11 +831,12 @@ def build_v01_json_config(
         projection_file=projection_file,
     )
     structure_csv = resolve_structure_csv(config, spec) if USE_STRUCTURES else None
-    reference_geom = resolve_reference_geometry_file(rasmapper_script, ".g01")
-    reference_geom_hdf = resolve_reference_geometry_file(rasmapper_script, ".g01.hdf")
-    template_unsteady = resolve_template_file(rasmapper_script, "UnsteadyTemplate", ".u01")
-    template_unsteady_hdf = resolve_template_file(rasmapper_script, "UnsteadyTemplate", ".u01.hdf")
-    template_plan = resolve_template_file(rasmapper_script, "PlanTemplate", ".p01")
+    reference_geom = resolve_reference_geometry_file(config, rasmapper_script, ".g01")
+    reference_geom_hdf = resolve_reference_geometry_file(config, rasmapper_script, ".g01.hdf")
+    template_unsteady = resolve_template_file(config, rasmapper_script, "UnsteadyTemplate", ".u01")
+    template_unsteady_hdf = resolve_template_file(config, rasmapper_script, "UnsteadyTemplate", ".u01.hdf")
+    template_plan = resolve_template_file(config, rasmapper_script, "PlanTemplate", ".p01")
+    calibration_region = resolve_calibration_region_file(config)
     junction_csv = write_junction_coordinate_csv(config, model_project_name, dtm_result)
     cross_section_paths = [
         str(Path(channel["cross_section_csv"]))
@@ -849,6 +854,7 @@ def build_v01_json_config(
 
     ras_project_name = PROJECT_NAME_TEMPLATE.format(project=model_project_name)
     storage_area_name = storage_area_name_for_component(model_project_name)
+    plan_identifier = f"{ras_project_name}_{PREFERRED_DSS_F_PART}"
     output_folder = Path(config.HEC_PATH) / ras_project_name
     raw_config = {
         "files_root": str(Path(config.PROJECT_FOLDER)),
@@ -857,20 +863,20 @@ def build_v01_json_config(
         "project_name": ras_project_name,
         "ras_exe": str(Path(config.RAS_EXE_PATH)),
         "gdal_grid_exe": str(Path(config.RAS_EXE_PATH).parent / "GDAL" / "bin64" / "gdal_grid.exe"),
-        "projection_name": str(projection_file),
-        "dtm_name": str(rasmapper_dtm),
-        "perimeter_name": str(perimeter_shp),
-        "breakline_name": str(breakline_shp),
-        "dss_name": str(dss_file),
-        "cross_section_name": cross_section_paths,
-        "junction_bc_csv_name": str(junction_csv) if junction_csv else None,
-        "structure_csv_name": str(structure_csv) if structure_csv else None,
-        "landcover_name": str(landcover_shp),
+        "projection_name": source_config_value(config, projection_file),
+        "dtm_name": source_config_value(config, rasmapper_dtm),
+        "perimeter_name": source_config_value(config, perimeter_shp),
+        "breakline_name": source_config_value(config, breakline_shp),
+        "dss_name": source_config_value(config, dss_file),
+        "cross_section_name": source_config_values(config, cross_section_paths),
+        "junction_bc_csv_name": source_config_value(config, junction_csv) if junction_csv else None,
+        "structure_csv_name": source_config_value(config, structure_csv) if structure_csv else None,
+        "landcover_name": source_config_value(config, landcover_shp),
         "existing_landcover_tif_name": str(existing_landcover_tif) if existing_landcover_tif else None,
         "existing_landcover_hdf_name": str(existing_landcover_hdf) if existing_landcover_hdf else None,
-        "reference_geom_name": str(reference_geom) if reference_geom else "reference_geometry.g01",
-        "reference_geom_hdf_name": str(reference_geom_hdf) if reference_geom_hdf else "reference_geometry.g01.hdf",
-        "terrain_layer_name": "Prepared Interpolated DTM",
+        "reference_geom_name": source_config_value(config, reference_geom) if reference_geom else "reference_geometry.g01",
+        "reference_geom_hdf_name": source_config_value(config, reference_geom_hdf) if reference_geom_hdf else "reference_geometry.g01.hdf",
+        "terrain_layer_name": f"{model_project_name}_Terrain",
         "flow_area_name": f"{model_project_name}_2D",
         "geometry_title": f"{model_project_name}_2D_CLEAN",
         "storage_area_name": storage_area_name,
@@ -880,24 +886,31 @@ def build_v01_json_config(
         "breakline_near_repeats": BREAKLINE_NEAR_REPEATS,
         "breakline_far_spacing": BREAKLINE_FAR_SPACING,
         "landcover_cell_size": LANDCOVER_CELL_SIZE,
+        "create_landcover_with_rasmapper_gui": True,
         "landcover_nodata_manning": 0.025,
         "region_default_manning": 0.025,
+        "calibrated_region_manning": 0.025,
+        "calibration_region_name": source_config_value(config, calibration_region) if calibration_region else None,
         "boundary_offset_distance": 1.0,
         "downstream_bc_length_multiplier": 10.0,
         "preferred_dss_a_part": preferred_dss_a_part(model_project_name, dtm_result),
         "preferred_dss_f_part": PREFERRED_DSS_F_PART,
+        "allow_dss_fallback": False,
         "downstream_bc_method": DOWNSTREAM_BC_METHOD,
         "junction_bc_name": "junction BC",
         "junction_snap_tolerance": 100.0,
         "branch_connectivity_threshold": 0.25,
+        "slope_min_cross_section_distance": 30.0,
+        "slope_min_value": 0.0001,
+        "slope_fallback_value": 0.003,
         "unsteady_number": "01",
         "plan_number": "01",
-        "template_unsteady_name": str(template_unsteady) if template_unsteady else None,
-        "template_unsteady_hdf_name": str(template_unsteady_hdf) if template_unsteady_hdf else None,
-        "template_plan_name": str(template_plan) if template_plan else None,
-        "unsteady_title": f"{ras_project_name}_Unsteady",
-        "plan_title": f"{ras_project_name}_Unsteady_Plan",
-        "plan_short_identifier": plan_short_identifier(ras_project_name),
+        "template_unsteady_name": source_config_value(config, template_unsteady) if template_unsteady else None,
+        "template_unsteady_hdf_name": source_config_value(config, template_unsteady_hdf) if template_unsteady_hdf else None,
+        "template_plan_name": source_config_value(config, template_plan) if template_plan else None,
+        "unsteady_title": f"{ras_project_name}_Unsteady_{PREFERRED_DSS_F_PART}",
+        "plan_title": plan_identifier,
+        "plan_short_identifier": plan_short_identifier(plan_identifier),
         "plan_flow_regime": "Mixed Flow",
         "plan_simulation_date": ",,,",
         "auto_plan_simulation_date": True,
@@ -937,7 +950,20 @@ def build_v01_json_config(
     }
 
     allowed_keys = v01_config_keys(rasmapper_script)
-    return {key: jsonable(value) for key, value in raw_config.items() if key in allowed_keys}, output_folder
+    template_config = load_v01_json_template(rasmapper_script)
+    v01_config = {
+        key: jsonable(value)
+        for key, value in template_config.items()
+        if key in allowed_keys
+    }
+    v01_config.update(
+        {
+            key: jsonable(value)
+            for key, value in raw_config.items()
+            if key in allowed_keys
+        }
+    )
+    return v01_config, output_folder
 
 
 def write_component_json(
@@ -1371,10 +1397,14 @@ def resolve_dss_file(config: Config) -> Path:
     configured = optional_existing_path(DSS_FILE)
     if configured is not None:
         return configured
-    return find_essential_file(config, "Burdur_Debiler.dss", "*.dss")
+    return find_essential_file(config, "Merged_DSS.dss", "*.dss")
 
 
-def resolve_reference_geometry_file(rasmapper_script: Path, suffix: str) -> Path | None:
+def resolve_reference_geometry_file(
+    config: Config,
+    rasmapper_script: Path,
+    suffix: str,
+) -> Path | None:
     configured = (
         optional_existing_path(REFERENCE_GEOM_HDF_PATH)
         if suffix.endswith(".hdf")
@@ -1382,6 +1412,10 @@ def resolve_reference_geometry_file(rasmapper_script: Path, suffix: str) -> Path
     )
     if configured is not None:
         return configured
+
+    essentials_match = find_essential_subfolder_file(config, "ReferenceGeometry", suffix)
+    if essentials_match is not None:
+        return essentials_match
 
     fallback_root = rasmapper_script.parent / "inputs" / "ReferenceGeometry"
     if fallback_root.exists():
@@ -1391,7 +1425,12 @@ def resolve_reference_geometry_file(rasmapper_script: Path, suffix: str) -> Path
     return None
 
 
-def resolve_template_file(rasmapper_script: Path, folder_name: str, suffix: str) -> Path | None:
+def resolve_template_file(
+    config: Config,
+    rasmapper_script: Path,
+    folder_name: str,
+    suffix: str,
+) -> Path | None:
     configured = {
         ("UnsteadyTemplate", ".u01"): optional_existing_path(TEMPLATE_UNSTEADY_PATH),
         ("UnsteadyTemplate", ".u01.hdf"): optional_existing_path(TEMPLATE_UNSTEADY_HDF_PATH),
@@ -1400,9 +1439,53 @@ def resolve_template_file(rasmapper_script: Path, folder_name: str, suffix: str)
     if configured is not None:
         return configured
 
+    essentials_match = find_essential_subfolder_file(config, folder_name, suffix)
+    if essentials_match is not None:
+        return essentials_match
+
     fallback_root = rasmapper_script.parent / "inputs" / folder_name
     if fallback_root.exists():
         matches = sorted(fallback_root.glob(f"*{suffix}"))
+        if matches:
+            return matches[0]
+    return None
+
+
+def resolve_calibration_region_file(config: Config) -> Path | None:
+    configured = optional_existing_path(CALIBRATION_REGION_SHP)
+    if configured is not None:
+        return configured
+
+    calibration_root = Path(config.ESSENTIALS_PATH) / "Calibration_Region"
+    preferred = calibration_root / "BankPoly.shp"
+    if preferred.exists():
+        return preferred
+    if calibration_root.exists():
+        matches = sorted(calibration_root.rglob("*.shp"), key=version_sort_key)
+        if matches:
+            return matches[0]
+    return None
+
+
+def find_essential_subfolder_file(
+    config: Config,
+    folder_name: str,
+    suffix: str,
+) -> Path | None:
+    roots: list[Path] = []
+
+    def add_root(path: Path) -> None:
+        if path not in roots:
+            roots.append(path)
+
+    add_root(Path(config.ESSENTIALS_PATH) / folder_name)
+    for root in config.get_essential_directories():
+        add_root(Path(root) / folder_name)
+
+    for root in roots:
+        if not root.exists():
+            continue
+        matches = sorted(root.rglob(f"*{suffix}"), key=version_sort_key)
         if matches:
             return matches[0]
     return None
@@ -1575,6 +1658,14 @@ def validate_v01_config(
                 source_path(files_root, config["reference_geom_hdf_name"]),
             ]
         )
+    for template_key in (
+        "template_unsteady_name",
+        "template_unsteady_hdf_name",
+        "template_plan_name",
+        "calibration_region_name",
+    ):
+        if config.get(template_key):
+            required.append(source_path(files_root, config[template_key]))
 
     missing = [path for path in required if not Path(path).exists()]
     if missing:
@@ -1742,6 +1833,26 @@ def v01_config_keys(rasmapper_script: Path) -> set[str]:
     return keys
 
 
+def load_v01_json_template(rasmapper_script: Path) -> dict[str, Any]:
+    candidates = [rasmapper_script.with_name("BUYUKGOKCELI.json")]
+    configured = optional_existing_path(RASMAPPER_JSON_TEMPLATE)
+    if configured is not None and configured not in candidates:
+        candidates.append(configured)
+
+    for template_path in candidates:
+        if not template_path.exists():
+            continue
+        try:
+            raw = json.loads(template_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            logger.warning("Could not parse JSON template %s.", template_path)
+            continue
+        if isinstance(raw, dict):
+            return raw
+        logger.warning("JSON template must be an object: %s.", template_path)
+    return {}
+
+
 def filter_results_by_channels(
     results: Sequence[dict[str, Any]],
     sub_project_names: Sequence[str],
@@ -1845,6 +1956,24 @@ def source_path(root: Path, value: Any) -> Path:
     if path.is_absolute():
         return path
     return root / path
+
+
+def source_config_value(config: Config, path: str | Path) -> str:
+    source_root = Path(config.PROJECT_FOLDER).resolve()
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(source_root).as_posix()
+    except ValueError:
+        return str(Path(path))
+
+
+def source_config_values(config: Config, paths: Sequence[str | Path]) -> str | list[str] | None:
+    values = [source_config_value(config, path) for path in paths]
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    return values
 
 
 def optional_path_value(value: Any) -> Path | None:

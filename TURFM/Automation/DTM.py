@@ -1217,6 +1217,7 @@ class DTMChannelModifier:
         write_intermediate=True,
         centerline_output_path=None,
         merged_banks_output_path=None,
+        bank_polygon_output_path=None,
         perimeter_output_path=None,
         perimeter_offset_m=500.0,
         intermediate_output_dir=None,
@@ -1354,6 +1355,15 @@ class DTMChannelModifier:
             centerline_output_path,
         )
 
+        bank_polygon_path = None
+        if bank_polygon_output_path is not None:
+            bank_polygon_path = Path(bank_polygon_output_path)
+            DTMChannelModifier._export_network_bank_polygons(
+                network["channels"],
+                bank_polygon_path,
+                offset_m=bank_offset_m,
+            )
+
         merged_banks_path = None
         if merged_banks_output_path is not None and not has_junctions:
             merged_banks_path = Path(merged_banks_output_path)
@@ -1389,6 +1399,7 @@ class DTMChannelModifier:
         return {
             "output_tif": str(output_tif_path),
             "centerline_shp": str(centerline_output_path),
+            "bank_polygon_shp": str(bank_polygon_path) if bank_polygon_path else None,
             "merged_banks_shp": str(merged_banks_path) if merged_banks_path else None,
             "perimeter_shp": str(perimeter_path) if perimeter_path else None,
             "connected_bank_products": connected_bank_products,
@@ -2500,8 +2511,17 @@ class DTMChannelModifier:
             df.loc[mask, "Northing"] = round(y, 3)
             df.loc[mask, "Elevation"] = round(elevation, 3) if np.isfinite(elevation) else np.nan
 
-        df.to_csv(network_csv_path, index=False)
-        return network_csv_path
+        try:
+            df.to_csv(network_csv_path, index=False)
+            return network_csv_path
+        except PermissionError:
+            fallback_path = network_csv_path.with_name(f"{network_csv_path.stem}_junction_coordinates.csv")
+            df.to_csv(fallback_path, index=False)
+            print(
+                f"Warning: {network_csv_path} is locked by another process; "
+                f"wrote junction coordinates to {fallback_path} instead."
+            )
+            return fallback_path
 
     @staticmethod
     def _sample_raster_elevation(dtm_path, x, y):
@@ -2880,6 +2900,46 @@ class DTMChannelModifier:
         ]
         crs = channels[0]["processing_banks_gdf"].crs if channels else None
         gpd.GeoDataFrame(rows, crs=crs).to_file(output_path)
+
+    @staticmethod
+    def _export_network_bank_polygons(channels, output_path, offset_m=0.2):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        rows = []
+        crs = channels[0]["processing_banks_gdf"].crs if channels else None
+        for channel in channels:
+            try:
+                polygon_gdf = DTMChannelModifier.create_polygon_mask_from_banks(
+                    channel["processing_banks_gdf"],
+                    offset_m=offset_m,
+                )
+            except Exception as exc:
+                print(f"Warning: bank polygon export failed for {channel['name']}: {exc}")
+                continue
+
+            for geometry in polygon_gdf.geometry:
+                if geometry is None or geometry.is_empty:
+                    continue
+                rows.append(
+                    {
+                        "Channel": str(channel["name"])[:80],
+                        "OffsetM": float(offset_m),
+                        "geometry": geometry,
+                    }
+                )
+
+        if not rows:
+            print(f"Warning: no bank polygons were created for {output_path}.")
+            return None
+
+        bank_polygons_gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=crs)
+        written_path = DTMChannelModifier._write_gdf_with_locked_file_fallback(
+            bank_polygons_gdf,
+            output_path,
+        )
+        print(f"Bank polygon shapefile written to: {written_path}")
+        return written_path
 
     @staticmethod
     def _export_network_perimeter(channels, output_path, offset_m=500.0, network=None):

@@ -6,7 +6,7 @@
   "dtm_name": "Terrain/SET4_39_DTM.tif",
   "perimeter_name": "Perimeter/Perimeter_BUYUKGOKCELI.shp",
   "breakline_name": "Breaklines/BUR-ISP-MER-BUYUKGOKCELI_SEV_USTU_V1.shp",
-  "dss_name": "Boundary/Burdur_Debiler.dss",
+  "dss_name": "Boundary/Merged_DSS.dss",
   "cross_section_name": "CrossSections/BUR-ISP-MER-BUYUKGOKCELI_KESIT_TESLIM_V1.csv",
   "junction_bc_csv_name": null,
   "landcover_name": "LandCover/LC_BUYUKGOKCELI.shp",
@@ -81,5 +81,7 @@
   "auto_adjust_simulation_window_from_dss": true,
   "copy_compute_results_to_project": true,
   "create_landcover_with_rasmapper_gui": true,
-  "calibrated_region_manning": 0.025
+  "calibrated_region_manning": 0.025,
+  "calibration_region_name": "Calibration_Region/BankPoly.shp",
+  "allow_dss_fallback": false
 }

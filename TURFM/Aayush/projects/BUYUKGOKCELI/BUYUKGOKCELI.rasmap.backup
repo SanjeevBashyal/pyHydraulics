@@ -4,9 +4,20 @@
   <Features>
     <Layer Name="Profile Lines" Type="PolylineFeatureLayer" Filename=".\Features\Profile Lines.shp" />
   </Features>
-  <Geometries Checked="True">
-    <Layer Name="BUYUKGOKCELI_2D_CLEAN" Type="RASGeometry" Expanded="True" Filename=".\BUYUKGOKCELI.g01.hdf">
+  <Geometries Checked="True" Expanded="True">
+    <Layer Name="BUYUKGOKCELI_2D_CLEAN" Type="RASGeometry" Checked="True" Expanded="True" Filename=".\BUYUKGOKCELI.g01.hdf">
       <Layer Type="RASXS" UnitsRiverStation="Feet" RiverStationDecimalPlaces="0" />
+      <Layer Type="RASD2FlowArea" Checked="True" Expanded="True">
+        <DataColumnGroupVisibilities>
+          <DataColumnGroupVisibility DisplayName="Feature Parameters" IsVisible="False" />
+        </DataColumnGroupVisibilities>
+      </Layer>
+      <Layer Type="MeshPerimeterLayer">
+        <DataColumnGroupVisibilities>
+          <DataColumnGroupVisibility DisplayName="Feature Parameters" IsVisible="True" />
+        </DataColumnGroupVisibilities>
+      </Layer>
+      <Layer Type="RASBreakLines" Checked="True" />
       <Layer Name="Culvert Groups" Type="VirtualGeometryFeatureLayer" ParentIdentifiers="" />
       <Layer Name="Culvert Barrels" Type="VirtualGeometryFeatureLayer" ParentIdentifiers="Bridges/Culverts" />
       <Layer Name="Gate Groups" Type="VirtualGeometryFeatureLayer" ParentIdentifiers="" />
@@ -92,7 +103,7 @@
           </ValueToSymbology>
         </SymbologyByAttributeColumns>
       </Layer>
-      <Layer Type="FinalNValueLayer">
+      <Layer Type="FinalNValueLayer" Checked="True">
         <ResampleMethod>near</ResampleMethod>
         <Surface On="True" />
       </Layer>
@@ -104,12 +115,13 @@
         <ResampleMethod>near</ResampleMethod>
         <Surface On="True" />
       </Layer>
-    </Layer>
+    <Layer Type="RasLandCoverRegions" Checked="True" /><Layer Name="Manning's n" Type="InterpretationOverrideGroupLayer" Checked="True" Expanded="True" /></Layer>
   </Geometries>
   <Plans />
   <EventConditions />
   <Results Checked="True" />
-  <MapLayers Checked="True"><Layer Name="LandCover" Type="LandCoverLayer" Checked="True" Filename=".\Land Classification\LandCover.hdf" SelectedParameterForSurfaceFillLabel="ID"><Layer Name="Classification Polygons" Type="LandCoverClassificationLayer" /></Layer></MapLayers>
+  <MapLayers Checked="True" Expanded="True">
+    <Layer Name="LandCover" Type="LandCoverLayer" Checked="True" Filename=".\Land Classification\LandCover.hdf" SelectedParameterForSurfaceFillLabel="ID"><Layer Name="Classification Polygons" Type="LandCoverClassificationLayer" /></Layer></MapLayers>
   <Terrains Checked="True" Expanded="True">
     <Layer Name="BUYUKGOKCELI_Terrain" Type="TerrainLayer" Checked="True" Filename=".\Terrain\SET4_39_DTM.hdf">
       <ResampleMethod>near</ResampleMethod>
@@ -117,10 +129,10 @@
     </Layer>
   </Terrains>
   <CurrentView>
-    <MaxX>564994.049303054</MaxX>
+    <MaxX>564994.0493030535</MaxX>
     <MinX>562973.132480882</MinX>
-    <MaxY>4194411.41135429</MaxY>
-    <MinY>4192708.32835384</MinY>
+    <MaxY>4194411.411354295</MaxY>
+    <MinY>4192708.328353844</MinY>
   </CurrentView>
   <VelocitySettings>
     <Density>1.5</Density>

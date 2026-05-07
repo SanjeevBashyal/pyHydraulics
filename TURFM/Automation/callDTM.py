@@ -242,6 +242,7 @@ class DTM:
                 write_intermediate=write_intermediate,
                 centerline_output_path=gis_output_dir / f"{output_context['stem']}_Centerlines{group_suffix}.shp",
                 merged_banks_output_path=gis_output_dir / f"{output_context['stem']}_Merged_Banks{group_suffix}.shp",
+                bank_polygon_output_path=gis_output_dir / f"{output_context['stem']}_Bank_Polygon{group_suffix}.shp",
                 perimeter_output_path=gis_output_dir / f"{output_context['stem']}_Study_Perimeter{group_suffix}.shp",
                 perimeter_offset_m=perimeter_offset_m,
                 intermediate_output_dir=temp_output_dir / f"intermediate_channel_tifs{group_suffix}",
