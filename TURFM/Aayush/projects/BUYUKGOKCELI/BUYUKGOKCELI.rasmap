@@ -149,9 +149,9 @@
   <MapLayers Checked="True" Expanded="True">
     <Layer Name="LandCover" Type="LandCoverLayer" Checked="True" Filename=".\Land Classification\LandCover.hdf" SelectedParameterForSurfaceFillLabel="ID">
       <Symbology>
-        <ColorByteMap Type="System.Int32" Alpha="128" Values="1,2,3,4,5" Colors="-16570139,-14779620,-12786593,-10034719,-2628619" ValuesExcludeLegend="" />
+        <ColorByteMap Type="System.Int32" Alpha="128" Values="1,2,3,4,5" Colors="-16570139,-14779620,-12786593,-10034719,-2628619" ValuesExcludeLegend="0" />
       </Symbology>
-      <ColorByteMap Type="System.Int32" Alpha="128" Values="1,2,3,4,5" Colors="-16570139,-14779620,-12786593,-10034719,-2628619" ValuesExcludeLegend="" />
+      <ColorByteMap Type="System.Int32" Alpha="128" Values="1,2,3,4,5" Colors="-16570139,-14779620,-12786593,-10034719,-2628619" ValuesExcludeLegend="0" />
       <Layer Name="Classification Polygons" Type="LandCoverClassificationLayer" />
     </Layer>
   </MapLayers>
@@ -162,10 +162,10 @@
     </Layer>
   </Terrains>
   <CurrentView>
-    <MaxX>563874.120506527</MaxX>
-    <MinX>563754.399109662</MinX>
-    <MaxY>4193673.49279532</MaxY>
-    <MinY>4193584.36234961</MinY>
+    <MaxX>563904.930543031</MaxX>
+    <MinX>563740.703661186</MinX>
+    <MaxY>4193692.93088702</MaxY>
+    <MinY>4193570.66690113</MinY>
   </CurrentView>
   <VelocitySettings>
     <Density>1.5</Density>

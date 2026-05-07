@@ -11,7 +11,7 @@ MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 SHEET_NAME = None
 
 # PROJECTS_TO_RUN: list[str] | None = None
-PROJECTS_TO_RUN = ["ARDICLI"]
+PROJECTS_TO_RUN = ["BUYUKGOKCELI"]
 TARGET_RES = 0.5
 BUFFER_M = 750
 BLEND_TYPE = "cubic"

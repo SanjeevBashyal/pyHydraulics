@@ -1152,6 +1152,14 @@ class DTMChannelModifier:
 
         # Apply final continuous mathematical blending
         final_zs = w1_terrain * dtm_zs + w2_cs * new_zs
+        outside_bank_polygon_mask = bank_mask[valid_rows, valid_cols] == 0
+        terrain_preserve_mask = (
+            outside_bank_polygon_mask
+            & np.isfinite(dtm_zs)
+            & np.isfinite(final_zs)
+            & (dtm_zs > final_zs)
+        )
+        final_zs[terrain_preserve_mask] = dtm_zs[terrain_preserve_mask]
 
         if break_after_first:
             return [{
