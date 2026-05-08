@@ -560,6 +560,7 @@ class RasMapperConfig:
     region_default_manning: float = 0.025
     calibrated_region_manning: Optional[float] = None
     boundary_offset_distance: float = 1.0
+    upstream_bc_length_fraction: float = 0.75
     downstream_bc_length_multiplier: float = 10.0
     preferred_dss_a_part: str = "A_PART"
     preferred_dss_f_part: str = "Q100"
@@ -755,6 +756,21 @@ class RasMapperConfig:
     @property
     def landcover_copy(self) -> Path:
         return self.inputs_dir / "LandCover" / Path(self.landcover_name).name
+
+    @property
+    def landcover_clipped_copy(self) -> Path:
+        source = Path(self.landcover_name)
+        return (
+            self.inputs_dir
+            / "LandCover"
+            / f"{source.stem}_clipped_to_perimeter.shp"
+        )
+
+    @property
+    def landcover_processing_copy(self) -> Path:
+        if self.landcover_clipped_copy.exists():
+            return self.landcover_clipped_copy
+        return self.landcover_copy
 
     @property
     def calibration_region_copy(self) -> Optional[Path]:
@@ -1379,6 +1395,204 @@ def load_polygon_rings(shp_path: Path) -> List[List[Tuple[float, float]]]:
         if not rings:
             raise ValueError(f"No polygon ring coordinates found in {shp_path}")
         return rings
+
+
+def _perimeter_geometry_from_rings(
+    rings: Sequence[Sequence[Tuple[float, float]]],
+):
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError as exc:
+        raise RuntimeError(
+            "shapely is required to clip LandCover to the 2D perimeter"
+        ) from exc
+
+    polygons = []
+    for ring in rings:
+        if len(ring) < 3:
+            continue
+        polygon = Polygon(ring)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if not polygon.is_empty and polygon.area > 0:
+            polygons.append(polygon)
+    if not polygons:
+        raise ValueError("Could not build a valid polygon from perimeter rings")
+    return unary_union(polygons)
+
+
+def _shape_to_polygon_parts(shape: shapefile.Shape):
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError as exc:
+        raise RuntimeError(
+            "shapely is required to clip LandCover to the 2D perimeter"
+        ) from exc
+
+    polygons = []
+    parts = list(shape.parts) + [len(shape.points)]
+    for idx in range(len(parts) - 1):
+        coords = [
+            (float(x), float(y))
+            for x, y in shape.points[parts[idx]:parts[idx + 1]]
+        ]
+        if len(coords) < 3:
+            continue
+        polygon = Polygon(coords)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if not polygon.is_empty and polygon.area > 0:
+            polygons.append(polygon)
+    if not polygons:
+        return None
+    return unary_union(polygons)
+
+
+def _iter_polygon_geometries(geometry):
+    if geometry is None or geometry.is_empty:
+        return
+    geom_type = geometry.geom_type
+    if geom_type == "Polygon":
+        yield geometry
+    elif geom_type == "MultiPolygon":
+        for part in geometry.geoms:
+            yield part
+    elif geom_type == "GeometryCollection":
+        for part in geometry.geoms:
+            yield from _iter_polygon_geometries(part)
+
+
+def _closed_ring(coords: Sequence[Tuple[float, float]]) -> List[List[float]]:
+    ring = [[float(x), float(y)] for x, y in coords]
+    if ring and ring[0] != ring[-1]:
+        ring.append(ring[0])
+    return ring
+
+
+def _writer_parts_from_geometry(geometry) -> List[List[List[float]]]:
+    parts: List[List[List[float]]] = []
+    for polygon in _iter_polygon_geometries(geometry):
+        exterior = _closed_ring(polygon.exterior.coords)
+        if len(exterior) >= 4:
+            parts.append(exterior)
+        for interior in polygon.interiors:
+            hole = _closed_ring(interior.coords)
+            if len(hole) >= 4:
+                parts.append(hole)
+    return parts
+
+
+def _default_dbf_value(field: Sequence[Any]) -> Any:
+    field_type = str(field[1]).upper()
+    if field_type in {"N", "F"}:
+        return 0
+    if field_type == "L":
+        return False
+    if field_type == "D":
+        return ""
+    return ""
+
+
+def _perimeter_base_record(
+    fields_spec: Sequence[Sequence[Any]],
+    nodata_manning: float,
+) -> List[Any]:
+    values: List[Any] = []
+    for field in fields_spec:
+        name = str(field[0]).strip().lower()
+        if name == "kodtext":
+            values.append("0")
+        elif name == "adi":
+            values.append("NoData")
+        elif name == "manningn":
+            values.append(float(nodata_manning))
+        else:
+            values.append(_default_dbf_value(field))
+    return values
+
+
+@log_call
+def clip_landcover_to_perimeter(config: RasMapperConfig) -> Path:
+    """
+    Create the LandCover source used by RAS Mapper.
+
+    The source LandCover often covers a much larger area than the 2D mesh.
+    RAS Mapper then imports many unrelated class IDs into the geometry
+    Manning table. This clips the polygons to the 2D perimeter and adds a
+    perimeter-sized NoData base polygon so the LandCover layer extent follows
+    the model boundary instead of the original source shapefile.
+    """
+    remove_shapefile_family(config.landcover_clipped_copy)
+    perimeter = _perimeter_geometry_from_rings(
+        load_polygon_rings(config.perimeter_copy)
+    )
+    _, _, encoding = _read_shapefile_records(config.landcover_copy)
+
+    written = 0
+    with shapefile.Reader(
+        str(config.landcover_copy),
+        encoding=encoding,
+    ) as reader:
+        fields_spec = reader.fields[1:]
+        with shapefile.Writer(
+            str(config.landcover_clipped_copy),
+            shapeType=shapefile.POLYGON,
+            encoding=encoding,
+        ) as writer:
+            writer.autoBalance = 1
+            for field in fields_spec:
+                writer.field(*field)
+
+            base_parts = _writer_parts_from_geometry(perimeter)
+            if base_parts:
+                writer.poly(base_parts)
+                writer.record(
+                    *_perimeter_base_record(
+                        fields_spec,
+                        config.landcover_nodata_manning,
+                    )
+                )
+                written += 1
+
+            for shape_record in reader.iterShapeRecords():
+                source_geom = _shape_to_polygon_parts(shape_record.shape)
+                if source_geom is None:
+                    continue
+                clipped = source_geom.intersection(perimeter)
+                parts = _writer_parts_from_geometry(clipped)
+                if not parts:
+                    continue
+                writer.poly(parts)
+                writer.record(*list(shape_record.record))
+                written += 1
+
+    if written <= 1:
+        raise ValueError(
+            "LandCover clipping produced no class polygons inside the 2D "
+            f"perimeter: {config.landcover_copy}"
+        )
+
+    for suffix in (".prj", ".cpg"):
+        source_sidecar = config.landcover_copy.with_suffix(suffix)
+        if source_sidecar.exists():
+            shutil.copy2(
+                source_sidecar,
+                config.landcover_clipped_copy.with_suffix(suffix),
+            )
+    if not config.landcover_clipped_copy.with_suffix(".prj").exists():
+        shutil.copy2(
+            config.projection_copy,
+            config.landcover_clipped_copy.with_suffix(".prj"),
+        )
+
+    LOGGER.info(
+        "Created perimeter-clipped LandCover shapefile: %s (%s records)",
+        config.landcover_clipped_copy,
+        written,
+    )
+    return config.landcover_clipped_copy
 
 
 def load_polyline_features(
@@ -2201,11 +2415,6 @@ def _register_map_layer(
     layer_elem.set("Filename", filename)
     if layer_type == "LandCoverLayer":
         layer_elem.set("SelectedParameterForSurfaceFillLabel", "ID")
-        ET.SubElement(
-            layer_elem,
-            "Layer",
-            {"Name": "Classification Polygons", "Type": "LandCoverClassificationLayer"},
-        )
 
     if layer_type in ("RasterLayer", "InterpolatedLayer", "FinalNValueLayer"):
         resample_elem = ET.SubElement(layer_elem, "ResampleMethod")
@@ -2226,6 +2435,28 @@ def _register_map_layer(
 
     if symbology:
         sym_elem = ET.SubElement(layer_elem, "Symbology")
+        if "color_byte_map" in symbology:
+            values = ",".join(
+                str(int(value))
+                for value in symbology["color_byte_map"].get("values", [])
+            )
+            colors = ",".join(
+                str(int(color))
+                for color in symbology["color_byte_map"].get("colors", [])
+            )
+            ET.SubElement(
+                sym_elem,
+                "ColorByteMap",
+                {
+                    "Type": "System.Int32",
+                    "Alpha": str(
+                        symbology["color_byte_map"].get("alpha", 128)
+                    ),
+                    "Values": values,
+                    "Colors": colors,
+                    "ValuesExcludeLegend": "0",
+                },
+            )
         if "line_color" in symbology:
             r, g, b, a = symbology["line_color"]
             pen_elem = ET.SubElement(sym_elem, "Pen")
@@ -2244,6 +2475,35 @@ def _register_map_layer(
             brush_elem.set("B", str(b))
             brush_elem.set("A", str(a))
             brush_elem.set("Name", "PolygonFill")
+        if "color_byte_map" in symbology:
+            values = ",".join(
+                str(int(value))
+                for value in symbology["color_byte_map"].get("values", [])
+            )
+            colors = ",".join(
+                str(int(color))
+                for color in symbology["color_byte_map"].get("colors", [])
+            )
+            ET.SubElement(
+                layer_elem,
+                "ColorByteMap",
+                {
+                    "Type": "System.Int32",
+                    "Alpha": str(
+                        symbology["color_byte_map"].get("alpha", 128)
+                    ),
+                    "Values": values,
+                    "Colors": colors,
+                    "ValuesExcludeLegend": "0",
+                },
+            )
+
+    if layer_type == "LandCoverLayer":
+        ET.SubElement(
+            layer_elem,
+            "Layer",
+            {"Name": "Classification Polygons", "Type": "LandCoverClassificationLayer"},
+        )
 
     tree.write(rasmap_path, encoding="utf-8", xml_declaration=False)
 
@@ -2385,6 +2645,58 @@ def _remove_helper_map_layers(rasmap_path: Path) -> List[str]:
     return removed
 
 
+def _landcover_color_byte_map(
+    hdf_path: Path,
+    lookup_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    palette = [
+        -13632536,
+        -11240502,
+        -554267,
+        -13708130,
+        -5429128,
+        -4450792,
+        -11942404,
+        -918260,
+        -8529114,
+        -16744448,
+        -16728065,
+        -8355712,
+    ]
+    values: List[int] = []
+    if hdf_path.exists():
+        try:
+            with h5py.File(hdf_path, "r") as handle:
+                rows = (
+                    _landcover_hdf_names_and_ids(handle, lookup_df)
+                    if lookup_df is not None
+                    else [
+                        (int(row["ID"]), _decode_hdf_text(row["Name"]))
+                        for row in handle.get("Raster Map", [])[:]
+                    ]
+                )
+                values = [
+                    int(code)
+                    for code, _ in rows
+                    if int(code) != 0
+                ]
+        except Exception:
+            values = []
+
+    values = sorted(dict.fromkeys(values))
+    colors = [
+        palette[index % len(palette)]
+        for index, _ in enumerate(values)
+    ]
+    return {
+        "color_byte_map": {
+            "values": values,
+            "colors": colors,
+            "alpha": 128,
+        },
+    }
+
+
 def _write_prj_from_raster_or_projection(
     raster_path: Path,
     prj_path: Path,
@@ -2466,11 +2778,17 @@ def _sync_landcover_map_layers(config: RasMapperConfig) -> None:
     for layer_name in ("LandCover", "LandCover Raster"):
         _remove_map_layer(config.rasmap_path, layer_name)
 
+    lookup_df = (
+        pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+        if config.landcover_lookup_csv.exists()
+        else None
+    )
     _register_map_layer(
         "LandCover",
         active_hdf,
         "LandCoverLayer",
         rasmap_path=config.rasmap_path,
+        symbology=_landcover_color_byte_map(active_hdf, lookup_df),
     )
 
 
@@ -2593,25 +2911,46 @@ def _load_landcover_table(shp_path: Path) -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
+def refresh_landcover_lookup_from_processing_source(
+    config: RasMapperConfig,
+) -> pd.DataFrame:
+    """
+    Rebuild the Manning lookup from the active masked LandCover shapefile.
+
+    This prevents install/sync commands from reusing a stale lookup CSV when a
+    new model has a different clipped LandCover extent or class set.
+    """
+    source = config.landcover_processing_copy
+    if not source.exists():
+        source = config.landcover_copy
+    lookup_df = _load_landcover_table(source)
+    if lookup_df.empty:
+        raise ValueError(f"No LandCover classes found in source: {source}")
+    config.landcover_lookup_csv.parent.mkdir(parents=True, exist_ok=True)
+    lookup_df.to_csv(
+        config.landcover_lookup_csv,
+        index=False,
+        encoding="utf-8",
+    )
+    LOGGER.info(
+        "Refreshed LandCover lookup from %s with classes: %s",
+        source,
+        ", ".join(str(value) for value in lookup_df["KodText"].tolist()),
+    )
+    return lookup_df
+
+
 @log_call
 def create_landcover_raster(config: RasMapperConfig) -> Path:
     config.landcover_raster.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(config.dtm_src) as src:
-        bounds = src.bounds
-
-    if config.landcover_raster.exists():
-        try:
-            config.landcover_raster.unlink()
-        except PermissionError:
-            shutil.copy2(
-                config.projection_copy,
-                config.landcover_raster.with_suffix(".prj"),
-            )
-            LOGGER.warning(
-                "Landcover raster is locked; reusing existing raster: %s",
-                config.landcover_raster,
-            )
-            return config.landcover_raster
+    perimeter = _perimeter_geometry_from_rings(
+        load_polygon_rings(config.perimeter_copy)
+    )
+    bounds = perimeter.bounds
+    source_shp = config.landcover_processing_copy
+    temp_raster = config.landcover_raster.with_name(
+        f"{config.landcover_raster.stem}_{uuid.uuid4().hex}.tmp.tif"
+    )
 
     command = [
         str(config.gdal_rasterize_exe),
@@ -2624,18 +2963,17 @@ def create_landcover_raster(config: RasMapperConfig) -> Path:
         "-tr",
         str(config.landcover_cell_size),
         str(config.landcover_cell_size),
-        "-tap",
         "-te",
-        str(bounds.left),
-        str(bounds.bottom),
-        str(bounds.right),
-        str(bounds.top),
+        str(bounds[0]),
+        str(bounds[1]),
+        str(bounds[2]),
+        str(bounds[3]),
         "-of",
         "GTiff",
         "-l",
-        config.landcover_copy.stem,
-        str(config.landcover_copy),
-        str(config.landcover_raster),
+        source_shp.stem,
+        str(source_shp),
+        str(temp_raster),
     ]
 
     result = subprocess.run(
@@ -2645,18 +2983,285 @@ def create_landcover_raster(config: RasMapperConfig) -> Path:
         text=True,
     )
     if result.returncode != 0:
+        if temp_raster.exists():
+            temp_raster.unlink()
         raise RuntimeError(
             "gdal_rasterize failed:\n"
             f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         )
 
+    from rasterio.features import geometry_mask
+
+    with rasterio.open(temp_raster, "r+") as dst:
+        data = dst.read(1)
+        inside = geometry_mask(
+            [perimeter.__geo_interface__],
+            out_shape=data.shape,
+            transform=dst.transform,
+            invert=True,
+        )
+        data[~inside] = 0
+        dst.write(data, 1)
+
+    try:
+        os.replace(temp_raster, config.landcover_raster)
+    except PermissionError as exc:
+        if temp_raster.exists():
+            temp_raster.unlink()
+        raise RuntimeError(
+            "Could not replace LandCover.tif because it is locked. Close "
+            "HEC-RAS/RAS Mapper and rerun the command: "
+            f"{config.landcover_raster}"
+        ) from exc
+
     shutil.copy2(
         config.projection_copy,
         config.landcover_raster.with_suffix(".prj"),
     )
+    write_raster_statistics_aux_xml(config.landcover_raster)
 
     LOGGER.info("Created landcover raster: %s", config.landcover_raster)
     return config.landcover_raster
+
+
+def filter_landcover_lookup_to_raster(
+    lookup_df: pd.DataFrame,
+    raster_path: Path,
+) -> pd.DataFrame:
+    if not raster_path.exists():
+        return lookup_df
+
+    with rasterio.open(raster_path) as src:
+        data = src.read(1)
+    present_codes = {
+        str(int(value))
+        for value in np.unique(data)
+        if int(value) != 0
+    }
+    if not present_codes:
+        raise ValueError(
+            f"No non-zero LandCover class IDs found in raster: {raster_path}"
+        )
+
+    filtered = lookup_df[
+        lookup_df["KodText"].map(lambda value: _normalize_code(value) in present_codes)
+    ].copy()
+    if filtered.empty:
+        raise ValueError(
+            "LandCover raster class IDs do not match the LandCover lookup "
+            f"table: {sorted(present_codes)}"
+        )
+
+    removed = len(lookup_df) - len(filtered)
+    if removed:
+        LOGGER.info(
+            "Filtered %s LandCover classes outside the 2D perimeter; %s remain",
+            removed,
+            len(filtered),
+        )
+    return filtered.reset_index(drop=True)
+
+
+def landcover_raster_class_ids(raster_path: Path) -> set[str]:
+    if not raster_path.exists():
+        return set()
+    with rasterio.open(raster_path) as src:
+        data = src.read(1)
+    return {
+        str(int(value))
+        for value in np.unique(data)
+        if int(value) != 0
+    }
+
+
+def _native_landcover_rows_from_lookup(
+    lookup_df: pd.DataFrame,
+) -> List[Tuple[int, str]]:
+    rows: List[Tuple[int, str]] = [(0, "NoData")]
+    next_id = 1
+    for _, row in lookup_df.iterrows():
+        code = _normalize_code(row["KodText"])
+        if int(code) == 0:
+            continue
+        rows.append((next_id, str(code)))
+        next_id += 1
+    return rows
+
+
+def validate_landcover_raster_ids(
+    raster_path: Path,
+    lookup_df: pd.DataFrame,
+) -> Dict[str, Any]:
+    raster_codes = landcover_raster_class_ids(raster_path)
+    lookup_codes = {
+        _normalize_code(row["KodText"])
+        for _, row in lookup_df.iterrows()
+        if int(_normalize_code(row["KodText"])) != 0
+    }
+    missing_from_raster = sorted(lookup_codes - raster_codes)
+    unexpected_in_raster = sorted(raster_codes - lookup_codes)
+    status = {
+        "raster_path": raster_path,
+        "raster_codes": sorted(raster_codes),
+        "lookup_codes": sorted(lookup_codes),
+        "missing_from_raster": missing_from_raster,
+        "unexpected_in_raster": unexpected_in_raster,
+        "matches": not missing_from_raster and not unexpected_in_raster,
+    }
+    if not status["matches"]:
+        raise ValueError(
+            "LandCover.tif class IDs do not match KodText lookup values. "
+            f"Raster IDs={status['raster_codes']}; "
+            f"Lookup IDs={status['lookup_codes']}; "
+            f"Unexpected={unexpected_in_raster}; "
+            f"Missing={missing_from_raster}"
+        )
+    return status
+
+
+def validate_native_landcover_layer(
+    config: RasMapperConfig,
+    lookup_df: pd.DataFrame,
+) -> Dict[str, Any]:
+    hdf_path = config.active_landcover_map_hdf
+    raster_path = config.active_landcover_map_tif
+    if hdf_path is None or not hdf_path.exists():
+        raise FileNotFoundError(f"LandCover HDF not found: {hdf_path}")
+    if not raster_path.exists():
+        raise FileNotFoundError(f"LandCover TIFF not found: {raster_path}")
+
+    with h5py.File(hdf_path, "r") as handle:
+        rows = _landcover_hdf_names_and_ids(handle, lookup_df)
+
+    raster_ids = {
+        int(value)
+        for value in landcover_raster_class_ids(raster_path)
+    }
+    hdf_ids = {int(code) for code, _ in rows if int(code) != 0}
+    lookup_names = {
+        _normalize_code(row["KodText"])
+        for _, row in lookup_df.iterrows()
+        if int(_normalize_code(row["KodText"])) != 0
+    }
+    hdf_names = {
+        _normalize_code(name)
+        for code, name in rows
+        if int(code) != 0
+    }
+    missing_names = sorted(lookup_names - hdf_names)
+    missing_raster_ids = sorted(hdf_ids - raster_ids)
+    unexpected_raster_ids = sorted(raster_ids - hdf_ids)
+    status = {
+        "raster_path": raster_path,
+        "hdf_path": hdf_path,
+        "raster_ids": sorted(raster_ids),
+        "hdf_ids": sorted(hdf_ids),
+        "hdf_names": sorted(hdf_names),
+        "lookup_names": sorted(lookup_names),
+        "missing_names": missing_names,
+        "missing_raster_ids": missing_raster_ids,
+        "unexpected_raster_ids": unexpected_raster_ids,
+        "matches": (
+            not missing_names
+            and not missing_raster_ids
+            and not unexpected_raster_ids
+        ),
+    }
+    if not status["matches"]:
+        raise ValueError(
+            "Native LandCover TIFF/HDF mapping is inconsistent. "
+            f"Raster IDs={status['raster_ids']}; "
+            f"HDF IDs={status['hdf_ids']}; "
+            f"HDF names={status['hdf_names']}; "
+            f"Lookup names={status['lookup_names']}"
+        )
+    return status
+
+
+def write_raster_statistics_aux_xml(raster_path: Path) -> Optional[Path]:
+    if not raster_path.exists():
+        return None
+
+    with rasterio.open(raster_path) as src:
+        data = src.read(1)
+        nodata = src.nodata
+
+    finite = np.isfinite(data)
+    if nodata is not None:
+        finite &= data != nodata
+    valid = data[finite]
+    if valid.size == 0:
+        stats = {
+            "STATISTICS_MINIMUM": "0",
+            "STATISTICS_MAXIMUM": "0",
+            "STATISTICS_MEAN": "0",
+            "STATISTICS_STDDEV": "-1",
+            "STATISTICS_VALID_PERCENT": "0",
+        }
+    else:
+        stats = {
+            "STATISTICS_MINIMUM": f"{float(valid.min()):.15g}",
+            "STATISTICS_MAXIMUM": f"{float(valid.max()):.15g}",
+            "STATISTICS_MEAN": f"{float(valid.mean()):.15g}",
+            "STATISTICS_STDDEV": f"{float(valid.std()):.15g}",
+            "STATISTICS_VALID_PERCENT": (
+                f"{float(valid.size) * 100.0 / float(data.size):.15g}"
+            ),
+        }
+
+    root = ET.Element("PAMDataset")
+    band = ET.SubElement(root, "PAMRasterBand")
+    band.set("band", "1")
+    metadata = ET.SubElement(band, "Metadata")
+    for key, value in stats.items():
+        item = ET.SubElement(metadata, "MDI")
+        item.set("key", key)
+        item.text = value
+
+    aux_path = raster_path.with_suffix(raster_path.suffix + ".aux.xml")
+    ET.ElementTree(root).write(
+        aux_path,
+        encoding="utf-8",
+        xml_declaration=False,
+    )
+    LOGGER.info("Wrote raster statistics sidecar: %s", aux_path)
+    return aux_path
+
+
+def ensure_generated_landcover_native_ids(
+    config: RasMapperConfig,
+    lookup_df: pd.DataFrame,
+) -> Dict[str, Any]:
+    """
+    Ensure generated LandCover follows native RAS Mapper structure.
+
+    The TIFF stores compact integer class IDs. The HDF `Raster Map` maps each
+    compact ID to the real `KodText` landcover class name, matching the
+    Ataturk native LandCover layer pattern.
+    """
+    create_landcover_raster(config)
+    rows = _native_landcover_rows_from_lookup(lookup_df)
+    code_to_id = {name: code for code, name in rows if code != 0}
+
+    with rasterio.open(config.landcover_raster) as src:
+        data = src.read(1)
+        profile = src.profile.copy()
+
+    native = np.zeros(data.shape, dtype=np.int32)
+    for kodtext, native_id in code_to_id.items():
+        native[data == int(_normalize_code(kodtext))] = int(native_id)
+
+    profile.update(dtype="int32", count=1, nodata=None)
+    temp_raster = config.landcover_raster.with_name(
+        f"{config.landcover_raster.stem}_{uuid.uuid4().hex}.native.tif"
+    )
+    with rasterio.open(temp_raster, "w", **profile) as dst:
+        dst.write(native, 1)
+    os.replace(temp_raster, config.landcover_raster)
+    write_raster_statistics_aux_xml(config.landcover_raster)
+    create_landcover_layer_hdf(config, lookup_df)
+    sync_landcover_hdf_mannings(config, lookup_df)
+    return validate_native_landcover_layer(config, lookup_df)
 
 
 @log_call
@@ -2667,19 +3272,42 @@ def create_mannings_raster(
     config.landcover_mannings_raster.parent.mkdir(parents=True, exist_ok=True)
 
     source_raster = config.active_landcover_map_tif
+    has_native_hdf = (
+        config.active_landcover_map_hdf is not None
+        and config.active_landcover_map_hdf.exists()
+    )
+    if has_native_hdf:
+        validate_native_landcover_layer(config, lookup_df)
+    else:
+        validate_landcover_raster_ids(source_raster, lookup_df)
     with rasterio.open(source_raster) as src:
         data = src.read(1)
         profile = src.profile.copy()
 
-    value_by_code = {
-        int(_normalize_code(row["KodText"])): float(row["Manningn"])
-        for _, row in lookup_df.iterrows()
-    }
+    value_by_raster_id: Dict[int, float] = {}
+    if has_native_hdf:
+        with h5py.File(config.active_landcover_map_hdf, "r") as handle:
+            for raster_id, name in _landcover_hdf_names_and_ids(
+                handle,
+                lookup_df,
+            ):
+                value_by_raster_id[int(raster_id)] = _landcover_manning_value(
+                    name,
+                    lookup_df,
+                    nodata_value=config.landcover_nodata_manning,
+                    default_value=config.region_default_manning,
+                )
+    else:
+        value_by_raster_id = {
+            int(_normalize_code(row["KodText"])): float(row["Manningn"])
+            for _, row in lookup_df.iterrows()
+        }
+
     nodata_value = -9999.0
     mannings = np.full(data.shape, nodata_value, dtype=np.float32)
-    for code, value in value_by_code.items():
-        mannings[data == code] = value
-    mannings[data == 0] = config.landcover_nodata_manning
+    for raster_id, value in value_by_raster_id.items():
+        mannings[data == int(raster_id)] = float(value)
+    mannings[data == 0] = float(config.landcover_nodata_manning)
 
     profile.update(dtype="float32", count=1, nodata=nodata_value)
     if config.landcover_mannings_raster.exists():
@@ -2693,6 +3321,7 @@ def create_mannings_raster(
             return config.landcover_mannings_raster
     with rasterio.open(config.landcover_mannings_raster, "w", **profile) as dst:
         dst.write(mannings, 1)
+    write_raster_statistics_aux_xml(config.landcover_mannings_raster)
 
     LOGGER.info(
         "Created Manning raster from landcover classes: %s",
@@ -2720,9 +3349,10 @@ def create_landcover_layer_hdf(
     if config.landcover_hdf.exists():
         config.landcover_hdf.unlink()
 
-    all_rows = [("NoData", 0)]
-    for _, row in lookup_df.iterrows():
-        all_rows.append((str(row["KodText"]).strip(), int(_normalize_code(row["KodText"]))))
+    all_rows = [
+        (name, int(raster_id))
+        for raster_id, name in _native_landcover_rows_from_lookup(lookup_df)
+    ]
 
     max_name_len = max(6, min(64, max(len(name) for name, _ in all_rows)))
 
@@ -2854,6 +3484,43 @@ def _calibrated_region_manning_value(config: RasMapperConfig) -> float:
     return float(config.region_default_manning)
 
 
+def _resolve_native_landcover_name(
+    raster_id: int,
+    raw_name: Any,
+    lookup_df: pd.DataFrame,
+) -> str:
+    if int(raster_id) == 0:
+        return "NoData"
+
+    match = _match_landcover_lookup_row(raw_name, lookup_df)
+    if match is not None:
+        return str(match["KodText"]).strip()
+
+    match = _match_landcover_lookup_row(str(int(raster_id)), lookup_df)
+    if match is not None:
+        return str(match["KodText"]).strip()
+
+    text = str(raw_name).strip()
+    normalized_text = _normalize_code(text) if text else ""
+    raw_name_is_generic = (
+        not text
+        or normalized_text == str(int(raster_id))
+        or text.lower() in {"class", "classification", "unknown"}
+    )
+
+    nonzero_lookup = [
+        str(row["KodText"]).strip()
+        for _, row in lookup_df.iterrows()
+        if int(_normalize_code(row["KodText"])) != 0
+    ]
+    if len(nonzero_lookup) == 1 and raw_name_is_generic:
+        return nonzero_lookup[0]
+
+    if text:
+        return text
+    return str(int(raster_id))
+
+
 def _landcover_hdf_names_and_ids(
     handle: h5py.File,
     lookup_df: pd.DataFrame,
@@ -2862,23 +3529,41 @@ def _landcover_hdf_names_and_ids(
 
     if "Raster Map" in handle:
         for row in handle["Raster Map"][:]:
-            rows.append((int(row["ID"]), _decode_hdf_text(row["Name"])))
+            raw_id = int(row["ID"])
+            raw_name = _decode_hdf_text(row["Name"])
+            rows.append(
+                (
+                    raw_id,
+                    _resolve_native_landcover_name(
+                        raw_id,
+                        raw_name,
+                        lookup_df,
+                    ),
+                )
+            )
     elif "IDs" in handle and "Names" in handle:
         ids = handle["IDs"][:]
         names = handle["Names"][:]
         for raw_id, raw_name in zip(ids, names):
-            rows.append((int(raw_id), _decode_hdf_text(raw_name)))
+            code = int(raw_id)
+            name = _decode_hdf_text(raw_name)
+            rows.append(
+                (
+                    code,
+                    _resolve_native_landcover_name(code, name, lookup_df),
+                )
+            )
 
     seen = {name for _, name in rows}
     if "NoData" not in seen:
         rows.insert(0, (0, "NoData"))
         seen.add("NoData")
 
-    for _, lookup_row in lookup_df.iterrows():
-        name = str(lookup_row["KodText"]).strip()
-        if name not in seen:
-            rows.append((int(_normalize_code(name)), name))
-            seen.add(name)
+    if not rows:
+        for raster_id, name in _native_landcover_rows_from_lookup(lookup_df):
+            if name not in seen:
+                rows.append((int(raster_id), name))
+                seen.add(name)
 
     return rows
 
@@ -3077,11 +3762,12 @@ def create_landcover_layer_with_rasmapper_gui(
     Map Layers > Create a New RAS Layer > Land Cover Layer > add source
     shapefile > set cell size/output file > Create.
     """
-    lookup_df = (
-        pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
-        if config.landcover_lookup_csv.exists()
-        else None
-    )
+    lookup_df = None
+    if config.landcover_copy.exists() or config.landcover_processing_copy.exists():
+        lookup_df = refresh_landcover_lookup_from_processing_source(config)
+    elif config.landcover_lookup_csv.exists():
+        lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+    landcover_source = config.landcover_processing_copy
 
     if config.has_existing_landcover_layer:
         existing_status = install_existing_landcover_layer(config)
@@ -3097,6 +3783,7 @@ def create_landcover_layer_with_rasmapper_gui(
     if config.landcover_hdf.exists() and config.landcover_raster.exists() and not force:
         if lookup_df is not None:
             sync_landcover_hdf_mannings(config, lookup_df)
+            write_raster_statistics_aux_xml(config.landcover_raster)
         _sync_landcover_map_layers(config)
         return {
             "type": "generated_rasmapper_landcover",
@@ -3108,9 +3795,7 @@ def create_landcover_layer_with_rasmapper_gui(
     if not config.create_landcover_with_rasmapper_gui:
         if lookup_df is None:
             lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
-        create_landcover_raster(config)
-        create_landcover_layer_hdf(config, lookup_df)
-        sync_landcover_hdf_mannings(config, lookup_df)
+        ensure_generated_landcover_native_ids(config, lookup_df)
         _sync_landcover_map_layers(config)
         return {
             "type": "generated_direct_landcover",
@@ -3195,7 +3880,7 @@ def create_landcover_layer_with_rasmapper_gui(
             raise RuntimeError("Could not find LandCover add-file button")
         _click_control_physical(add_button)
         _select_landcover_source_in_file_dialog(
-            config.landcover_copy,
+            landcover_source,
             timeout=min(timeout, 60),
         )
 
@@ -3237,13 +3922,15 @@ def create_landcover_layer_with_rasmapper_gui(
                 f"RAS Mapper did not create LandCover HDF: {config.landcover_hdf}"
             )
         _wait_for_path(config.landcover_raster, timeout=30)
+        if config.landcover_raster.exists():
+            write_raster_statistics_aux_xml(config.landcover_raster)
         if lookup_df is not None:
             sync_landcover_hdf_mannings(config, lookup_df)
         _sync_landcover_map_layers(config)
         return {
             "type": "generated_rasmapper_landcover",
             "created_with_gui": True,
-            "source_shapefile": config.landcover_copy,
+            "source_shapefile": landcover_source,
             "landcover_tif": config.landcover_raster,
             "landcover_hdf": config.landcover_hdf,
             "cell_size": config.landcover_cell_size,
@@ -3281,6 +3968,10 @@ def create_boundary_artifacts(
             section.mean_point,
             perimeter_ring,
             breaklines,
+        )
+        limited_section = _scale_polyline_length_about_center(
+            limited_section,
+            config.upstream_bc_length_fraction,
         )
         return _offset_polyline_outside_ring(
             limited_section,
@@ -3632,7 +4323,7 @@ def write_manual_checklist(
         - Terrain HDF target: `{config.terrain_hdf}`
         - Perimeter source: `{config.perimeter_copy}`
         - Breakline source: `{config.breakline_copy}`
-        - Landcover source polygon: `{config.landcover_copy}`
+        - Landcover source polygon: `{config.landcover_processing_copy}`
         - Landcover 2 m raster from `KodText`: `{config.landcover_raster}`
         - Generated Manning-table HDF: `{config.landcover_hdf}`
         {active_landcover_lines}
@@ -4979,6 +5670,7 @@ def _collect_geometry_region_land_cover_names(
     geom_path: Path,
     geom_hdf_path: Path,
     lookup_df: pd.DataFrame,
+    landcover_hdf_path: Optional[Path] = None,
 ) -> List[str]:
     names: List[str] = []
     seen: set[str] = set()
@@ -4990,32 +5682,22 @@ def _collect_geometry_region_land_cover_names(
         seen.add(text)
         names.append(text)
 
-    try:
-        existing_region_df = GeomLandCover.get_region_mannings_n(geom_path)
-        if not existing_region_df.empty:
-            for name in existing_region_df["Land Cover Name"].tolist():
-                _append(name)
-    except Exception:
-        pass
+    _append("NoData")
 
-    calibration_path = "Geometry/Land Cover (Manning's n)/Calibration Table"
-    if geom_hdf_path.exists():
+    if landcover_hdf_path is not None and landcover_hdf_path.exists():
         try:
-            with h5py.File(geom_hdf_path, "r") as handle:
-                if calibration_path in handle:
-                    values = handle[calibration_path][:]
-                    for row in values:
-                        raw_name = row["Land Cover Name"]
-                        if isinstance(raw_name, bytes):
-                            _append(raw_name.decode("utf-8", errors="replace"))
-                        else:
-                            _append(raw_name)
+            with h5py.File(landcover_hdf_path, "r") as handle:
+                for code, name in _landcover_hdf_names_and_ids(handle, lookup_df):
+                    if int(code) == 0:
+                        _append("NoData")
+                    else:
+                        _append(name)
         except Exception:
             pass
 
-    _append("NoData")
     for _, row in lookup_df.iterrows():
-        _append(row["KodText"])
+        if int(_normalize_code(row["KodText"])) != 0:
+            _append(row["KodText"])
 
     return names
 
@@ -5026,20 +5708,21 @@ def build_exact_region_mannings_from_lookup(
     lookup_df: pd.DataFrame,
     nodata_value: float,
     default_value: float,
+    landcover_hdf_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     existing = GeomLandCover.get_region_mannings_n(geom_path)
     if not existing.empty:
         region_name = str(existing["Region Name"].iloc[0])
-        table_value = str(existing["Table Number"].iloc[0])
     else:
         region_name = "Manning's Region 1"
-        table_value = "1"
 
     names = _collect_geometry_region_land_cover_names(
         geom_path,
         geom_hdf_path,
         lookup_df,
+        landcover_hdf_path=landcover_hdf_path,
     )
+    table_value = str(len(names))
     rows = []
     for name in names:
         base_value = _landcover_manning_value(
@@ -5145,7 +5828,7 @@ def set_region_mannings_exact(
     lines = geom_path.read_text(encoding="utf-8", errors="replace").splitlines(True)
 
     region_name = str(region_df["Region Name"].iloc[0])
-    table_value = str(region_df["Table Number"].iloc[0])
+    table_value = str(len(region_df))
     region_start = None
     polygon_idx = None
 
@@ -5296,6 +5979,149 @@ def update_hdf_region_mannings_exact(
                     dataset.attrs[key] = value
 
 
+def sync_geometry_points_from_mesh_hdf(config: RasMapperConfig) -> Dict[str, Any]:
+    """
+    Validate that HEC-RAS saved geometry counts consistently.
+
+    RAS Mapper mesh fixing can add/delete cells in the area-specific mesh
+    datasets while leaving the project-level `Cell Points` and `.g01`
+    `Storage Area 2D Points` block at the pre-fix count. HEC-RAS then may
+    fail when loading geometry data.
+
+    This function first trusts the HEC-RAS save. It only rewrites `.g01` and
+    parent HDF metadata if those counts differ from the authoritative final
+    mesh dataset.
+    """
+    if not config.geom_hdf_path.exists():
+        return {"updated": False, "reason": "geometry HDF missing"}
+
+    geom_point_count = None
+    point_header = None
+    point_end = None
+    lines: List[str] = []
+    if config.geom_path.exists():
+        lines = config.geom_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines(True)
+        for idx, line in enumerate(lines):
+            if line.strip().startswith("Storage Area 2D Points="):
+                point_header = idx
+                geom_point_count = int(line.split("=", 1)[1])
+                point_end = idx + 1 + math.ceil(geom_point_count / 2)
+                break
+
+    with h5py.File(config.geom_hdf_path, "r+") as handle:
+        base = resolve_hdf_2d_area_group(
+            config,
+            handle,
+            geom_path=config.geom_path,
+        )
+        centers_path = f"{base}/Cells Center Coordinate"
+        if centers_path not in handle:
+            return {
+                "updated": False,
+                "reason": "Cells Center Coordinate missing",
+                "hdf_2d_area_group": base,
+            }
+        centers = np.asarray(handle[centers_path][:], dtype=np.float64)
+        cell_count = int(centers.shape[0])
+
+        attrs_path = "Geometry/2D Flow Areas/Attributes"
+        attribute_cell_count = None
+        if attrs_path in handle:
+            attrs = handle[attrs_path][:]
+            if attrs.dtype.names and "Cell Count" in attrs.dtype.names:
+                attribute_cell_count = int(attrs[0]["Cell Count"])
+
+        cell_info_path = "Geometry/2D Flow Areas/Cell Info"
+        cell_points_path = "Geometry/2D Flow Areas/Cell Points"
+        parent_cell_info_count = None
+        if cell_info_path in handle:
+            cell_info = handle[cell_info_path][:]
+            if cell_info.size and cell_info.shape[1] >= 2:
+                parent_cell_info_count = int(cell_info[0][1])
+        parent_cell_points_count = (
+            int(handle[cell_points_path].shape[0])
+            if cell_points_path in handle
+            else None
+        )
+
+        hdf_needs_update = (
+            attribute_cell_count != cell_count
+            or parent_cell_info_count != cell_count
+            or parent_cell_points_count != cell_count
+        )
+        hdf_updated = False
+        if hdf_needs_update:
+            if attrs_path in handle:
+                attrs = handle[attrs_path][:]
+                if attrs.dtype.names and "Cell Count" in attrs.dtype.names:
+                    attrs[0]["Cell Count"] = cell_count
+                    handle[attrs_path][...] = attrs
+
+            for path, data in (
+                (cell_info_path, np.asarray([[0, cell_count]], dtype=np.int32)),
+                (cell_points_path, centers),
+            ):
+                parent = handle[path.rsplit("/", 1)[0]]
+                name = path.rsplit("/", 1)[1]
+                saved_attrs = dict(parent[name].attrs) if name in parent else {}
+                if name in parent:
+                    del parent[name]
+                dataset = parent.create_dataset(name, data=data)
+                for key, value in saved_attrs.items():
+                    dataset.attrs[key] = value
+            hdf_updated = True
+
+    geom_updated = False
+    if geom_point_count is not None and geom_point_count != cell_count:
+        replacement = [f"Storage Area 2D Points= {cell_count} \n"]
+        replacement.extend(
+            _fixed_width_xy_line(chunk)
+            for chunk in _chunk_points(
+                [(float(x), float(y)) for x, y in centers],
+                2,
+            )
+        )
+        updated = lines[:point_header] + replacement + lines[point_end:]
+        config.geom_path.write_text("".join(updated), encoding="utf-8")
+        geom_updated = True
+    elif config.geom_path.exists() and geom_point_count is None:
+        return {
+            "updated": False,
+            "reason": "Storage Area 2D Points block missing",
+            "hdf_2d_area_group": base,
+            "mesh_cell_count": cell_count,
+        }
+
+    updated_any = hdf_updated or geom_updated
+    if updated_any:
+        LOGGER.info(
+            "Synchronized stale geometry metadata from final mesh: %s cells",
+            cell_count,
+        )
+    else:
+        LOGGER.info(
+            "HEC-RAS geometry save counts are already consistent: %s cells",
+            cell_count,
+        )
+
+    return {
+        "updated": updated_any,
+        "hdf_2d_area_group": base,
+        "mesh_cell_count": cell_count,
+        "geom_point_count": geom_point_count,
+        "hdf_attribute_cell_count": attribute_cell_count,
+        "hdf_parent_cell_info_count": parent_cell_info_count,
+        "hdf_parent_cell_points_count": parent_cell_points_count,
+        "hdf_updated": hdf_updated,
+        "geom_updated": geom_updated,
+        "geom_path": config.geom_path,
+        "geom_hdf_path": config.geom_hdf_path,
+    }
+
+
 def sync_landcover_geometry(
     config: RasMapperConfig,
     lookup_df: pd.DataFrame,
@@ -5308,6 +6134,7 @@ def sync_landcover_geometry(
         lookup_df,
         nodata_value=config.landcover_nodata_manning,
         default_value=_calibrated_region_manning_value(config),
+        landcover_hdf_path=config.active_landcover_map_hdf,
     )
     set_region_mannings_exact(
         config.geom_path,
@@ -6152,6 +6979,32 @@ def _polyline_subsegment(
     ]
 
 
+def _scale_polyline_length_about_center(
+    coords: Sequence[Tuple[float, float]],
+    fraction: float,
+) -> List[Tuple[float, float]]:
+    from shapely.geometry import LineString
+
+    if len(coords) < 2:
+        return list(coords)
+
+    fraction = max(0.0, min(1.0, float(fraction)))
+    if fraction >= 0.999999:
+        return list(coords)
+
+    line = LineString(coords)
+    if line.length <= 0:
+        return list(coords)
+
+    target_length = line.length * fraction
+    midpoint = line.length * 0.5
+    start_distance = max(0.0, midpoint - target_length * 0.5)
+    end_distance = min(line.length, midpoint + target_length * 0.5)
+    return _dedupe_consecutive_points(
+        _polyline_subsegment(coords, start_distance, end_distance)
+    )
+
+
 def _limit_boundary_section_to_breaklines(
     section_points: Sequence[Tuple[float, float]],
     section_mean: Tuple[float, float],
@@ -6227,6 +7080,7 @@ def build_boundary_lines_from_sources(
     perimeter_ring: Sequence[Tuple[float, float]],
     breaklines: Sequence[Sequence[Tuple[float, float]]],
     boundary_offset_distance: float,
+    upstream_bc_length_fraction: float,
     downstream_bc_length_multiplier: float,
     storage_area_name: str,
 ) -> List[Dict[str, Any]]:
@@ -6248,6 +7102,10 @@ def build_boundary_lines_from_sources(
                 section.mean_point,
                 perimeter_ring,
                 breaklines,
+            )
+            limited_section = _scale_polyline_length_about_center(
+                limited_section,
+                upstream_bc_length_fraction,
             )
             coords = _offset_polyline_outside_ring(
                 limited_section,
@@ -6430,6 +7288,7 @@ def sync_geometry_to_source_shapes(config: RasMapperConfig) -> Dict[str, Any]:
             perimeter_ring,
             breaklines,
             boundary_offset_distance=config.boundary_offset_distance,
+            upstream_bc_length_fraction=config.upstream_bc_length_fraction,
             downstream_bc_length_multiplier=(
                 config.downstream_bc_length_multiplier
             ),
@@ -6601,6 +7460,7 @@ def refresh_geometry_display_metadata(config: RasMapperConfig) -> None:
             perimeter_ring,
             breaklines,
             boundary_offset_distance=config.boundary_offset_distance,
+            upstream_bc_length_fraction=config.upstream_bc_length_fraction,
             downstream_bc_length_multiplier=(
                 config.downstream_bc_length_multiplier
             ),
@@ -6639,12 +7499,23 @@ def regenerate_geometry_hdf(
     timeout: int = 300,
 ) -> Dict[str, Any]:
     native_landcover_status = None
+    landcover_raster_status = None
     if config.landcover_lookup_csv.exists():
         native_landcover_status = create_landcover_layer_with_rasmapper_gui(
             config,
             timeout=timeout,
             force=False,
         )
+        if not config.has_existing_landcover_layer:
+            lookup_df = pd.read_csv(
+                config.landcover_lookup_csv,
+                dtype={"KodText": str},
+            )
+            landcover_raster_status = (
+                validate_native_landcover_layer(config, lookup_df)
+                if config.create_landcover_with_rasmapper_gui
+                else ensure_generated_landcover_native_ids(config, lookup_df)
+            )
 
     if config.geom_hdf_path.exists():
         config.geom_hdf_path.unlink()
@@ -6715,9 +7586,10 @@ def regenerate_geometry_hdf(
         breakline_attrs = handle["Geometry/2D Flow Area Break Lines/Attributes"][:]
 
     region_records = None
+    landcover_raster_status = None
     landcover_status = None
     if config.landcover_lookup_csv.exists():
-        lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+        lookup_df = refresh_landcover_lookup_from_processing_source(config)
         create_mannings_raster(config, lookup_df)
         existing_landcover_status = (
             install_existing_landcover_layer(config)
@@ -6738,6 +7610,7 @@ def regenerate_geometry_hdf(
             "region_records": region_records,
             "existing_ras_layer": existing_landcover_status,
             "native_landcover_layer": native_landcover_status,
+            "landcover_raster_status": landcover_raster_status,
             "geometry_landcover_association_updated": geometry_assoc_updated,
         }
         config.landcover_status_json.write_text(
@@ -6746,6 +7619,7 @@ def regenerate_geometry_hdf(
         )
 
     removed_layers = _cleanup_stale_landcover_layers(config.rasmap_path)
+    geometry_point_sync = sync_geometry_points_from_mesh_hdf(config)
     refresh_geometry_display_metadata(config)
     mesh_qc = analyze_mesh_enforcement(config)
 
@@ -6758,6 +7632,7 @@ def regenerate_geometry_hdf(
         "hdf_breakline_count": len(breakline_attrs),
         "region_mannings": region_records,
         "landcover_status": landcover_status,
+        "geometry_point_sync": geometry_point_sync,
         "mesh_qc": mesh_qc,
         "removed_stale_landcover_layers": removed_layers,
         "timeout": timeout,
@@ -6780,11 +7655,20 @@ def install_reference_geometry(
     seed_geometry_from_reference(config)
 
     source_sync = sync_geometry_to_source_shapes(config)
-    lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+    lookup_df = refresh_landcover_lookup_from_processing_source(config)
     native_landcover_status = create_landcover_layer_with_rasmapper_gui(
         config,
         timeout=timeout,
         force=not skip_regeneration,
+    )
+    landcover_raster_status = (
+        (
+            validate_native_landcover_layer(config, lookup_df)
+            if config.create_landcover_with_rasmapper_gui
+            else ensure_generated_landcover_native_ids(config, lookup_df)
+        )
+        if not config.has_existing_landcover_layer
+        else validate_native_landcover_layer(config, lookup_df)
     )
     regen_summary = None
     if config.geom_hdf_path.exists():
@@ -6801,6 +7685,11 @@ def install_reference_geometry(
     _sync_landcover_map_layers(config)
     geometry_assoc_updated = _ensure_geometry_landcover_association(config)
     expected_region_df = sync_landcover_geometry(config, lookup_df)
+    geometry_point_sync = (
+        sync_geometry_points_from_mesh_hdf(config)
+        if config.geom_hdf_path.exists()
+        else None
+    )
 
     summary = {
         "geom_path": config.geom_path,
@@ -6823,7 +7712,9 @@ def install_reference_geometry(
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "existing_ras_layer": existing_landcover_status,
         "native_landcover_layer": native_landcover_status,
+        "landcover_raster_status": landcover_raster_status,
         "geometry_landcover_association_updated": geometry_assoc_updated,
+        "geometry_point_sync": geometry_point_sync,
         "region_mannings": expected_region_df.to_dict(orient="records"),
     }
     (config.reports_dir / "geometry_install_summary.json").write_text(
@@ -6852,10 +7743,19 @@ def sync_reference_geometry(config: RasMapperConfig) -> Dict[str, Any]:
     )
     native_landcover_status = None
     if config.landcover_lookup_csv.exists():
-        lookup_df = pd.read_csv(config.landcover_lookup_csv, dtype={"KodText": str})
+        lookup_df = refresh_landcover_lookup_from_processing_source(config)
         native_landcover_status = create_landcover_layer_with_rasmapper_gui(
             config,
             force=False,
+        )
+        landcover_raster_status = (
+            (
+                validate_native_landcover_layer(config, lookup_df)
+                if config.create_landcover_with_rasmapper_gui
+                else ensure_generated_landcover_native_ids(config, lookup_df)
+            )
+            if not config.has_existing_landcover_layer
+            else validate_native_landcover_layer(config, lookup_df)
         )
         create_mannings_raster(config, lookup_df)
         existing_landcover_status = (
@@ -6888,6 +7788,7 @@ def sync_reference_geometry(config: RasMapperConfig) -> Dict[str, Any]:
         "landcover_mannings_raster": config.landcover_mannings_raster,
         "existing_ras_layer": existing_landcover_status,
         "native_landcover_layer": native_landcover_status,
+        "landcover_raster_status": landcover_raster_status,
         "geometry_landcover_association_updated": geometry_assoc_updated,
         "region_mannings": region_records,
         "geom_hdf_deleted": True,
@@ -7028,6 +7929,11 @@ def apply_mannings(config: RasMapperConfig, geom: Optional[str]) -> Path:
         lookup_df,
         nodata_value=config.landcover_nodata_manning,
         default_value=_calibrated_region_manning_value(config),
+        landcover_hdf_path=(
+            config.active_landcover_map_hdf
+            if geom_path == config.geom_path
+            else None
+        ),
     )
     set_region_mannings_exact(
         geom_path,
@@ -7088,6 +7994,11 @@ def check_mannings(config: RasMapperConfig, geom: Optional[str]) -> Path:
         lookup_df,
         nodata_value=config.landcover_nodata_manning,
         default_value=_calibrated_region_manning_value(config),
+        landcover_hdf_path=(
+            config.active_landcover_map_hdf
+            if geom_path == config.geom_path
+            else None
+        ),
     )
     merged = region_df.merge(
         expected_region_df[
@@ -7170,6 +8081,7 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
     copy_shapefile_family(config.perimeter_src, config.perimeter_copy.parent)
     copy_shapefile_family(config.breakline_src, config.breakline_copy.parent)
     copy_shapefile_family(config.landcover_src, config.landcover_copy.parent)
+    clipped_landcover = clip_landcover_to_perimeter(config)
     if config.calibration_region_src is not None and config.calibration_region_copy is not None:
         copy_shapefile_family(
             config.calibration_region_src,
@@ -7202,11 +8114,20 @@ def prepare_project(config: RasMapperConfig, skip_terrain: bool) -> Dict[str, An
     write_cross_section_shapefile(sections, config.cross_sections_shp, config)
     write_centerline_shapefile(sections, config.centerline_shp, config)
 
-    landcover_lookup = _load_landcover_table(config.landcover_copy)
-    landcover_lookup.to_csv(config.landcover_lookup_csv, index=False, encoding="utf-8")
+    landcover_lookup = refresh_landcover_lookup_from_processing_source(config)
     create_landcover_raster(config)
-    create_mannings_raster(config, landcover_lookup)
     existing_landcover_status = install_existing_landcover_layer(config)
+    lookup_raster = (
+        config.active_landcover_map_tif
+        if config.active_landcover_map_tif.exists()
+        else config.landcover_raster
+    )
+    landcover_lookup = filter_landcover_lookup_to_raster(
+        landcover_lookup,
+        lookup_raster,
+    )
+    landcover_lookup.to_csv(config.landcover_lookup_csv, index=False, encoding="utf-8")
+    create_mannings_raster(config, landcover_lookup)
 
     dss_catalog = parse_dss_catalog(config.dss_catalog_copy)
     preferred_dss_path, dss_catalog = choose_preferred_dss_path(
