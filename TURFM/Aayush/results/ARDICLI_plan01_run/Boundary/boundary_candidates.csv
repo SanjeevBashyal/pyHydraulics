@@ -1,0 +1,3 @@
+bc_name,bc_line_name,role,branch,station,mean_z,interior_side,reverse_if_interior_should_be_right,reverse_if_interior_should_be_left,method,normal_depth_slope,flow_hydrograph_slope,dss_path,offset_distance,storage_area_name
+upstream BC,upstream BC,upstream,main,1,932.76,left,True,False,Flow Hydrograph,,0.07781083274796997,/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/,1.0,ARDICLI_2D
+downstream BC,downstream BC,downstream,main,8,898.644,right,False,True,Normal Depth,0.05177035516749703,,,1.0,ARDICLI_2D

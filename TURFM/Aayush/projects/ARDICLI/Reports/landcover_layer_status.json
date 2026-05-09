@@ -1,0 +1,59 @@
+{
+  "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+  "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+  "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+  "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+  "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\LandCover\\Burdur_Corine_Turef30_ManningN_2m.tif",
+  "lookup_records": [
+    {
+      "KodText": "0",
+      "Adi": "NoData",
+      "Manningn": 0.025
+    },
+    {
+      "KodText": "1122",
+      "Adi": "Kesikli k\u0131rsal yap\u0131s\u0131",
+      "Manningn": 0.013
+    },
+    {
+      "KodText": "2421",
+      "Adi": "Sulanmayan kar\u0131\u015f\u0131k ta\u0131m",
+      "Manningn": 0.04
+    }
+  ],
+  "region_records": [
+    {
+      "Table Number": "3",
+      "Land Cover Name": "NoData",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "3",
+      "Land Cover Name": "1122",
+      "Base Manning's n Value": 0.013,
+      "Base Mannings n Value": 0.013,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "3",
+      "Land Cover Name": "2421",
+      "Base Manning's n Value": 0.04,
+      "Base Mannings n Value": 0.04,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    }
+  ],
+  "existing_ras_layer": null,
+  "native_landcover_layer": {
+    "type": "generated_rasmapper_landcover",
+    "created_with_gui": false,
+    "landcover_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+    "landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf"
+  },
+  "landcover_raster_status": null,
+  "geometry_landcover_association_updated": true
+}

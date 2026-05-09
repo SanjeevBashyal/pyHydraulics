@@ -1,0 +1,75 @@
+{
+  "project_file": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.prj",
+  "unsteady": {
+    "unsteady_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.u01",
+    "unsteady_hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.u01.hdf",
+    "storage_area_name": "ARDICLI_2D",
+    "upstream_bc_name": "upstream BC",
+    "upstream_bc_names": [
+      "upstream BC"
+    ],
+    "downstream_bc_name": "downstream BC",
+    "upstream_dss_path": "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/",
+    "upstream_dss_paths": [
+      "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/"
+    ],
+    "dss_file": ".\\Boundary\\Merged_DSS.dss",
+    "downstream_slope": 0.051770355167497,
+    "template_unsteady": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\ARDICLI_inputs\\UnsteadyTemplate\\BUR-BUR-MER-ATATURK.u01",
+    "template_unsteady_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\ARDICLI_inputs\\UnsteadyTemplate\\BUR-BUR-MER-ATATURK.u01.hdf"
+  },
+  "plan": {
+    "plan_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.p01",
+    "template_plan": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\ARDICLI_inputs\\PlanTemplate\\BUR-BUR-MER-ATATURK.p01",
+    "plan_title": "ARDICLI_Q1000",
+    "plan_short_identifier": "ARDICLI_Q1000",
+    "simulation_date": "01May2025,0000,02May2025,0000",
+    "geom_file": "g01",
+    "flow_file": "u01",
+    "plan_flow_regime": "Mixed Flow",
+    "computation_interval": "6SEC",
+    "hydrograph_output_interval": "5MIN",
+    "mapping_output_interval": "5MIN",
+    "detailed_output_interval": "5MIN",
+    "use_courant_timestep": true,
+    "max_courant": 1.0,
+    "min_courant": 0.45,
+    "steps_below_min_before_doubling": 4,
+    "max_doubling_base_timestep": 2,
+    "max_halving_base_timestep": 2,
+    "run_htab": -1,
+    "run_unet": -1,
+    "run_rasmapper": -1
+  },
+  "simulation_date": {
+    "simulation_date": "01May2025,0000,02May2025,0000",
+    "source": "dss_path_d_part",
+    "start_datetime": "2025-05-01T00:00:00",
+    "end_datetime": "2025-05-02T00:00:00",
+    "duration_hours": 24.0,
+    "start_offset_hours": 0.0,
+    "end_offset_hours": 0.0,
+    "upstream_dss_path": "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/",
+    "dss_parts": {
+      "A": "BUR-ISP-KEC-ARDICLI",
+      "B": "BURDUR",
+      "C": "DEBI",
+      "D": "01May2025",
+      "E": "30Minute",
+      "F": "Q1000"
+    }
+  },
+  "verification": {
+    "project_has_current_plan": true,
+    "project_has_plan_entry": true,
+    "project_has_unsteady_entry": true,
+    "plan_has_geometry": true,
+    "plan_has_unsteady_flow_file": true,
+    "plan_has_no_steady_flow_file": true,
+    "plan_run_unet": true,
+    "unsteady_has_upstream_bc": true,
+    "unsteady_has_downstream_bc": true,
+    "unsteady_uses_dss": true,
+    "unsteady_hdf_exists": true
+  }
+}

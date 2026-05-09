@@ -1,0 +1,201 @@
+{
+  "topology": {
+    "model_type": "single"
+  },
+  "boundary_rows": [
+    {
+      "bc_name": "upstream BC",
+      "bc_line_name": "upstream BC",
+      "role": "upstream",
+      "branch": "main",
+      "station": "1",
+      "mean_z": 932.76,
+      "interior_side": "left",
+      "reverse_if_interior_should_be_right": true,
+      "reverse_if_interior_should_be_left": false,
+      "method": "Flow Hydrograph",
+      "normal_depth_slope": null,
+      "flow_hydrograph_slope": 0.07781083274796997,
+      "dss_path": "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/",
+      "offset_distance": 1.0,
+      "storage_area_name": "ARDICLI_2D",
+      "coords": [
+        [
+          517726.7910727227,
+          4185981.5773180714
+        ],
+        [
+          517725.13769765967,
+          4185978.756393793
+        ],
+        [
+          517723.3976976597,
+          4185975.796393793
+        ],
+        [
+          517721.74769765965,
+          4185972.986393793
+        ],
+        [
+          517718.6476976597,
+          4185967.696393793
+        ],
+        [
+          517715.94769765966,
+          4185963.106393793
+        ],
+        [
+          517712.88769765967,
+          4185957.906393793
+        ],
+        [
+          517711.40300842386,
+          4185955.3740666984
+        ]
+      ]
+    },
+    {
+      "bc_name": "downstream BC",
+      "bc_line_name": "downstream BC",
+      "role": "downstream",
+      "branch": "main",
+      "station": "8",
+      "mean_z": 898.644,
+      "interior_side": "right",
+      "reverse_if_interior_should_be_right": false,
+      "reverse_if_interior_should_be_left": true,
+      "method": "Normal Depth",
+      "normal_depth_slope": 0.05177035516749703,
+      "flow_hydrograph_slope": null,
+      "dss_path": null,
+      "offset_distance": 1.0,
+      "storage_area_name": "ARDICLI_2D",
+      "coords": [
+        [
+          518185.9563425231,
+          4185697.781073071
+        ],
+        [
+          518052.52079518966,
+          4185614.2324998723
+        ],
+        [
+          518047.01079518965,
+          4185610.782499872
+        ],
+        [
+          518043.0607951897,
+          4185608.3124998724
+        ],
+        [
+          518039.6607951897,
+          4185606.1724998723
+        ],
+        [
+          518038.3107951897,
+          4185605.3324998724
+        ],
+        [
+          518036.6007951897,
+          4185604.262499872
+        ],
+        [
+          518036.26079518965,
+          4185604.052499872
+        ],
+        [
+          518035.50079518964,
+          4185603.572499872
+        ],
+        [
+          518030.82079518965,
+          4185600.6524998723
+        ],
+        [
+          518026.6707951897,
+          4185598.0424998724
+        ],
+        [
+          518022.8707951897,
+          4185595.662499872
+        ],
+        [
+          517889.4461407766,
+          4185512.096532095
+        ]
+      ]
+    }
+  ],
+  "slope_reports": [
+    {
+      "slope": 0.07781083274796997,
+      "raw_slope": 0.07781083274796997,
+      "status": "computed",
+      "mode": "upstream",
+      "base_station": "1",
+      "candidate_station": "2",
+      "base_point": {
+        "x": 517722.61,
+        "y": 4185972.48,
+        "z": 927.71,
+        "method": "between_breakline_intersections_lowest",
+        "station": "1",
+        "bank_intersections": 2,
+        "candidate_point_count": 9
+      },
+      "candidate_point": {
+        "x": 517764.94,
+        "y": 4185897.94,
+        "z": 921.04,
+        "method": "between_breakline_intersections_lowest",
+        "station": "2",
+        "bank_intersections": 2,
+        "candidate_point_count": 9
+      },
+      "distance": 85.72071219960164,
+      "vertical_drop": 6.670000000000073,
+      "min_distance": 30.0,
+      "skipped": [],
+      "role": "upstream_flow_hydrograph",
+      "branch": "main"
+    },
+    {
+      "slope": 0.05177035516749703,
+      "raw_slope": 0.05177035516749703,
+      "status": "computed",
+      "mode": "downstream",
+      "base_station": "8",
+      "candidate_station": "6",
+      "base_point": {
+        "x": 518051.99,
+        "y": 4185615.08,
+        "z": 898.36,
+        "method": "full_xs_lowest",
+        "station": "8",
+        "bank_intersections": 0,
+        "candidate_point_count": 11
+      },
+      "candidate_point": {
+        "x": 517991.31,
+        "y": 4185662.91,
+        "z": 902.36,
+        "method": "between_breakline_intersections_lowest",
+        "station": "6",
+        "bank_intersections": 2,
+        "candidate_point_count": 4
+      },
+      "distance": 77.26429511751388,
+      "vertical_drop": 4.0,
+      "min_distance": 30.0,
+      "skipped": [
+        {
+          "station": "7",
+          "distance": 21.590280220473375,
+          "reason": "below_min_distance"
+        }
+      ],
+      "role": "downstream_normal_depth",
+      "branch": "main"
+    }
+  ]
+}

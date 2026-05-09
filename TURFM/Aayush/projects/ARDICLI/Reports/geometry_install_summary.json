@@ -1,0 +1,365 @@
+{
+  "geom_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01",
+  "geom_hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01.hdf",
+  "geometry_title": "ARDICLI_2D_CLEAN",
+  "resolved_storage_area_name": "ARDICLI_2D",
+  "mesh_cell_size": 10.0,
+  "breakline_near_spacing": 0.5,
+  "breakline_near_repeats": 5,
+  "source_sync": {
+    "storage_area_name": "ARDICLI_2D",
+    "perimeter_points": 242,
+    "computation_points": 25695,
+    "mesh_cell_size": 10.0,
+    "breakline_counts": [
+      51,
+      13,
+      57
+    ],
+    "boundary_lines": [
+      {
+        "name": "upstream BC",
+        "coords": [
+          [
+            517726.7910727227,
+            4185981.5773180714
+          ],
+          [
+            517725.13769765967,
+            4185978.756393793
+          ],
+          [
+            517723.3976976597,
+            4185975.796393793
+          ],
+          [
+            517721.74769765965,
+            4185972.986393793
+          ],
+          [
+            517718.6476976597,
+            4185967.696393793
+          ],
+          [
+            517715.94769765966,
+            4185963.106393793
+          ],
+          [
+            517712.88769765967,
+            4185957.906393793
+          ],
+          [
+            517711.40300842386,
+            4185955.3740666984
+          ]
+        ]
+      },
+      {
+        "name": "downstream BC",
+        "coords": [
+          [
+            518185.9563425231,
+            4185697.781073071
+          ],
+          [
+            518052.52079518966,
+            4185614.2324998723
+          ],
+          [
+            518047.01079518965,
+            4185610.782499872
+          ],
+          [
+            518043.0607951897,
+            4185608.3124998724
+          ],
+          [
+            518039.6607951897,
+            4185606.1724998723
+          ],
+          [
+            518038.3107951897,
+            4185605.3324998724
+          ],
+          [
+            518036.6007951897,
+            4185604.262499872
+          ],
+          [
+            518036.26079518965,
+            4185604.052499872
+          ],
+          [
+            518035.50079518964,
+            4185603.572499872
+          ],
+          [
+            518030.82079518965,
+            4185600.6524998723
+          ],
+          [
+            518026.6707951897,
+            4185598.0424998724
+          ],
+          [
+            518022.8707951897,
+            4185595.662499872
+          ],
+          [
+            517889.4461407766,
+            4185512.096532095
+          ]
+        ]
+      }
+    ]
+  },
+  "regeneration": {
+    "workflow_success": true,
+    "hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01.hdf",
+    "hdf_2d_area_group": "Geometry/2D Flow Areas/ARDICLI_2D",
+    "mesh_cell_count": 28297,
+    "hdf_perimeter_points": 242,
+    "hdf_breakline_count": 3,
+    "region_mannings": [
+      {
+        "Table Number": "3",
+        "Land Cover Name": "NoData",
+        "Base Manning's n Value": 0.025,
+        "Base Mannings n Value": 0.025,
+        "MainChannel": 0.025,
+        "Region Name": "Manning's Region 1"
+      },
+      {
+        "Table Number": "3",
+        "Land Cover Name": "1122",
+        "Base Manning's n Value": 0.013,
+        "Base Mannings n Value": 0.013,
+        "MainChannel": 0.025,
+        "Region Name": "Manning's Region 1"
+      },
+      {
+        "Table Number": "3",
+        "Land Cover Name": "2421",
+        "Base Manning's n Value": 0.04,
+        "Base Mannings n Value": 0.04,
+        "MainChannel": 0.025,
+        "Region Name": "Manning's Region 1"
+      }
+    ],
+    "landcover_status": {
+      "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+      "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+      "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+      "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+      "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\LandCover\\Burdur_Corine_Turef30_ManningN_2m.tif",
+      "lookup_records": [
+        {
+          "KodText": "0",
+          "Adi": "NoData",
+          "Manningn": 0.025
+        },
+        {
+          "KodText": "1122",
+          "Adi": "Kesikli k\u0131rsal yap\u0131s\u0131",
+          "Manningn": 0.013
+        },
+        {
+          "KodText": "2421",
+          "Adi": "Sulanmayan kar\u0131\u015f\u0131k ta\u0131m",
+          "Manningn": 0.04
+        }
+      ],
+      "region_records": [
+        {
+          "Table Number": "3",
+          "Land Cover Name": "NoData",
+          "Base Manning's n Value": 0.025,
+          "Base Mannings n Value": 0.025,
+          "MainChannel": 0.025,
+          "Region Name": "Manning's Region 1"
+        },
+        {
+          "Table Number": "3",
+          "Land Cover Name": "1122",
+          "Base Manning's n Value": 0.013,
+          "Base Mannings n Value": 0.013,
+          "MainChannel": 0.025,
+          "Region Name": "Manning's Region 1"
+        },
+        {
+          "Table Number": "3",
+          "Land Cover Name": "2421",
+          "Base Manning's n Value": 0.04,
+          "Base Mannings n Value": 0.04,
+          "MainChannel": 0.025,
+          "Region Name": "Manning's Region 1"
+        }
+      ],
+      "existing_ras_layer": null,
+      "native_landcover_layer": {
+        "type": "generated_rasmapper_landcover",
+        "created_with_gui": false,
+        "landcover_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+        "landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf"
+      },
+      "landcover_raster_status": null,
+      "geometry_landcover_association_updated": true
+    },
+    "geometry_point_sync": {
+      "updated": true,
+      "hdf_2d_area_group": "Geometry/2D Flow Areas/ARDICLI_2D",
+      "mesh_cell_count": 28297,
+      "geom_point_count": 28091,
+      "hdf_attribute_cell_count": 28091,
+      "hdf_parent_cell_info_count": 28091,
+      "hdf_parent_cell_points_count": 28091,
+      "hdf_updated": true,
+      "geom_updated": true,
+      "geom_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01",
+      "geom_hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01.hdf"
+    },
+    "mesh_qc": {
+      "available": true,
+      "mesh_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01.hdf",
+      "mesh_validation": {
+        "hdf_2d_area_group": "Geometry/2D Flow Areas/ARDICLI_2D",
+        "max_facepoints_per_cell": 8,
+        "cells_over_8_facepoints": 0,
+        "cell_count": 28297,
+        "attribute_cell_count": 28297
+      },
+      "breaklines": [
+        {
+          "name": "Breakline 1",
+          "near_spacing": 0.5,
+          "far_spacing": 3.0,
+          "near_repeats": 5,
+          "influence_distance": 2.5,
+          "facepoint_count_within_influence": 8472,
+          "closest_facepoint_distance": 0.0,
+          "median_facepoint_distance_within_influence": 1.4999999974045224,
+          "within_1x": 2265,
+          "within_2x": 3799,
+          "within_3x": 5345,
+          "within_4x": 6899,
+          "within_5x": 8472
+        },
+        {
+          "name": "Breakline 2",
+          "near_spacing": 0.5,
+          "far_spacing": 3.0,
+          "near_repeats": 5,
+          "influence_distance": 2.5,
+          "facepoint_count_within_influence": 3179,
+          "closest_facepoint_distance": 0.0,
+          "median_facepoint_distance_within_influence": 1.4999999998637212,
+          "within_1x": 750,
+          "within_2x": 1301,
+          "within_3x": 1869,
+          "within_4x": 2494,
+          "within_5x": 3179
+        },
+        {
+          "name": "Breakline 3",
+          "near_spacing": 0.5,
+          "far_spacing": 3.0,
+          "near_repeats": 5,
+          "influence_distance": 2.5,
+          "facepoint_count_within_influence": 11373,
+          "closest_facepoint_distance": 0.0,
+          "median_facepoint_distance_within_influence": 1.4999999983008345,
+          "within_1x": 2972,
+          "within_2x": 5026,
+          "within_3x": 7095,
+          "within_4x": 9187,
+          "within_5x": 11373
+        }
+      ]
+    },
+    "removed_stale_landcover_layers": [],
+    "timeout": 300,
+    "geometry_association_selected": {
+      "selected_layer": "LandCover",
+      "rasmap_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.rasmap"
+    }
+  },
+  "skip_regeneration": false,
+  "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+  "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+  "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+  "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+  "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\LandCover\\Burdur_Corine_Turef30_ManningN_2m.tif",
+  "existing_ras_layer": null,
+  "native_landcover_layer": {
+    "type": "generated_rasmapper_landcover",
+    "created_with_gui": true,
+    "source_shapefile": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Inputs\\LandCover\\Burdur_Corine_Turef30_clipped_to_perimeter.shp",
+    "landcover_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+    "landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+    "cell_size": 2.0
+  },
+  "landcover_raster_status": {
+    "raster_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+    "hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+    "raster_ids": [
+      2,
+      3
+    ],
+    "hdf_ids": [
+      2,
+      3
+    ],
+    "hdf_names": [
+      "1122",
+      "2421"
+    ],
+    "lookup_names": [
+      "1122",
+      "2421"
+    ],
+    "missing_names": [],
+    "missing_raster_ids": [],
+    "unexpected_raster_ids": [],
+    "matches": true
+  },
+  "geometry_landcover_association_updated": false,
+  "geometry_point_sync": {
+    "updated": false,
+    "hdf_2d_area_group": "Geometry/2D Flow Areas/ARDICLI_2D",
+    "mesh_cell_count": 28297,
+    "geom_point_count": 28297,
+    "hdf_attribute_cell_count": 28297,
+    "hdf_parent_cell_info_count": 28297,
+    "hdf_parent_cell_points_count": 28297,
+    "hdf_updated": false,
+    "geom_updated": false,
+    "geom_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01",
+    "geom_hdf_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01.hdf"
+  },
+  "region_mannings": [
+    {
+      "Table Number": "3",
+      "Land Cover Name": "NoData",
+      "Base Manning's n Value": 0.025,
+      "Base Mannings n Value": 0.025,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "3",
+      "Land Cover Name": "1122",
+      "Base Manning's n Value": 0.013,
+      "Base Mannings n Value": 0.013,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    },
+    {
+      "Table Number": "3",
+      "Land Cover Name": "2421",
+      "Base Manning's n Value": 0.04,
+      "Base Mannings n Value": 0.04,
+      "MainChannel": 0.025,
+      "Region Name": "Manning's Region 1"
+    }
+  ]
+}

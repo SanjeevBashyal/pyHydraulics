@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import geopandas as gpd
+import h5py
 import numpy as np
 import pandas as pd
 from shapely.geometry import LineString, Point, box
@@ -76,6 +77,8 @@ class SectionData:
     left_reach_length: float = 0.0
     channel_reach_length: float = 0.0
     right_reach_length: float = 0.0
+    hdf_left_bank_station: Optional[float] = None
+    hdf_right_bank_station: Optional[float] = None
 
 
 @dataclass
@@ -395,6 +398,7 @@ class HECRAS:
         bank_station_mode: str = "snap",
         river_line_method: str = "simple_distance",
         all_flows_in_single_plan: bool = False,
+        prepare_geometry_hdf: bool = True,
     ) -> FlowScreeningResult:
         project_folder = Path(project_folder)
         project_folder.mkdir(parents=True, exist_ok=True)
@@ -465,6 +469,7 @@ class HECRAS:
                 expansion_coeff=expansion_coeff,
                 contraction_coeff=contraction_coeff,
                 outflow_tolerance_m=outflow_tolerance_m,
+                prepare_geometry_hdf=prepare_geometry_hdf,
             )
 
         run_root = project_folder / "runs"
@@ -514,6 +519,8 @@ class HECRAS:
                 project_folder=run_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
+                prepare_geometry_hdf=prepare_geometry_hdf,
             )
             out_of_bank = None
             max_bank_excess_m = None
@@ -596,6 +603,8 @@ class HECRAS:
                 project_folder=project_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
+                prepare_geometry_hdf=prepare_geometry_hdf,
             )
             final_compute_success = bool(final_compute_info["compute_success"])
             final_solution = str(final_compute_info["solution"])
@@ -669,6 +678,7 @@ class HECRAS:
         expansion_coeff: float,
         contraction_coeff: float,
         outflow_tolerance_m: float,
+        prepare_geometry_hdf: bool = True,
     ) -> FlowScreeningResult:
         flow_profiles: list[tuple[str, float]] = []
         missing_results: dict[str, FlowRunResult] = {}
@@ -739,6 +749,8 @@ class HECRAS:
             project_folder=project_folder,
             project_stem=project_stem,
             plan_number="01",
+            geometry_context=geometry_context,
+            prepare_geometry_hdf=prepare_geometry_hdf,
         )
         flow_lookup = dict(flow_profiles)
         for return_period in requested_return_periods:
@@ -883,6 +895,7 @@ class HECRAS:
         bank_station_mode: str = "snap",
         river_line_method: str = "simple_distance",
         all_flows_in_single_plan: bool = False,
+        prepare_geometry_hdf: bool = True,
     ) -> FlowScreeningResult:
         project_folder = Path(project_folder)
         project_folder.mkdir(parents=True, exist_ok=True)
@@ -1010,6 +1023,7 @@ class HECRAS:
                 expansion_coeff=expansion_coeff,
                 contraction_coeff=contraction_coeff,
                 outflow_tolerance_m=outflow_tolerance_m,
+                prepare_geometry_hdf=prepare_geometry_hdf,
             )
 
         run_root = project_folder / "runs"
@@ -1143,6 +1157,8 @@ class HECRAS:
                 project_folder=run_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
+                prepare_geometry_hdf=prepare_geometry_hdf,
             )
             out_of_bank = None
             max_bank_excess_m = None
@@ -1237,6 +1253,8 @@ class HECRAS:
                 project_folder=project_folder,
                 project_stem=project_stem,
                 plan_number="01",
+                geometry_context=geometry_context,
+                prepare_geometry_hdf=prepare_geometry_hdf,
             )
             final_compute_success = bool(final_compute_info["compute_success"])
             final_solution = str(final_compute_info["solution"])
@@ -1335,6 +1353,7 @@ class HECRAS:
         expansion_coeff: float,
         contraction_coeff: float,
         outflow_tolerance_m: float,
+        prepare_geometry_hdf: bool = True,
     ) -> FlowScreeningResult:
         flow_profiles: list[tuple[str, dict[str, float]]] = []
         flow_lookup: dict[str, dict[str, Any]] = {}
@@ -1525,6 +1544,8 @@ class HECRAS:
             project_folder=project_folder,
             project_stem=project_stem,
             plan_number="01",
+            geometry_context=geometry_context,
+            prepare_geometry_hdf=prepare_geometry_hdf,
         )
 
         for return_period in requested_return_periods:
@@ -1684,6 +1705,8 @@ class HECRAS:
         project_folder: str | Path,
         project_stem: str,
         plan_number: str = "01",
+        geometry_context: Optional[dict[str, Any]] = None,
+        prepare_geometry_hdf: bool = True,
     ) -> dict[str, Any]:
         project_folder = Path(project_folder)
         normalized_plan_number = self._normalize_plan_number(plan_number)
@@ -1698,13 +1721,43 @@ class HECRAS:
             str(self.ras_exe_path),
             load_results_summary=False,
         )
+        geometry_hdf_prepared = False
+        if (
+            prepare_geometry_hdf
+            and normalized_plan_number == "01"
+            and geometry_context is not None
+        ):
+            self._prepare_corrected_geometry_hdf(
+                project_folder=project_folder,
+                project_stem=project_stem,
+                geometry_context=geometry_context,
+            )
+            init_ras_project(
+                project_folder,
+                str(self.ras_exe_path),
+                load_results_summary=False,
+            )
+            geometry_hdf_prepared = True
+
         compute_result = RasCmdr.compute_plan(
             plan_number,
-            clear_geompre=True,
+            clear_geompre=not geometry_hdf_prepared,
             force_rerun=True,
             verify=True,
         )
         plan_hdf_path = project_folder / f"{project_stem}.p{normalized_plan_number}.hdf"
+        if geometry_hdf_prepared and geometry_context is not None:
+            geometry_hdf_path = project_folder / f"{project_stem}.g01.hdf"
+            self._patch_project_hdf_geometry(
+                hdf_path=geometry_hdf_path,
+                geometry_context=geometry_context,
+            )
+            if plan_hdf_path.exists():
+                self._patch_project_hdf_geometry(
+                    hdf_path=plan_hdf_path,
+                    geometry_context=geometry_context,
+                )
+
         solution = ""
         if plan_hdf_path.exists():
             try:
@@ -1728,6 +1781,542 @@ class HECRAS:
             "plan_hdf_file": str(plan_hdf_path) if plan_hdf_path.exists() else "",
             "solution": solution,
         }
+
+    def _prepare_corrected_geometry_hdf(
+        self,
+        project_folder: Path,
+        project_stem: str,
+        geometry_context: dict[str, Any],
+    ) -> None:
+        geometry_hdf_path = project_folder / f"{project_stem}.g01.hdf"
+        if not self._geometry_context_sections(geometry_context):
+            logger.info("Skipping geometry-HDF correction; no sections are available.")
+            return
+
+        init_ras_project(
+            project_folder,
+            str(self.ras_exe_path),
+            load_results_summary=False,
+        )
+        RasCmdr.compute_plan(
+            "01",
+            clear_geompre=True,
+            force_geompre=True,
+            force_rerun=True,
+            verify=False,
+        )
+        self._delete_plan_compute_outputs(
+            project_folder=project_folder,
+            project_stem=project_stem,
+            plan_number="01",
+            keep_geometry_hdf=True,
+        )
+        if geometry_hdf_path.exists():
+            self._patch_project_hdf_geometry(
+                hdf_path=geometry_hdf_path,
+                geometry_context=geometry_context,
+            )
+            logger.info(
+                "Created and patched geometry HDF using p01 pre-run: %s",
+                geometry_hdf_path,
+            )
+        else:
+            logger.warning(
+                "Plan p01 pre-run did not create geometry HDF: %s",
+                geometry_hdf_path,
+            )
+
+    @staticmethod
+    def _delete_plan_compute_outputs(
+        project_folder: Path,
+        project_stem: str,
+        plan_number: str,
+        keep_geometry_hdf: bool = True,
+    ) -> None:
+        plan_number = HECRAS._normalize_plan_number(plan_number)
+        suffixes = [
+            f".p{plan_number}.hdf",
+            f".p{plan_number}.tmp.hdf",
+            f".b{plan_number}",
+            f".c{plan_number}",
+            f".O{plan_number}",
+            f".o{plan_number}",
+            f".r{plan_number}",
+            f".comp_msgs{plan_number}.txt",
+            f".p{plan_number}.data_errors.txt",
+        ]
+        if not keep_geometry_hdf:
+            suffixes.append(f".g{plan_number}.hdf")
+        for suffix in suffixes:
+            path = project_folder / f"{project_stem}{suffix}"
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning("Could not delete pre-run output %s: %s", path, exc)
+
+    def _patch_project_hdf_geometry(
+        self,
+        hdf_path: Path,
+        geometry_context: dict[str, Any],
+    ) -> None:
+        if not hdf_path.exists():
+            return
+
+        raw_bank_lines, projected_bank_lines = self._geometry_context_hdf_bank_lines(
+            geometry_context
+        )
+        left_bank_line, right_bank_line = self._geometry_context_bank_pair(
+            geometry_context
+        )
+        if raw_bank_lines or projected_bank_lines or (
+            left_bank_line is not None and right_bank_line is not None
+        ):
+            if left_bank_line is None or right_bank_line is None:
+                line_pair = list(projected_bank_lines or raw_bank_lines)[:2]
+                if len(line_pair) < 2:
+                    logger.info(
+                        "Skipping HDF bank-line patch for %s; bank pair missing.",
+                        hdf_path,
+                    )
+                else:
+                    left_bank_line, right_bank_line = line_pair
+            if left_bank_line is not None and right_bank_line is not None:
+                self._patch_geometry_hdf_bank_lines(
+                    hdf_path,
+                    raw_bank_lines=raw_bank_lines,
+                    projected_bank_lines=projected_bank_lines,
+                    left_bank_line=left_bank_line,
+                    right_bank_line=right_bank_line,
+                    centerline_line=(
+                        None
+                        if projected_bank_lines
+                        else self._geometry_context_centerline(geometry_context)
+                    ),
+                )
+
+        self._patch_geometry_hdf_cross_sections(
+            hdf_path,
+            self._geometry_context_sections(geometry_context),
+        )
+
+    @staticmethod
+    def _geometry_context_sections(
+        geometry_context: dict[str, Any],
+    ) -> list[SectionData]:
+        if geometry_context.get("junction"):
+            return list(geometry_context.get("all_sections") or [])
+        return list(geometry_context.get("sections") or [])
+
+    @staticmethod
+    def _geometry_context_bank_pair(
+        geometry_context: dict[str, Any],
+    ) -> tuple[Optional[LineString], Optional[LineString]]:
+        left = geometry_context.get("left_bank_line")
+        right = geometry_context.get("right_bank_line")
+        if left is not None and right is not None:
+            return left, right
+        for reach in geometry_context.get("reaches") or []:
+            left = reach.get("left_bank_line")
+            right = reach.get("right_bank_line")
+            if left is not None and right is not None:
+                return left, right
+        return None, None
+
+    @staticmethod
+    def _geometry_context_centerline(
+        geometry_context: dict[str, Any],
+    ) -> Optional[LineString]:
+        centerline = geometry_context.get("centerline_line")
+        if centerline is not None:
+            return centerline
+        for reach in geometry_context.get("reaches") or []:
+            centerline = reach.get("centerline_line")
+            if centerline is not None:
+                return centerline
+        return None
+
+    @staticmethod
+    def _geometry_context_hdf_bank_lines(
+        geometry_context: dict[str, Any],
+    ) -> tuple[list[LineString], list[LineString]]:
+        raw_lines = list(geometry_context.get("hdf_bank_lines_raw") or [])
+        projected_lines = list(geometry_context.get("hdf_bank_lines_projected") or [])
+        if raw_lines or projected_lines:
+            return raw_lines, projected_lines
+
+        if not geometry_context.get("junction"):
+            return raw_lines, projected_lines
+
+        for reach in geometry_context.get("reaches") or []:
+            raw_lines.extend(reach.get("hdf_bank_lines_raw") or [])
+            projected_lines.extend(reach.get("hdf_bank_lines_projected") or [])
+        return raw_lines, projected_lines
+
+    @staticmethod
+    def _patch_geometry_hdf_bank_lines(
+        geometry_hdf_path: Path,
+        left_bank_line: LineString,
+        right_bank_line: LineString,
+        raw_bank_lines: Optional[list[LineString]] = None,
+        projected_bank_lines: Optional[list[LineString]] = None,
+        centerline_line: Optional[LineString] = None,
+        outward_offset_m: float = 0.2,
+    ) -> None:
+        projected_lines = list(projected_bank_lines or [left_bank_line, right_bank_line])
+        raw_lines = list(raw_bank_lines or [])
+        if not projected_lines:
+            return
+        if centerline_line is not None and outward_offset_m:
+            projected_lines = [
+                HECRAS._offset_line_away_from_centerline(
+                    line=line,
+                    centerline_line=centerline_line,
+                    offset_distance=float(outward_offset_m),
+                )
+                for line in projected_lines
+            ]
+            raw_lines = []
+
+        def polyline_arrays(
+            lines: list[LineString],
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            coords_by_line = [
+                np.asarray(
+                    [(float(x), float(y)) for x, y in line.coords],
+                    dtype=np.float64,
+                )
+                for line in lines
+                if line is not None and not line.is_empty and len(line.coords) >= 2
+            ]
+            if not coords_by_line:
+                return (
+                    np.empty((0, 2), dtype=np.float64),
+                    np.empty((0, 4), dtype=np.int32),
+                    np.empty((0, 2), dtype=np.int32),
+                )
+            all_points = np.vstack(coords_by_line)
+            polyline_info = np.zeros((len(coords_by_line), 4), dtype=np.int32)
+            polyline_parts = np.zeros((len(coords_by_line), 2), dtype=np.int32)
+            start = 0
+            for idx, coords in enumerate(coords_by_line):
+                count = int(len(coords))
+                polyline_info[idx] = [start, count, idx, 1]
+                polyline_parts[idx] = [0, count]
+                start += count
+            return all_points, polyline_info, polyline_parts
+
+        if raw_lines:
+            bank_line_groups = raw_lines + projected_lines
+        else:
+            bank_line_groups = projected_lines
+        bank_points, bank_info, bank_parts = polyline_arrays(bank_line_groups)
+        flow_points, flow_info, flow_parts = polyline_arrays(projected_lines)
+
+        dataset_attrs = {
+            "info": {
+                "Column": np.asarray(
+                    [
+                        b"Point Starting Index",
+                        b"Point Count",
+                        b"Part Starting Index",
+                        b"Part Count",
+                    ],
+                    dtype="S20",
+                ),
+                "Feature Type": np.bytes_("Polyline"),
+                "Row": np.bytes_("Feature"),
+            },
+            "parts": {
+                "Column": np.asarray(
+                    [b"Point Starting Index", b"Point Count"],
+                    dtype="S20",
+                ),
+                "Row": np.bytes_("Part"),
+            },
+            "points": {
+                "Column": np.asarray([b"X", b"Y"], dtype="S1"),
+                "Row": np.bytes_("Points"),
+            },
+        }
+
+        def replace_dataset(group, dataset_name: str, values: np.ndarray, attrs: dict):
+            if dataset_name in group:
+                del group[dataset_name]
+            dataset = HECRAS._create_hecras_hdf_dataset(
+                group,
+                dataset_name,
+                values,
+            )
+            for key, value in attrs.items():
+                dataset.attrs[key] = value
+
+        with h5py.File(geometry_hdf_path, "r+") as hdf:
+            bank_group = hdf.require_group("Geometry/River Bank Lines")
+            replace_dataset(
+                bank_group,
+                "Polyline Points",
+                bank_points,
+                dataset_attrs["points"],
+            )
+            replace_dataset(
+                bank_group,
+                "Polyline Info",
+                bank_info,
+                dataset_attrs["info"],
+            )
+            replace_dataset(
+                bank_group,
+                "Polyline Parts",
+                bank_parts,
+                dataset_attrs["parts"],
+            )
+
+            flow_group = hdf.require_group("Geometry/River Flow Paths")
+            replace_dataset(
+                flow_group,
+                "Flow Path Lines Points",
+                flow_points,
+                dataset_attrs["points"],
+            )
+            replace_dataset(
+                flow_group,
+                "Flow Path Lines Info",
+                flow_info,
+                dataset_attrs["info"],
+            )
+            replace_dataset(
+                flow_group,
+                "Flow Path Lines Parts",
+                flow_parts,
+                dataset_attrs["parts"],
+            )
+
+    @staticmethod
+    def _offset_line_away_from_centerline(
+        line: LineString,
+        centerline_line: LineString,
+        offset_distance: float,
+    ) -> LineString:
+        if (
+            line is None
+            or line.is_empty
+            or centerline_line is None
+            or centerline_line.is_empty
+            or not offset_distance
+        ):
+            return line
+
+        shifted_coords: list[tuple[float, float]] = []
+        for x_value, y_value in line.coords:
+            point = Point(float(x_value), float(y_value))
+            center_measure = float(centerline_line.project(point))
+            center_point = centerline_line.interpolate(center_measure)
+            dx = float(point.x - center_point.x)
+            dy = float(point.y - center_point.y)
+            length = math.hypot(dx, dy)
+            if length <= 1e-9:
+                shifted_coords.append((float(point.x), float(point.y)))
+                continue
+            scale = float(offset_distance) / length
+            shifted_coords.append(
+                (
+                    float(point.x + dx * scale),
+                    float(point.y + dy * scale),
+                )
+            )
+
+        if len(shifted_coords) < 2:
+            return line
+        return LineString(shifted_coords)
+
+    @staticmethod
+    def _hecras_hdf_bank_station(value: float) -> float:
+        return round(float(value), 1)
+
+    @staticmethod
+    def _hecras_hdf_chunks(values: np.ndarray) -> Optional[tuple[int, ...]]:
+        if values.shape == ():
+            return None
+        if values.ndim == 1:
+            return (max(int(values.shape[0]), 1),)
+        if values.ndim == 2:
+            columns = max(int(values.shape[1]), 1)
+            if columns == 2:
+                return (min(max(int(values.shape[0]), 1), 8192), columns)
+            if columns == 4:
+                return (max(int(values.shape[0]), 1), columns)
+            return (max(int(values.shape[0]), 1), columns)
+        return tuple(max(int(size), 1) for size in values.shape)
+
+    @staticmethod
+    def _create_hecras_hdf_dataset(group, dataset_name: str, values: np.ndarray):
+        chunks = HECRAS._hecras_hdf_chunks(values)
+        if chunks is None:
+            return group.create_dataset(dataset_name, data=values)
+        maxshape = tuple(None for _ in values.shape)
+        return group.create_dataset(
+            dataset_name,
+            data=values,
+            chunks=chunks,
+            maxshape=maxshape,
+            compression="gzip",
+        )
+
+    @staticmethod
+    def _insert_hdf_station_elevation_points(
+        station_elevation: np.ndarray,
+        required_stations: list[float],
+    ) -> np.ndarray:
+        if station_elevation.size == 0:
+            return station_elevation.astype(np.float32)
+
+        rows = [
+            (float(station), float(elevation))
+            for station, elevation in station_elevation
+        ]
+        existing_stations = [station for station, _ in rows]
+        source_stations = list(existing_stations)
+        source_elevations = [elevation for _, elevation in rows]
+
+        for station in required_stations:
+            station = float(station)
+            if any(
+                math.isclose(station, existing, abs_tol=0.0015)
+                or (
+                    station >= existing
+                    and math.isclose(station, existing, abs_tol=0.005)
+                )
+                for existing in existing_stations
+            ):
+                continue
+            elevation = HECRAS._interpolate_profile_elevation(
+                source_stations,
+                source_elevations,
+                station,
+            )
+            rows.append((station, elevation))
+            existing_stations.append(station)
+
+        rows.sort(key=lambda item: item[0])
+        return np.asarray(rows, dtype=np.float32)
+
+    @staticmethod
+    def _patch_geometry_hdf_cross_sections(
+        geometry_hdf_path: Path,
+        sections: list[SectionData],
+    ) -> None:
+        if not sections:
+            return
+
+        with h5py.File(geometry_hdf_path, "r+") as hdf:
+            cross_sections_path = "Geometry/Cross Sections"
+            if cross_sections_path not in hdf:
+                return
+            group = hdf[cross_sections_path]
+            required_datasets = {
+                "Attributes",
+                "Station Elevation Info",
+                "Station Elevation Values",
+                "Manning's n Values",
+            }
+            if not required_datasets.issubset(group.keys()):
+                return
+
+            attrs = group["Attributes"][()]
+            station_info = group["Station Elevation Info"][()]
+            station_values = group["Station Elevation Values"][()]
+            mann_values = group["Manning's n Values"][()]
+
+            updated_station_values: list[np.ndarray] = []
+            updated_station_info = np.zeros_like(station_info)
+            station_start = 0
+            for idx, section in enumerate(sections[: len(station_info)]):
+                rounded_left = HECRAS._hecras_hdf_bank_station(
+                    section.hdf_left_bank_station
+                    if section.hdf_left_bank_station is not None
+                    else section.left_bank_station
+                )
+                rounded_right = HECRAS._hecras_hdf_bank_station(
+                    section.hdf_right_bank_station
+                    if section.hdf_right_bank_station is not None
+                    else section.right_bank_station
+                )
+                source_start = int(station_info[idx][0])
+                source_count = int(station_info[idx][1])
+                section_values = station_values[
+                    source_start : source_start + source_count
+                ]
+                patched_values = HECRAS._insert_hdf_station_elevation_points(
+                    section_values,
+                    [rounded_left, rounded_right],
+                )
+                updated_station_values.append(patched_values)
+                updated_station_info[idx] = [station_start, len(patched_values)]
+                station_start += len(patched_values)
+
+                for field_name, field_value in (
+                    ("Left Bank", rounded_left),
+                    ("Right Bank", rounded_right),
+                    ("Left Levee Sta", rounded_left),
+                    ("Right Levee Sta", rounded_right),
+                    (
+                        "Left Levee Elev",
+                        HECRAS._interpolate_profile_elevation(
+                            patched_values[:, 0].astype(float).tolist(),
+                            patched_values[:, 1].astype(float).tolist(),
+                            rounded_left,
+                        ),
+                    ),
+                    (
+                        "Right Levee Elev",
+                        HECRAS._interpolate_profile_elevation(
+                            patched_values[:, 0].astype(float).tolist(),
+                            patched_values[:, 1].astype(float).tolist(),
+                            rounded_right,
+                        ),
+                    ),
+                ):
+                    if field_name in attrs.dtype.names:
+                        attrs[idx][field_name] = field_value
+
+                mann_idx = idx * 3
+                if mann_idx + 2 < len(mann_values):
+                    mann_values[mann_idx + 1][0] = rounded_left
+                    mann_values[mann_idx + 2][0] = rounded_right
+
+            if len(sections) < len(station_info):
+                for idx in range(len(sections), len(station_info)):
+                    source_start = int(station_info[idx][0])
+                    source_count = int(station_info[idx][1])
+                    section_values = station_values[
+                        source_start : source_start + source_count
+                    ].astype(np.float32)
+                    updated_station_values.append(section_values)
+                    updated_station_info[idx] = [station_start, len(section_values)]
+                    station_start += len(section_values)
+
+            concatenated_station_values = (
+                np.vstack(updated_station_values).astype(np.float32)
+                if updated_station_values
+                else np.empty((0, 2), dtype=np.float32)
+            )
+
+            for dataset_name, values in (
+                ("Attributes", attrs),
+                ("Station Elevation Info", updated_station_info),
+                ("Station Elevation Values", concatenated_station_values),
+                ("Manning's n Values", mann_values),
+            ):
+                existing_attrs = dict(group[dataset_name].attrs)
+                del group[dataset_name]
+                dataset = HECRAS._create_hecras_hdf_dataset(
+                    group,
+                    dataset_name,
+                    values,
+                )
+                for key, value in existing_attrs.items():
+                    dataset.attrs[key] = value
 
     def smoke_test(
         self,
@@ -1833,6 +2422,15 @@ class HECRAS:
         )
         self._assign_river_stations(sections)
         centerline_line = LineString(centerline_points)
+        hdf_bank_lines_raw, hdf_bank_lines_projected = (
+            self._load_bank_line_features_for_hdf(bank_lines_shp)
+        )
+        if hdf_bank_lines_projected:
+            hdf_bank_lines_projected = self._offset_hdf_bank_lines(
+                hdf_bank_lines_projected,
+                centerlines=[centerline_line],
+            )
+            hdf_bank_lines_raw = []
         structures = self._build_structures(
             structure_csv=structure_csv,
             sections=sections,
@@ -1847,6 +2445,8 @@ class HECRAS:
             "filtered_inputs": filtered_inputs,
             "left_bank_line": left_bank_line,
             "right_bank_line": right_bank_line,
+            "hdf_bank_lines_raw": hdf_bank_lines_raw,
+            "hdf_bank_lines_projected": hdf_bank_lines_projected,
             "centerline_points": centerline_points,
             "centerline_measures": centerline_measures,
             "centerline_line": centerline_line,
@@ -2042,6 +2642,8 @@ class HECRAS:
             "skipped_source_stations": tributary_skipped,
             "left_bank_line": tributary_left_bank,
             "right_bank_line": tributary_right_bank,
+            "hdf_bank_lines_raw": [],
+            "hdf_bank_lines_projected": list(grouped_tributary_lines),
             "flow_key": "tributary",
             "boundary_role": "junction_upstream",
         }
@@ -2130,6 +2732,12 @@ class HECRAS:
                 for section in independent_reach["sections"]
             ]
         )
+        hdf_bank_lines_raw, hdf_bank_lines_projected = (
+            self._prepare_junction_hdf_bank_lines(
+                combined_bank_lines_shp=combined_bank_lines_shp,
+                reaches=reaches,
+            )
+        )
         return {
             "junction": {
                 "name": (
@@ -2159,6 +2767,8 @@ class HECRAS:
             "lower_reach": lower_context,
             "independent_reaches": independent_reaches,
             "all_sections": all_sections,
+            "hdf_bank_lines_raw": hdf_bank_lines_raw,
+            "hdf_bank_lines_projected": hdf_bank_lines_projected,
             "local_box": local_box,
             "combined_bank_lines": combined_bank_lines,
             "main_opening": main_opening,
@@ -2174,6 +2784,44 @@ class HECRAS:
                 }
             ),
         }
+
+    def _prepare_junction_hdf_bank_lines(
+        self,
+        combined_bank_lines_shp: Optional[str | Path],
+        reaches: list[dict[str, Any]],
+    ) -> tuple[list[LineString], list[LineString]]:
+        centerlines = [
+            reach["centerline_line"]
+            for reach in reaches
+            if reach.get("centerline_line") is not None
+        ]
+        if combined_bank_lines_shp is not None and Path(combined_bank_lines_shp).exists():
+            raw_lines, projected_lines = self._load_bank_line_features_for_hdf(
+                combined_bank_lines_shp
+            )
+            if projected_lines:
+                projected_lines = self._offset_hdf_bank_lines(
+                    projected_lines,
+                    centerlines=centerlines,
+                )
+                raw_lines = []
+            return raw_lines, projected_lines
+
+        raw_lines: list[LineString] = []
+        projected_lines: list[LineString] = []
+        for reach in reaches:
+            raw_lines.extend(reach.get("hdf_bank_lines_raw") or [])
+            projected_lines.extend(reach.get("hdf_bank_lines_projected") or [])
+
+        if projected_lines or raw_lines:
+            return raw_lines, projected_lines
+
+        for reach in reaches:
+            left_bank_line = reach.get("left_bank_line")
+            right_bank_line = reach.get("right_bank_line")
+            if left_bank_line is not None and right_bank_line is not None:
+                projected_lines.extend([left_bank_line, right_bank_line])
+        return [], projected_lines
 
     def _prepare_independent_reach_contexts(
         self,
@@ -2357,6 +3005,13 @@ class HECRAS:
             "centerline_points": centerline_points,
             "centerline_measures": centerline_measures,
             "centerline_line": LineString(centerline_points),
+            "left_bank_line": geometry_context.get("left_bank_line"),
+            "right_bank_line": geometry_context.get("right_bank_line"),
+            "hdf_bank_lines_raw": geometry_context.get("hdf_bank_lines_raw", []),
+            "hdf_bank_lines_projected": geometry_context.get(
+                "hdf_bank_lines_projected",
+                [],
+            ),
             "friction_slope": self._estimate_downstream_friction_slope(subset),
         }
 
@@ -2545,6 +3200,108 @@ class HECRAS:
     def _load_bank_gdf(self, bank_lines_shp: str | Path) -> gpd.GeoDataFrame:
         bank_gdf = gpd.read_file(bank_lines_shp)
         return self._project_bank_gdf_to_model_crs(bank_gdf)
+
+    def _load_bank_line_features_for_hdf(
+        self,
+        bank_lines_shp: str | Path,
+    ) -> tuple[list[LineString], list[LineString]]:
+        """Return source-CRS and model-CRS bank line features for HDF GIS layers."""
+        raw_gdf = gpd.read_file(bank_lines_shp)
+        raw_feature_gdf = raw_gdf.iloc[::-1]
+        raw_lines = [
+            self._coerce_line_string(geom)
+            for geom in raw_feature_gdf.geometry
+            if geom is not None and not geom.is_empty
+        ]
+        projected_gdf = self._project_bank_gdf_to_model_crs(raw_gdf)
+        projected_feature_gdf = projected_gdf.iloc[::-1]
+        projected_lines = [
+            self._coerce_line_string(geom)
+            for geom in projected_feature_gdf.geometry
+            if geom is not None and not geom.is_empty
+        ]
+
+        if raw_gdf.crs is None or raw_gdf.crs == projected_gdf.crs:
+            return [], projected_lines
+        return raw_lines, projected_lines
+
+    def _offset_hdf_bank_lines(
+        self,
+        bank_lines: list[LineString],
+        centerlines: list[LineString],
+        offset_m: float | None = None,
+    ) -> list[LineString]:
+        if not bank_lines:
+            return []
+        offset_distance = self.BANK_LINE_OFFSET_M if offset_m is None else float(offset_m)
+        if abs(offset_distance) <= 1e-9:
+            return bank_lines
+
+        valid_centerlines = [
+            centerline
+            for centerline in centerlines
+            if centerline is not None and not centerline.is_empty
+        ]
+        if not valid_centerlines:
+            return bank_lines
+
+        if DTMChannelModifier is not None:
+            try:
+                if (
+                    len(valid_centerlines) > 1
+                    and hasattr(DTMChannelModifier, "_offset_junction_bank_lines_outward")
+                ):
+                    offset_lines = DTMChannelModifier._offset_junction_bank_lines_outward(
+                        bank_lines,
+                        centerlines=valid_centerlines,
+                        offset_m=offset_distance,
+                    )
+                    if isinstance(offset_lines, list):
+                        clean_lines = [
+                            line
+                            for line in offset_lines
+                            if line is not None
+                            and not line.is_empty
+                            and isinstance(line, LineString)
+                        ]
+                    else:
+                        clean_lines = self._line_strings_from_geometry(offset_lines)
+                    return clean_lines or bank_lines
+                if hasattr(DTMChannelModifier, "_get_outward_offset_line"):
+                    centerline = valid_centerlines[0]
+                    return [
+                        DTMChannelModifier._get_outward_offset_line(
+                            bank_line,
+                            centerline,
+                            offset_distance,
+                        )
+                        for bank_line in bank_lines
+                        if bank_line is not None and not bank_line.is_empty
+                    ]
+            except Exception as exc:
+                logger.warning(
+                    "Could not apply DTM %.3f m HDF bank offset; using fallback "
+                    "point-offset method: %s",
+                    offset_distance,
+                    exc,
+                )
+
+        offset_lines: list[LineString] = []
+        for bank_line in bank_lines:
+            if bank_line is None or bank_line.is_empty:
+                continue
+            centerline = min(
+                valid_centerlines,
+                key=lambda candidate: float(bank_line.distance(candidate)),
+            )
+            offset_lines.append(
+                HECRAS._offset_line_away_from_centerline(
+                    line=bank_line,
+                    centerline_line=centerline,
+                    offset_distance=offset_distance,
+                )
+            )
+        return offset_lines or bank_lines
 
     def _prepare_dtm_bank_lines_for_reach(
         self,
@@ -6295,6 +7052,16 @@ class HECRAS:
                     channel_point=Point(section["channel_point"]),
                     left_bank_measure=float(section["left_bank_measure"]),
                     right_bank_measure=float(section["right_bank_measure"]),
+                    hdf_left_bank_station=(
+                        float(section["hdf_left_bank_station"])
+                        if "hdf_left_bank_station" in section
+                        else None
+                    ),
+                    hdf_right_bank_station=(
+                        float(section["hdf_right_bank_station"])
+                        if "hdf_right_bank_station" in section
+                        else None
+                    ),
                 )
             )
 

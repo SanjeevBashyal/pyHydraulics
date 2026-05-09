@@ -1,0 +1,78 @@
+{
+  "slope_reports": [
+    {
+      "slope": 0.07781083274796997,
+      "raw_slope": 0.07781083274796997,
+      "status": "computed",
+      "mode": "upstream",
+      "base_station": "1",
+      "candidate_station": "2",
+      "base_point": {
+        "x": 517722.61,
+        "y": 4185972.48,
+        "z": 927.71,
+        "method": "between_breakline_intersections_lowest",
+        "station": "1",
+        "bank_intersections": 2,
+        "candidate_point_count": 9
+      },
+      "candidate_point": {
+        "x": 517764.94,
+        "y": 4185897.94,
+        "z": 921.04,
+        "method": "between_breakline_intersections_lowest",
+        "station": "2",
+        "bank_intersections": 2,
+        "candidate_point_count": 9
+      },
+      "distance": 85.72071219960164,
+      "vertical_drop": 6.670000000000073,
+      "min_distance": 30.0,
+      "skipped": [],
+      "role": "upstream_flow_hydrograph",
+      "branch": "main"
+    },
+    {
+      "slope": 0.05177035516749703,
+      "raw_slope": 0.05177035516749703,
+      "status": "computed",
+      "mode": "downstream",
+      "base_station": "8",
+      "candidate_station": "6",
+      "base_point": {
+        "x": 518051.99,
+        "y": 4185615.08,
+        "z": 898.36,
+        "method": "full_xs_lowest",
+        "station": "8",
+        "bank_intersections": 0,
+        "candidate_point_count": 11
+      },
+      "candidate_point": {
+        "x": 517991.31,
+        "y": 4185662.91,
+        "z": 902.36,
+        "method": "between_breakline_intersections_lowest",
+        "station": "6",
+        "bank_intersections": 2,
+        "candidate_point_count": 4
+      },
+      "distance": 77.26429511751388,
+      "vertical_drop": 4.0,
+      "min_distance": 30.0,
+      "skipped": [
+        {
+          "station": "7",
+          "distance": 21.590280220473375,
+          "reason": "below_min_distance"
+        }
+      ],
+      "role": "downstream_normal_depth",
+      "branch": "main"
+    }
+  ],
+  "pngs": [
+    "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Reports\\Slope_Audit\\01_upstream_flow_hydrograph.png",
+    "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Reports\\Slope_Audit\\02_downstream_normal_depth.png"
+  ]
+}

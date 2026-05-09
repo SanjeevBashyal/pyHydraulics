@@ -31,6 +31,7 @@ JUNCTION_PAIRS_BY_PROJECT = base.JUNCTION_PAIRS_BY_PROJECT
 RUN_UNCONNECTED_AS_SEPARATE_PROJECTS = True
 
 USE_STRUCTURES = True
+PREPARE_GEOMETRY_HDF = True
 STRUCTURES_CSV_NAME = "structures.csv"
 
 logger = logging.getLogger("implementation1dStructures")
@@ -205,6 +206,7 @@ def configure_base_module() -> None:
     base.JUNCTION_PAIRS_BY_PROJECT = JUNCTION_PAIRS_BY_PROJECT
     base.RUN_UNCONNECTED_AS_SEPARATE_PROJECTS = RUN_UNCONNECTED_AS_SEPARATE_PROJECTS
     base.USE_STRUCTURES = USE_STRUCTURES
+    base.PREPARE_GEOMETRY_HDF = PREPARE_GEOMETRY_HDF
     base.logger = logger
     base.build_model_input = build_model_input
     base.write_summary = write_summary

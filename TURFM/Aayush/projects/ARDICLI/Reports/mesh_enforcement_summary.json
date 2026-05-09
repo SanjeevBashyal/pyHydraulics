@@ -1,0 +1,58 @@
+{
+  "available": true,
+  "mesh_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.g01.hdf",
+  "mesh_validation": {
+    "hdf_2d_area_group": "Geometry/2D Flow Areas/ARDICLI_2D",
+    "max_facepoints_per_cell": 8,
+    "cells_over_8_facepoints": 0,
+    "cell_count": 28297,
+    "attribute_cell_count": 28297
+  },
+  "breaklines": [
+    {
+      "name": "Breakline 1",
+      "near_spacing": 0.5,
+      "far_spacing": 3.0,
+      "near_repeats": 5,
+      "influence_distance": 2.5,
+      "facepoint_count_within_influence": 8472,
+      "closest_facepoint_distance": 0.0,
+      "median_facepoint_distance_within_influence": 1.4999999974045224,
+      "within_1x": 2265,
+      "within_2x": 3799,
+      "within_3x": 5345,
+      "within_4x": 6899,
+      "within_5x": 8472
+    },
+    {
+      "name": "Breakline 2",
+      "near_spacing": 0.5,
+      "far_spacing": 3.0,
+      "near_repeats": 5,
+      "influence_distance": 2.5,
+      "facepoint_count_within_influence": 3179,
+      "closest_facepoint_distance": 0.0,
+      "median_facepoint_distance_within_influence": 1.4999999998637212,
+      "within_1x": 750,
+      "within_2x": 1301,
+      "within_3x": 1869,
+      "within_4x": 2494,
+      "within_5x": 3179
+    },
+    {
+      "name": "Breakline 3",
+      "near_spacing": 0.5,
+      "far_spacing": 3.0,
+      "near_repeats": 5,
+      "influence_distance": 2.5,
+      "facepoint_count_within_influence": 11373,
+      "closest_facepoint_distance": 0.0,
+      "median_facepoint_distance_within_influence": 1.4999999983008345,
+      "within_1x": 2972,
+      "within_2x": 5026,
+      "within_3x": 7095,
+      "within_4x": 9187,
+      "within_5x": 11373
+    }
+  ]
+}

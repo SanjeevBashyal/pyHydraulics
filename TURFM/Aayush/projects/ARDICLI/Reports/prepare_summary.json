@@ -1,0 +1,71 @@
+{
+  "project_root": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI",
+  "project_file": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.prj",
+  "rasmap_path": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\ARDICLI.rasmap",
+  "resolved_storage_area_name": "ARDICLI_2D",
+  "terrain_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Terrain\\ARDICLI_original_plus_channel.hdf",
+  "terrain_created": true,
+  "generated_landcover_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+  "generated_landcover_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+  "active_landcover_map_tif": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.tif",
+  "active_landcover_map_hdf": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Land Classification\\LandCover.hdf",
+  "landcover_mannings_raster": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\LandCover\\Burdur_Corine_Turef30_ManningN_2m.tif",
+  "landcover_lookup_csv": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\LandCover\\landcover_lookup.csv",
+  "existing_ras_layer": null,
+  "geometry_landcover_association_updated": false,
+  "cross_sections_shp": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Helpers\\cross_sections.shp",
+  "cross_section_groups": [
+    {
+      "name": "BUR-ISP-KEC-ARDICLI_KESIT_TESLIM_V1",
+      "source": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\ARDICLI_inputs\\CrossSections\\BUR-ISP-KEC-ARDICLI_KESIT_TESLIM_V1.csv",
+      "copy": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Boundary\\CrossSections\\BUR-ISP-KEC-ARDICLI_KESIT_TESLIM_V1.csv",
+      "section_count": 8
+    }
+  ],
+  "boundary_shp": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Helpers\\boundary_candidates.shp",
+  "dss_catalog_csv": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Boundary\\dss_catalog.csv",
+  "preferred_dss_path": "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/",
+  "dss_paths_by_group": {
+    "BUR-ISP-KEC-ARDICLI_KESIT_TESLIM_V1": "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/"
+  },
+  "downstream_slope": 0.05177035516749703,
+  "boundary_candidates": [
+    {
+      "bc_name": "upstream BC",
+      "bc_line_name": "upstream BC",
+      "role": "upstream",
+      "branch": "main",
+      "station": "1",
+      "mean_z": 932.76,
+      "interior_side": "left",
+      "reverse_if_interior_should_be_right": true,
+      "reverse_if_interior_should_be_left": false,
+      "method": "Flow Hydrograph",
+      "normal_depth_slope": NaN,
+      "flow_hydrograph_slope": 0.07781083274796997,
+      "dss_path": "/BUR-ISP-KEC-ARDICLI/BURDUR/DEBI/01May2025/30Minute/Q1000/",
+      "offset_distance": 1.0,
+      "storage_area_name": "ARDICLI_2D"
+    },
+    {
+      "bc_name": "downstream BC",
+      "bc_line_name": "downstream BC",
+      "role": "downstream",
+      "branch": "main",
+      "station": "8",
+      "mean_z": 898.644,
+      "interior_side": "right",
+      "reverse_if_interior_should_be_right": false,
+      "reverse_if_interior_should_be_left": true,
+      "method": "Normal Depth",
+      "normal_depth_slope": 0.05177035516749703,
+      "flow_hydrograph_slope": NaN,
+      "dss_path": null,
+      "offset_distance": 1.0,
+      "storage_area_name": "ARDICLI_2D"
+    }
+  ],
+  "removed_stale_landcover_layers": [],
+  "checklist_md": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Reports\\rasmapper_manual_checklist.md",
+  "spatial_overview_png": "E:\\0_Python\\pyHydraulics\\TURFM\\Aayush\\projects\\ARDICLI\\Reports\\spatial_overview.png"
+}

@@ -1,0 +1,11 @@
+Proj Title=ARDICLI
+Current Plan=p01
+Current Geom=g01
+Default Exp/Contr=0.3,0.1
+SI Units=1
+English Units=0
+Geom File=g01
+Unsteady File=u01
+Unsteady Title=ARDICLI_Unsteady_Q1000
+Plan File=p01
+Plan Title=ARDICLI_Q1000

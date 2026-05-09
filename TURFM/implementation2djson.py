@@ -75,7 +75,7 @@ PREFERRED_DSS_F_PART = "Q1000"
 DOWNSTREAM_BC_METHOD = "Normal Depth"
 PLAN_COMPUTATION_INTERVAL = "6SEC"
 SIMULATION_DURATION_HOURS = 24.0
-INSTALL_TIMEOUT_SECONDS = 60
+INSTALL_TIMEOUT_SECONDS = 600
 COMPUTE_TIMEOUT_SECONDS = 1800
 SKIP_GEOMETRY_REGENERATION = False
 COMPUTE_OVERWRITE = True
@@ -583,6 +583,7 @@ def fallback_dtm_result(
     output_tifs: list[Path] = []
     perimeter_shps: list[Path] = []
     merged_bank_shps: list[Path] = []
+    bank_polygon_shps: list[Path] = []
 
     for dtm_dir in dtm_dirs:
         output_tifs = sorted_dtm_files(
@@ -595,6 +596,10 @@ def fallback_dtm_result(
         )
         merged_bank_shps = sorted_dtm_files(
             dtm_dir.glob("*Merged_Banks*.shp"),
+            preferred_stem=component_name,
+        )
+        bank_polygon_shps = sorted_dtm_files(
+            dtm_dir.glob("*Bank_Polygon*.shp"),
             preferred_stem=component_name,
         )
         if output_tifs and perimeter_shps:
@@ -617,6 +622,7 @@ def fallback_dtm_result(
         "component": component_name,
         "output_tif": str(output_tifs[0]),
         "perimeter_shp": str(perimeter_shps[0]),
+        "bank_polygon_shp": str(bank_polygon_shps[0]) if bank_polygon_shps else None,
         "merged_banks_shp": str(merged_bank_shps[0]) if merged_bank_shps else None,
         "connected_bank_products": fallback_connected_bank_products(selected_dtm_dir),
         "channels": channels,
@@ -836,7 +842,7 @@ def build_v01_json_config(
     template_unsteady = resolve_template_file(config, rasmapper_script, "UnsteadyTemplate", ".u01")
     template_unsteady_hdf = resolve_template_file(config, rasmapper_script, "UnsteadyTemplate", ".u01.hdf")
     template_plan = resolve_template_file(config, rasmapper_script, "PlanTemplate", ".p01")
-    calibration_region = resolve_calibration_region_file(config)
+    calibration_region = resolve_calibration_region_file(config, spec, dtm_result)
     junction_csv = write_junction_coordinate_csv(config, model_project_name, dtm_result)
     cross_section_paths = [
         str(Path(channel["cross_section_csv"]))
@@ -1451,17 +1457,42 @@ def resolve_template_file(
     return None
 
 
-def resolve_calibration_region_file(config: Config) -> Path | None:
+def resolve_calibration_region_file(
+    config: Config,
+    spec: RunSpec,
+    dtm_result: dict[str, Any],
+) -> Path | None:
     configured = optional_existing_path(CALIBRATION_REGION_SHP)
     if configured is not None:
         return configured
 
-    calibration_root = Path(config.ESSENTIALS_PATH) / "Calibration_Region"
-    preferred = calibration_root / "BankPoly.shp"
-    if preferred.exists():
-        return preferred
-    if calibration_root.exists():
-        matches = sorted(calibration_root.rglob("*.shp"), key=version_sort_key)
+    bank_polygon = optional_result_path(dtm_result, "bank_polygon_shp")
+    if bank_polygon is not None:
+        return bank_polygon
+
+    candidate_dirs: list[Path] = []
+
+    def add_dir(path: Path) -> None:
+        if path.exists() and path.is_dir() and path not in candidate_dirs:
+            candidate_dirs.append(path)
+
+    gis_output_dir = dtm_result.get("gis_output_dir")
+    if gis_output_dir:
+        add_dir(Path(str(gis_output_dir)))
+
+    for dtm_dir in component_dtm_dirs(
+        config,
+        spec.source_project_name,
+        spec.model_project_name,
+        spec.sub_project_names,
+    ):
+        add_dir(dtm_dir)
+
+    for dtm_dir in candidate_dirs:
+        matches = sorted_dtm_files(
+            dtm_dir.glob("*Bank_Polygon*.shp"),
+            preferred_stem=spec.model_project_name,
+        )
         if matches:
             return matches[0]
     return None

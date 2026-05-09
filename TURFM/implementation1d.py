@@ -42,7 +42,8 @@ SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
-PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN","CUKUROREN-T"]
+# PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN","CUKUROREN-T"]
+PROJECTS_TO_RUN = ["KILCAN"]
 
 # Optional manual pairing. If omitted, network.csv is used when available.
 # Each pair is (main reach, tributary reach).
@@ -57,6 +58,7 @@ BANK_STATION_MODE = "snap"
 RIVER_LINE_METHOD = "simple_distance"
 RETURN_PERIODS: list[str] | None = None
 ALL_FLOW_IN_SINGLE_PLAN = True
+PREPARE_GEOMETRY_HDF = True
 RUN_UNCONNECTED_AS_SEPARATE_PROJECTS = True
 USE_EXISTING_PROJECT_GEOMETRY_AS_REFERENCE = False
 
@@ -375,6 +377,7 @@ def run_single_model(
         "river_line_method": RIVER_LINE_METHOD,
         "return_periods": RETURN_PERIODS,
         "all_flows_in_single_plan": ALL_FLOW_IN_SINGLE_PLAN,
+        "prepare_geometry_hdf": PREPARE_GEOMETRY_HDF,
     }
 
     logger.info("Single model %s/%s -> %s", model.project_name, model.sub_project_name, output_folder)
@@ -449,6 +452,7 @@ def run_junction_model(
         "river_line_method": RIVER_LINE_METHOD,
         "return_periods": RETURN_PERIODS,
         "all_flows_in_single_plan": ALL_FLOW_IN_SINGLE_PLAN,
+        "prepare_geometry_hdf": PREPARE_GEOMETRY_HDF,
     }
 
     sub_projects = [
