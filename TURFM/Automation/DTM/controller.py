@@ -1,15 +1,27 @@
+"""Project-level DTM workflow controller.
+
+The controller is intentionally thin: it resolves project paths from
+`configProject.Config`, groups connected/disconnected river components, calls
+`DTMChannelModifier` for interpolation, and writes HEC-RAS terrain products into
+the configured `3 DTM` folder.
+"""
+
 import json
 from pathlib import Path
 import re
 
 import rasterio
 
-from Automation.DTM import DTMChannelModifier
+from .channel_modifier import DTMChannelModifier
+from .terrain_hdf import prepare_building_raised_original_dtm, prepare_component_terrain_hdf
 
 
 class DTM:
-    """
-    Wrapper class around DTMChannelModifier.
+    """Project-level orchestration wrapper around DTMChannelModifier.
+
+    This controller resolves configProject paths, groups connected sub-projects,
+    calls the raster interpolation engine, and now prepares the HEC-RAS terrain
+    HDF in the configured ``3 DTM`` folder for each processed component.
 
     Legacy methods still process the active config sub-project. The project-level
     helpers use configProject.Config to resolve every sub-project from the
@@ -20,9 +32,13 @@ class DTM:
         self.config = config
 
     def discover_project_subprojects(self):
+        """Return the project/sub-project mapping discovered from `1 Bur-Bur`."""
+
         return self.config.discover_project_subprojects()
 
     def get_project_channel_inputs(self, project_name, sub_project_names=None):
+        """Resolve cross-section, bank-line, and DTM inputs for one project."""
+
         if sub_project_names is None:
             sub_project_names = self.discover_project_subprojects().get(project_name, [])
 
@@ -71,7 +87,27 @@ class DTM:
             return candidates[0]
         return preferred
 
+    def get_projection_prj_path(self):
+        """Resolve the project projection file used by HEC-RAS terrain HDFs."""
+
+        essentials_path = Path(self.config.ESSENTIALS_PATH)
+        preferred = essentials_path / "TUREF_CM30_projection.prj"
+        if preferred.exists():
+            return preferred
+
+        candidates = sorted(essentials_path.glob("*projection*.prj"))
+        if candidates:
+            return candidates[0]
+
+        candidates = sorted(essentials_path.glob("*.prj"))
+        if candidates:
+            return candidates[0]
+
+        return preferred
+
     def preflight_project_dtms(self, project_subprojects):
+        """Validate that every selected sub-project has a resolvable DTM."""
+
         missing = []
         for project_name, sub_project_names in project_subprojects.items():
             for sub_project_name in sub_project_names:
@@ -87,6 +123,8 @@ class DTM:
             )
 
     def group_connected_channel_inputs(self, channel_inputs, network_connections):
+        """Group river channels into connected components using network.csv."""
+
         if not channel_inputs:
             return []
 
@@ -163,6 +201,8 @@ class DTM:
         building_lift_m=0.0,
         split_disconnected_components=True,
     ):
+        """Run interpolation and terrain-HDF preparation for one project."""
+
         channel_inputs = self.get_project_channel_inputs(project_name, sub_project_names)
         gis_project_dir = Path(self.config.get_gis_project_path(project_name))
         temp_project_dir = Path(self.config.get_temp_project_path(project_name))
@@ -228,8 +268,20 @@ class DTM:
                 f"--- Processing DTM component {output_context['stem']}: "
                 f"{[item['name'] for item in grouped_channels]} -> {gis_output_dir} ---"
             )
+            raised_terrain = prepare_building_raised_original_dtm(
+                original_dtm_path=dtm_path,
+                buildings_shp_path=resolved_buildings_shp_path,
+                lift_m=building_lift_m,
+                dtm_root=Path(self.config.DTM_OUTPUT_PATH),
+            )
+            processing_dtm_path = raised_terrain.raised_tif_path
+            if raised_terrain.enabled:
+                print(
+                    f"Using building-raised DTM for clipping/interpolation: "
+                    f"{processing_dtm_path}"
+                )
             result = DTMChannelModifier.process_channel_network_dtm(
-                dtm_path=dtm_path,
+                dtm_path=processing_dtm_path,
                 channel_inputs=grouped_channels,
                 output_tif_path=gis_output_dir / f"{group_terrain_stem}.tif",
                 target_res=target_res,
@@ -255,12 +307,41 @@ class DTM:
                 junction_bank_structure_protection_m=junction_bank_structure_protection_m,
                 skewness_correction=skewness_correction,
                 centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
-                buildings_shp_path=resolved_buildings_shp_path,
-                building_lift_m=building_lift_m,
+                buildings_shp_path=None,
+                building_lift_m=0.0,
             )
-            result["dtm_path"] = str(dtm_path)
+            result["source_dtm_path"] = str(dtm_path)
+            result["raised_dtm_path"] = str(processing_dtm_path)
+            result["dtm_path"] = str(processing_dtm_path)
             result["component"] = output_context["stem"]
             result["gis_output_dir"] = str(gis_output_dir)
+            result["building_lift"] = {
+                "enabled": raised_terrain.enabled,
+                "buildings_shp": raised_terrain.buildings_shp,
+                "lift_m": raised_terrain.lift_m,
+                "cells_lifted": raised_terrain.cells_lifted,
+                "raised_tif": str(raised_terrain.raised_tif_path),
+                "created": raised_terrain.created,
+                "message": raised_terrain.message,
+            }
+
+            # Build the HEC-RAS terrain package immediately after the channel
+            # raster is prepared.  The interpolated GeoTIFF remains in 2 GIS,
+            # while the merge base is the building-raised source DTM and the
+            # final GeoTIFF/HDF products live in 3 DTM.
+            terrain_result = prepare_component_terrain_hdf(
+                original_dtm_path=processing_dtm_path,
+                interpolated_tif_path=result["output_tif"],
+                dtm_root=Path(self.config.DTM_OUTPUT_PATH),
+                component_name=output_context["stem"],
+                projection_prj_path=self.get_projection_prj_path(),
+                units="Meters",
+                hecras_version=self.config.HECRAS_VERSION,
+            )
+            result["merged_terrain_tif"] = str(terrain_result.merged_tif_path)
+            result["terrain_hdf"] = str(terrain_result.hdf_path)
+            result["terrain_hdf_created"] = terrain_result.created
+            result["terrain_hdf_message"] = terrain_result.message
             results.append(result)
 
         if len(results) == 1:
@@ -339,6 +420,8 @@ class DTM:
         building_lift_m=0.0,
         split_disconnected_components=True,
     ):
+        """Run DTM processing for all selected projects in the folder structure."""
+
         project_subprojects = self.discover_project_subprojects()
         if isinstance(projects, str):
             projects = [projects]
@@ -404,6 +487,8 @@ class DTM:
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
     ):
+        """Legacy single-channel helper that writes one interpolated GeoTIFF."""
+
         """
         Generates the interpolated DTM channel terrain for the active sub-project.
         """

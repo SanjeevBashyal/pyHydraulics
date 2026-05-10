@@ -27,7 +27,6 @@ from configProject import Config
 
 CONFIG_SOURCE = "folder"
 MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
-SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # Default Group-4 batch. Use --all-projects only after every discovered project
@@ -175,14 +174,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python-exe", default=default_rasmapper_python_exe(), help="Python executable used to run rasmapper_v01.py.")
     parser.add_argument(
         "--source",
-        choices=["sheet", "folder", "auto"],
-        help="Load project structure from the Google Sheet, a master folder path, or auto-fallback.",
+        choices=["folder"],
+        help="Load project structure from a master folder path.",
     )
     parser.add_argument(
         "--master-project-path",
-        help="Master project folder to use when --source folder is selected or auto falls back to the filesystem.",
+        help="Master project folder to use.",
     )
-    parser.add_argument("--sheet-name", help="Optional Google Sheet tab name. Defaults to 'Structure'.")
     return parser.parse_args()
 
 
@@ -197,12 +195,10 @@ def default_rasmapper_python_exe() -> str:
 def build_config(args: argparse.Namespace) -> Config:
     source = args.source or CONFIG_SOURCE
     master_project_path = args.master_project_path or MASTER_PROJECT_PATH
-    sheet_name = args.sheet_name or SHEET_NAME
     config = Config(
         structure_source=source,
         master_project_path=master_project_path,
         project_folder=master_project_path,
-        sheet_name=sheet_name,
     )
     config.setup_essential_directories()
     return config
@@ -729,7 +725,7 @@ def merge_prepared_terrain_with_original(
     output_dir = (
         Path(MERGED_TERRAIN_DIR)
         if MERGED_TERRAIN_DIR
-        else project_temp_2d_dir(config, model_project_name) / "merged_terrain"
+        else Path(config.DTM_OUTPUT_PATH) / safe_name(model_project_name) / "merged_terrain"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{safe_name(model_project_name)}_original_plus_channel.tif"
@@ -862,10 +858,12 @@ def build_v01_json_config(
     storage_area_name = storage_area_name_for_component(model_project_name)
     plan_identifier = f"{ras_project_name}_{PREFERRED_DSS_F_PART}"
     output_folder = Path(config.HEC_PATH) / ras_project_name
+    terrain_root = Path(config.DTM_OUTPUT_PATH) / safe_name(model_project_name) / "Terrain"
     raw_config = {
         "files_root": str(Path(config.PROJECT_FOLDER)),
         "working_root": str(Path(config.HEC_PATH)),
         "results_root": str(Path(config.get_output_project_path(spec.source_project_name)) / "2D"),
+        "terrain_root": str(terrain_root),
         "project_name": ras_project_name,
         "ras_exe": str(Path(config.RAS_EXE_PATH)),
         "gdal_grid_exe": str(Path(config.RAS_EXE_PATH).parent / "GDAL" / "bin64" / "gdal_grid.exe"),

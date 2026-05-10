@@ -532,6 +532,7 @@ class RasMapperConfig:
     ras_exe: Path
     gdal_grid_exe: Path
     results_root: Path = DEFAULT_RESULTS_ROOT
+    terrain_root: Optional[Path] = None
     projection_name: str = "projection.prj"
     dtm_name: str = "terrain.tif"
     perimeter_name: str = "perimeter.shp"
@@ -638,6 +639,8 @@ class RasMapperConfig:
 
     @property
     def terrain_dir(self) -> Path:
+        if self.terrain_root is not None:
+            return Path(self.terrain_root).resolve()
         return self.project_root / "Terrain"
 
     @property
@@ -1102,6 +1105,7 @@ def load_study_area_overrides(config_json: Path) -> Dict[str, Any]:
         "files_root",
         "working_root",
         "results_root",
+        "terrain_root",
         "ras_exe",
         "gdal_grid_exe",
         "existing_landcover_tif_name",
@@ -8476,6 +8480,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
         "files_root": DEFAULT_FILES_ROOT.resolve(),
         "working_root": DEFAULT_WORKING_ROOT.resolve(),
         "results_root": DEFAULT_RESULTS_ROOT.resolve(),
+        "terrain_root": None,
         "project_name": DEFAULT_PROJECT_NAME,
         "ras_exe": DEFAULT_RAS_EXE.resolve(),
         "gdal_grid_exe": DEFAULT_GDAL_GRID.resolve(),
@@ -8492,6 +8497,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
         "files_root": args.files_root.resolve(),
         "working_root": args.working_root.resolve(),
         "results_root": args.results_root.resolve(),
+        "terrain_root": None,
         "project_name": args.project_name,
         "ras_exe": args.ras_exe.resolve(),
         "gdal_grid_exe": args.gdal_grid_exe.resolve(),
@@ -8507,6 +8513,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
         "files_root": DEFAULT_FILES_ROOT.resolve(),
         "working_root": DEFAULT_WORKING_ROOT.resolve(),
         "results_root": DEFAULT_RESULTS_ROOT.resolve(),
+        "terrain_root": None,
         "project_name": DEFAULT_PROJECT_NAME,
         "ras_exe": DEFAULT_RAS_EXE.resolve(),
         "gdal_grid_exe": DEFAULT_GDAL_GRID.resolve(),

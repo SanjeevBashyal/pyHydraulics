@@ -6,23 +6,19 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sheets import GoogleSheetsClient, sheet_id
-
 
 # DIRECT_RUN_SOURCE = "folder"
 # DIRECT_RUN_MASTER_PROJECT_PATH: str | None = None
-# DIRECT_RUN_SHEET_NAME: str | None = None
 # DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
 
 DIRECT_RUN_SOURCE = "folder"
 DIRECT_RUN_MASTER_PROJECT_PATH = Path(r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model")
-DIRECT_RUN_SHEET_NAME = None
 DIRECT_RUN_PREPARE_FULL_STRUCTURE = False
 
 
 @dataclass(frozen=True)
 class FolderEntry:
-    """Represents one folder row from the Structure worksheet."""
+    """Represents one folder in the project directory tree."""
 
     name: str
     level: int
@@ -46,6 +42,8 @@ class SubProjectPaths:
     hecras_sub_project_path: str
     gis_project_path: str
     gis_sub_project_path: str
+    dtm_project_path: str
+    dtm_sub_project_path: str
     output_project_path: str
     output_sub_project_path: str
     temp_project_path: str
@@ -60,20 +58,13 @@ class SubProjectPaths:
 @dataclass
 class Config:
     """
-    Builds the project folder tree from either:
-
-    1. the Google Sheet Structure tab, or
-    2. a master project folder with the same directory layout.
+    Builds the project folder tree from a master project folder.
 
     This class still exposes the legacy path attributes required by the
     implementation scripts and automation helpers.
     """
 
-    credentials_file: str = "master_credentials.json"
-    workbook_id: str = sheet_id
-    worksheet_name: str = "Structure"
-    sheet_name: str | None = None
-    structure_source: str = "sheet"
+    structure_source: str = "folder"
     master_project_path: str | None = None
     project_folder: str | None = None
     create_master_folder_if_missing: bool = False
@@ -103,6 +94,8 @@ class Config:
     BUR_BUR_PATH: str = field(init=False)
     HEC_PATH: str = field(init=False)
     GIS_PATH: str = field(init=False)
+    DTM_PATH: str = field(init=False)
+    DTM_OUTPUT_PATH: str = field(init=False)
     OUTPUT_PATH: str = field(init=False)
     OUTPUT_ROOT_PATH: str = field(init=False)
     TEMP_PATH: str = field(init=False)
@@ -112,6 +105,8 @@ class Config:
     HEC_SUB_PROJECT_PATH: str = field(init=False)
     GIS_PROJECT_PATH: str = field(init=False)
     GIS_SUB_PROJECT_PATH: str = field(init=False)
+    DTM_PROJECT_PATH: str = field(init=False)
+    DTM_SUB_PROJECT_PATH: str = field(init=False)
     OUTPUT_PROJECT_PATH: str = field(init=False)
     OUTPUT_SUB_PROJECT_PATH: str = field(init=False)
     TEMP_PROJECT_PATH: str = field(init=False)
@@ -127,26 +122,10 @@ class Config:
     BANK_LINE_FILE_PATH: str = field(init=False)
 
     @classmethod
-    def from_sheet(
-        cls,
-        *,
-        sheet_name: str | None = None,
-        project_folder: str | None = None,
-        **kwargs,
-    ) -> "Config":
-        return cls(
-            structure_source="sheet",
-            sheet_name=sheet_name,
-            project_folder=project_folder,
-            **kwargs,
-        )
-
-    @classmethod
     def from_master_folder(
         cls,
         master_project_path: str,
         *,
-        sheet_name: str | None = None,
         create_if_missing: bool = False,
         **kwargs,
     ) -> "Config":
@@ -154,82 +133,21 @@ class Config:
             structure_source="folder",
             master_project_path=master_project_path,
             project_folder=master_project_path,
-            sheet_name=sheet_name,
             create_master_folder_if_missing=create_if_missing,
             **kwargs,
         )
 
     def __post_init__(self):
-        self.worksheet_name = self._clean_cell(self.sheet_name or self.worksheet_name or "Structure") or "Structure"
         self.structure_source = self._normalize_structure_source(self.structure_source)
         explicit_master_path = self._clean_cell(self.master_project_path or self.project_folder or "")
 
-        if self.structure_source in {"sheet", "auto"}:
-            try:
-                rows = self._read_structure_sheet()
-                master_path, sheet_project_path, structure_rows = self._parse_sheet(rows)
-                self.MASTER_PATH = self._clean_cell(master_path)
-                self.PROJECT_FOLDER = self._clean_cell(explicit_master_path or sheet_project_path)
+        if not explicit_master_path:
+            raise ValueError(
+                "master_project_path or project_folder must be provided. "
+                "Only folder structure loading is supported."
+            )
 
-                if not self.PROJECT_FOLDER:
-                    raise ValueError("Project folder path could not be resolved from the sheet.")
-
-                self._build_folder_entries(structure_rows)
-                self._ensure_top_level_entries()
-                self._rebuild_paths()
-                self._refresh_compatibility_paths()
-                return
-            except Exception:
-                if self.structure_source == "sheet":
-                    raise
-                if not explicit_master_path:
-                    raise
-
-        if self.structure_source in {"folder", "auto"}:
-            if not explicit_master_path:
-                raise ValueError(
-                    "master_project_path or project_folder must be provided when reading structure from a folder."
-                )
-            self._initialize_from_master_folder(explicit_master_path)
-            return
-
-        raise ValueError(f"Unsupported structure_source: {self.structure_source!r}")
-
-    def _read_structure_sheet(self) -> list[list[str]]:
-        client = GoogleSheetsClient(credentials_file=self.credentials_file)
-        return client.get_all_values(self.workbook_id, self.worksheet_name)
-
-    def _parse_sheet(self, rows: list[list[str]]) -> tuple[str, str, list[list[str]]]:
-        master_path = ""
-        project_path = ""
-        structure_rows: list[list[str]] = []
-        in_structure_section = False
-
-        for row in rows:
-            label = self._cell(row, 1)
-
-            if label == "Master Path":
-                master_path = self._cell(row, 2)
-                continue
-
-            if label in {"Project Path", "Master Project Path"}:
-                project_path = self._cell(row, 2)
-                continue
-
-            if label in {"Project Folder Structure", "Master Project Folder Structure"}:
-                in_structure_section = True
-                continue
-
-            if in_structure_section:
-                structure_rows.append(row)
-
-        if not master_path:
-            raise ValueError("Master Path was not found in the Structure sheet.")
-
-        if not project_path:
-            raise ValueError("Project Path was not found in the Structure sheet.")
-
-        return master_path, project_path, structure_rows
+        self._initialize_from_master_folder(explicit_master_path)
 
     def _build_folder_entries(self, structure_rows: list[list[str]]):
         self.FOLDER_ENTRIES = []
@@ -323,13 +241,13 @@ class Config:
                 ):
                     add_entry(("1 Bur-Bur", project_dir.name, sub_project_dir.name))
 
-        hec_path = root / "2 Hecras"
+        hec_path = root / "4 HECRAS"
         if hec_path.is_dir():
             for project_dir in sorted(
                 [path for path in hec_path.iterdir() if path.is_dir()],
                 key=lambda item: item.name.upper(),
             ):
-                add_entry(("2 Hecras", project_dir.name))
+                add_entry(("4 HECRAS", project_dir.name))
 
     def _ensure_top_level_entries(self):
         if not self.FOLDER_ENTRIES:
@@ -376,13 +294,15 @@ class Config:
         self._select_active_names_from_structure_if_missing()
         self.PROJECT_LONG_NAME = self._project_long_name_from_short_name(self.PROJECT_SHORT_NAME)
 
-        self.ESSENTIALS_PATH = self._sheet_path_or_default("0 Essentials")
-        self.BUR_BUR_PATH = self._sheet_path_or_default("1 Bur-Bur")
-        self.HEC_PATH = self._sheet_path_or_default("2 Hecras")
-        self.GIS_PATH = self._sheet_path_or_default("3 GIS")
-        self.OUTPUT_ROOT_PATH = self._sheet_path_or_default("4 Outputs")
+        self.ESSENTIALS_PATH = self._configured_path_or_default("0 Essentials")
+        self.BUR_BUR_PATH = self._configured_path_or_default("1 Bur-Bur")
+        self.GIS_PATH = self._configured_path_or_default("2 GIS")
+        self.DTM_OUTPUT_PATH = self._configured_path_or_default("3 DTM")
+        self.DTM_PATH = self.DTM_OUTPUT_PATH
+        self.HEC_PATH = self._configured_path_or_default("4 HECRAS")
+        self.OUTPUT_ROOT_PATH = self._configured_path_or_default("5 Deliverables")
         self.OUTPUT_PATH = self.OUTPUT_ROOT_PATH
-        self.TEMP_PATH = self._sheet_path_or_default("5 Temp")
+        self.TEMP_PATH = self._configured_path_or_default("Z Temp")
         self.DTM_INDEX_PATH = str(Path(self.ESSENTIALS_PATH) / self.DTM_INDEX_FILENAME)
         self.DTM_FOLDER_PATH = str(Path(self.ESSENTIALS_PATH) / self.DTM_DIRNAME)
 
@@ -394,6 +314,8 @@ class Config:
         active_project_name = self.PROJECT_GROUP or self.PROJECT_NAME
         self.GIS_PROJECT_PATH = str(Path(self.GIS_PATH) / active_project_name)
         self.GIS_SUB_PROJECT_PATH = str(Path(self.GIS_PROJECT_PATH) / self.SUB_PROJECT_NAME)
+        self.DTM_PROJECT_PATH = str(Path(self.DTM_OUTPUT_PATH) / active_project_name)
+        self.DTM_SUB_PROJECT_PATH = str(Path(self.DTM_PROJECT_PATH) / self.SUB_PROJECT_NAME)
         self.OUTPUT_PROJECT_PATH = str(Path(self.OUTPUT_ROOT_PATH) / active_project_name)
         self.OUTPUT_SUB_PROJECT_PATH = str(Path(self.OUTPUT_PROJECT_PATH) / self.SUB_PROJECT_NAME)
         self.TEMP_PROJECT_PATH = str(Path(self.TEMP_PATH) / active_project_name)
@@ -502,6 +424,7 @@ class Config:
         bank_line_path = str(Path(bank_line_file_path).parent)
         dtm_path = self.resolve_dtm_path(project_name, sub_project_name) if resolve_dtm else ""
         gis_project_path = self.get_gis_project_path(project_name)
+        dtm_project_path = self.get_dtm_project_path(project_name)
         output_project_path = self.get_output_project_path(project_name)
         temp_project_path = self.get_temp_project_path(project_name)
 
@@ -514,6 +437,8 @@ class Config:
             hecras_sub_project_path=hecras_sub_project_path,
             gis_project_path=gis_project_path,
             gis_sub_project_path=str(Path(gis_project_path) / Path(sub_project_path).name),
+            dtm_project_path=dtm_project_path,
+            dtm_sub_project_path=str(Path(dtm_project_path) / Path(sub_project_path).name),
             output_project_path=output_project_path,
             output_sub_project_path=str(Path(output_project_path) / Path(sub_project_path).name),
             temp_project_path=temp_project_path,
@@ -556,6 +481,8 @@ class Config:
         self.HEC_SUB_PROJECT_PATH = paths.hecras_sub_project_path
         self.GIS_PROJECT_PATH = paths.gis_project_path
         self.GIS_SUB_PROJECT_PATH = paths.gis_sub_project_path
+        self.DTM_PROJECT_PATH = paths.dtm_project_path
+        self.DTM_SUB_PROJECT_PATH = paths.dtm_sub_project_path
         self.OUTPUT_PROJECT_PATH = paths.output_project_path
         self.OUTPUT_SUB_PROJECT_PATH = paths.output_sub_project_path
         self.TEMP_PROJECT_PATH = paths.temp_project_path
@@ -590,6 +517,13 @@ class Config:
     def get_gis_sub_project_path(self, project_name: str, sub_project_name: str) -> str:
         sub_project_path = Path(self.get_sub_project_path(project_name, sub_project_name))
         return str(Path(self.get_gis_project_path(project_name)) / sub_project_path.name)
+
+    def get_dtm_project_path(self, project_name: str) -> str:
+        return str(self._resolve_child_directory(Path(self.DTM_OUTPUT_PATH), project_name, create_fallback=True))
+
+    def get_dtm_sub_project_path(self, project_name: str, sub_project_name: str) -> str:
+        sub_project_path = Path(self.get_sub_project_path(project_name, sub_project_name))
+        return str(Path(self.get_dtm_project_path(project_name)) / sub_project_path.name)
 
     def get_output_project_path(self, project_name: str) -> str:
         return str(self._resolve_child_directory(Path(self.OUTPUT_ROOT_PATH), project_name, create_fallback=True))
@@ -885,7 +819,7 @@ class Config:
         return candidates[0]
 
     def get_path(self, *parts: str) -> str:
-        """Returns an absolute path for a relative folder path from the sheet."""
+        """Returns an absolute path for a configured relative folder path."""
         relative_key = Path(*parts).as_posix()
         return self.PATHS[relative_key]
 
@@ -927,7 +861,7 @@ class Config:
             print(f"Ensured essential directory exists: {directory}")
 
     def setup_directories(self):
-        """Creates the folder structure defined in the Structure sheet."""
+        """Creates the resolved project folder structure."""
         directories = {
             *self.get_essential_directories(),
             *[
@@ -940,6 +874,8 @@ class Config:
             Path(self.HEC_SUB_PROJECT_PATH),
             Path(self.GIS_PROJECT_PATH),
             Path(self.GIS_SUB_PROJECT_PATH),
+            Path(self.DTM_PROJECT_PATH),
+            Path(self.DTM_SUB_PROJECT_PATH),
             Path(self.OUTPUT_PROJECT_PATH),
             Path(self.OUTPUT_SUB_PROJECT_PATH),
             Path(self.TEMP_PROJECT_PATH),
@@ -968,20 +904,16 @@ class Config:
 
     @classmethod
     def _normalize_structure_source(cls, value: str | None) -> str:
-        normalized = cls._clean_cell(value or "sheet").lower()
+        normalized = cls._clean_cell(value or "folder").lower()
         aliases = {
-            "sheet": "sheet",
-            "sheets": "sheet",
-            "google_sheet": "sheet",
-            "google_sheets": "sheet",
             "folder": "folder",
             "filesystem": "folder",
             "path": "folder",
-            "auto": "auto",
+            "auto": "folder",
         }
         if normalized not in aliases:
             raise ValueError(
-                f"Unsupported structure_source {value!r}. Use 'sheet', 'folder', or 'auto'."
+                f"Unsupported structure_source {value!r}. Only 'folder' is supported."
             )
         return aliases[normalized]
 
@@ -990,10 +922,11 @@ class Config:
         return (
             "0 Essentials",
             "1 Bur-Bur",
-            "2 Hecras",
-            "3 GIS",
-            "4 Outputs",
-            "5 Temp",
+            "2 GIS",
+            "3 DTM",
+            "4 HECRAS",
+            "5 Deliverables",
+            "Z Temp",
         )
 
     @classmethod
@@ -1050,7 +983,7 @@ class Config:
 
         return "_".join(tokens) + "_PATH"
 
-    def _sheet_path_or_default(self, relative_key: str) -> str:
+    def _configured_path_or_default(self, relative_key: str) -> str:
         return self.PATHS.get(relative_key, self._absolute_from_relative_path(relative_key))
 
     def _absolute_from_relative_path(self, relative_key: str) -> str:
@@ -1096,14 +1029,23 @@ class Config:
 
     def _resolve_hec_project_path(self) -> str:
         if self.PROJECT_GROUP:
-            group_key = Path("2 Hecras", self.PROJECT_GROUP).as_posix()
+            group_key = Path("4 HECRAS", self.PROJECT_GROUP).as_posix()
             if group_key in self.PATHS:
                 return self.PATHS[group_key]
 
         for candidate_name in (self.PROJECT_SHORT_NAME, self.PROJECT_LONG_NAME):
-            candidate_key = Path("2 Hecras", candidate_name).as_posix()
+            candidate_key = Path("4 HECRAS", candidate_name).as_posix()
             if candidate_key in self.PATHS:
                 return self.PATHS[candidate_key]
+
+        active_project_name = (
+            self.PROJECT_GROUP
+            or self.PROJECT_NAME
+            or self.PROJECT_SHORT_NAME
+            or self.PROJECT_LONG_NAME
+        )
+        if active_project_name:
+            return str(Path(self.HEC_PATH) / active_project_name)
 
         return self.HEC_PATH
 
@@ -1275,12 +1217,8 @@ def parse_direct_run_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        choices=["sheet", "folder", "auto"],
-        help="Structure source to use while building the config. Defaults to folder for direct runs.",
-    )
-    parser.add_argument(
-        "--sheet-name",
-        help="Optional Google Sheet tab name. Defaults to 'Structure'.",
+        choices=["folder"],
+        help="Structure source to use while building the config. Only folder mode is supported.",
     )
     parser.add_argument(
         "--full",
@@ -1292,24 +1230,19 @@ def parse_direct_run_args() -> argparse.Namespace:
 
 def build_direct_run_config(args: argparse.Namespace) -> Config:
     master_project_path = args.master_project_path or DIRECT_RUN_MASTER_PROJECT_PATH
-    source = args.source or DIRECT_RUN_SOURCE or ("folder" if master_project_path else "sheet")
-    sheet_name = args.sheet_name or DIRECT_RUN_SHEET_NAME
+    source = args.source or DIRECT_RUN_SOURCE or "folder"
 
-    if not master_project_path and source == "folder":
-        source = "sheet"
-
-    if master_project_path:
-        return Config(
-            structure_source=source,
-            master_project_path=master_project_path,
-            project_folder=master_project_path,
-            sheet_name=sheet_name,
-            create_master_folder_if_missing=True,
+    if not master_project_path:
+        raise ValueError(
+            "A master project folder path is required. Set DIRECT_RUN_MASTER_PROJECT_PATH "
+            "or pass the folder path when running configProject.py."
         )
 
     return Config(
         structure_source=source,
-        sheet_name=sheet_name,
+        master_project_path=master_project_path,
+        project_folder=master_project_path,
+        create_master_folder_if_missing=True,
     )
 
 

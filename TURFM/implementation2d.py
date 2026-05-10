@@ -9,7 +9,6 @@ from Automation.rasmapper import RasMapper2D
 
 CONFIG_SOURCE = "folder"
 MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
-SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
@@ -94,26 +93,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compute-timeout", type=int, default=COMPUTE_TIMEOUT_SECONDS, help="Timeout in seconds for compute-plan.")
     parser.add_argument(
         "--source",
-        choices=["sheet", "folder", "auto"],
-        help="Load project structure from the Google Sheet, a master folder path, or auto-fallback.",
+        choices=["folder"],
+        help="Load project structure from a master folder path.",
     )
     parser.add_argument(
         "--master-project-path",
-        help="Master project folder to use when --source folder is selected or auto falls back to the filesystem.",
+        help="Master project folder to use.",
     )
-    parser.add_argument("--sheet-name", help="Optional Google Sheet tab name. Defaults to 'Structure'.")
     return parser.parse_args()
 
 
 def build_config(args: argparse.Namespace) -> Config:
     source = args.source or CONFIG_SOURCE
     master_project_path = args.master_project_path or MASTER_PROJECT_PATH
-    sheet_name = args.sheet_name or SHEET_NAME
     config = Config(
         structure_source=source,
         master_project_path=master_project_path,
         project_folder=master_project_path,
-        sheet_name=sheet_name,
     )
     config.setup_essential_directories()
     return config

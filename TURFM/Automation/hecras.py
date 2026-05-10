@@ -5490,16 +5490,19 @@ class HECRAS:
                 "This builder currently supports exactly one river and one reach."
             )
 
-        duplicate_xy_mask = df.duplicated(subset=["X", "Y"], keep="first")
-        if duplicate_xy_mask.any():
-            duplicate_count = int(duplicate_xy_mask.sum())
+        duplicate_profile_point_mask = df.duplicated(
+            subset=["River", "Reach", "Station", "X", "Y", "Z"],
+            keep="first",
+        )
+        if duplicate_profile_point_mask.any():
+            duplicate_count = int(duplicate_profile_point_mask.sum())
             logger.info(
-                "Removed %s duplicate cross-section point(s) with identical X/Y "
-                "coordinates from %s.",
+                "Removed %s duplicate cross-section row(s) with identical "
+                "River/Reach/Station/X/Y/Z values from %s.",
                 duplicate_count,
                 csv_path.name,
             )
-            df = df.loc[~duplicate_xy_mask].copy()
+            df = df.loc[~duplicate_profile_point_mask].copy()
 
         return df
 

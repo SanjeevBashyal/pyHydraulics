@@ -3,23 +3,23 @@ from __future__ import annotations
 import argparse
 
 from configProject import Config
-from Automation.callDTM import DTM
+from Automation.DTM import DTM
 
 
 CONFIG_SOURCE = "folder"
 MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
-SHEET_NAME = None
 
 # PROJECTS_TO_RUN: list[str] | None = None
 # PROJECTS_TO_RUN = ["BUYUKGOKCELI"]
 # PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
-PROJECTS_TO_RUN = ["ECE2", "EVCILER1", "KILCAN"]
+# PROJECTS_TO_RUN = ["ECE2", "EVCILER1", "KILCAN"]
+PROJECTS_TO_RUN = ["KILCAN"]
 
-TARGET_RES = 0.5
-BUFFER_M = 750
+TARGET_RES = 0.1
+BUFFER_M = 20
 BLEND_TYPE = "cubic"
 BANK_OFFSET_M = 0.2
-SKEWNESS_CORRECTION = True
+SKEWNESS_CORRECTION = False
 CENTERLINE_NORMAL_SAMPLE_DISTANCE_M = 3.0
 BUILDING_LIFT_M = 12.0
 FULL_CROSS_SECTION_WEIGHT_DISTANCE_M = 1.5
@@ -37,21 +37,17 @@ SPLIT_DISCONNECTED_COMPONENTS = True
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run DTM interpolation using either the Structure sheet or a master project folder."
+        description="Run DTM interpolation using the master project folder structure."
     )
     parser.add_argument("--project", action="append", help="Project name to run. Repeat for multiple projects.")
     parser.add_argument(
         "--source",
-        choices=["sheet", "folder", "auto"],
-        help="Load project structure from the Google Sheet, a master folder path, or auto-fallback.",
+        choices=["folder"],
+        help="Load project structure from a master folder path.",
     )
     parser.add_argument(
         "--master-project-path",
-        help="Master project folder to use when --source folder is selected or auto falls back to the filesystem.",
-    )
-    parser.add_argument(
-        "--sheet-name",
-        help="Optional Google Sheet tab name. Defaults to 'Structure'.",
+        help="Master project folder to use.",
     )
     return parser.parse_args()
 
@@ -59,12 +55,10 @@ def parse_args() -> argparse.Namespace:
 def build_config(args: argparse.Namespace) -> Config:
     source = args.source or CONFIG_SOURCE
     master_project_path = args.master_project_path or MASTER_PROJECT_PATH
-    sheet_name = args.sheet_name or SHEET_NAME
     config = Config(
         structure_source=source,
         master_project_path=master_project_path,
         project_folder=master_project_path,
-        sheet_name=sheet_name,
     )
     config.BLEND_TYPE = BLEND_TYPE
     config.setup_essential_directories()

@@ -28,17 +28,11 @@ if TYPE_CHECKING:
 # User configuration
 # =============================================================================
 
-# Choose how the project structure is loaded:
-# - "sheet": always read the Google Sheet
-# - "folder": read directly from MASTER_PROJECT_PATH
-# - "auto": try the sheet first, then fall back to MASTER_PROJECT_PATH
-# CONFIG_SOURCE = "sheet"
+# Project structure is loaded directly from MASTER_PROJECT_PATH.
 # MASTER_PROJECT_PATH: str | None = None
-# SHEET_NAME: str | None = None
 
 CONFIG_SOURCE = "folder"
 MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
-SHEET_NAME = None
 
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
@@ -339,7 +333,7 @@ def find_reference_geometry(config: Config, project_name: str, preferred_stem: s
     for root in [
         output_project_path / "self_example",
         hecras_project_path / "self_example",
-        Path(config.PROJECT_FOLDER) / "2 Hecras" / "self_example",
+        Path(config.HEC_PATH) / "self_example",
     ]:
         if not root.is_dir():
             continue
@@ -691,12 +685,10 @@ def build_hecras(ras_exe_path: Path) -> HECRAS:
 def build_config(args: argparse.Namespace) -> Config:
     source = args.source or CONFIG_SOURCE
     master_project_path = args.master_project_path or MASTER_PROJECT_PATH
-    sheet_name = args.sheet_name or SHEET_NAME
     config = Config(
         structure_source=source,
         master_project_path=master_project_path,
         project_folder=master_project_path,
-        sheet_name=sheet_name,
     )
     logger.info(
         "Loaded structure from %s using root %s",
@@ -709,7 +701,7 @@ def build_config(args: argparse.Namespace) -> Config:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run 1D HEC-RAS modeling using either the Structure sheet or a master project folder."
+        description="Run 1D HEC-RAS modeling using the master project folder structure."
     )
     parser.add_argument("--dry-run", action="store_true", help="Resolve inputs and print calls without running HEC-RAS.")
     parser.add_argument("--project", action="append", help="Project name to run. Repeat for multiple projects.")
@@ -718,16 +710,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-structures", action="store_true", help="Disable optional structure CSV discovery.")
     parser.add_argument(
         "--source",
-        choices=["sheet", "folder", "auto"],
-        help="Load project structure from the Google Sheet, a master folder path, or auto-fallback.",
+        choices=["folder"],
+        help="Load project structure from a master folder path.",
     )
     parser.add_argument(
         "--master-project-path",
-        help="Master project folder to use when --source folder is selected or auto falls back to the filesystem.",
-    )
-    parser.add_argument(
-        "--sheet-name",
-        help="Optional Google Sheet tab name. Defaults to 'Structure'.",
+        help="Master project folder to use.",
     )
     return parser.parse_args()
 

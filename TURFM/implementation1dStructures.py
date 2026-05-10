@@ -25,7 +25,6 @@ from configProject import Config
 # changes where structure tables come from: 0 Essentials/structures.csv.
 CONFIG_SOURCE = base.CONFIG_SOURCE
 MASTER_PROJECT_PATH = base.MASTER_PROJECT_PATH
-SHEET_NAME = base.SHEET_NAME
 PROJECTS_TO_RUN = base.PROJECTS_TO_RUN
 JUNCTION_PAIRS_BY_PROJECT = base.JUNCTION_PAIRS_BY_PROJECT
 RUN_UNCONNECTED_AS_SEPARATE_PROJECTS = True
@@ -201,7 +200,6 @@ def write_summary(config: Config, results: list[base.WorkflowResult], dry_run: b
 def configure_base_module() -> None:
     base.CONFIG_SOURCE = CONFIG_SOURCE
     base.MASTER_PROJECT_PATH = MASTER_PROJECT_PATH
-    base.SHEET_NAME = SHEET_NAME
     base.PROJECTS_TO_RUN = PROJECTS_TO_RUN
     base.JUNCTION_PAIRS_BY_PROJECT = JUNCTION_PAIRS_BY_PROJECT
     base.RUN_UNCONNECTED_AS_SEPARATE_PROJECTS = RUN_UNCONNECTED_AS_SEPARATE_PROJECTS

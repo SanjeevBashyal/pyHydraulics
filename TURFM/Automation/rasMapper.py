@@ -112,6 +112,7 @@ class RasMapperConfig:
     ras_exe: Path
     gdal_grid_exe: Path
     results_root: Path = DEFAULT_RESULTS_ROOT
+    terrain_root: Optional[Path] = None
     projection_name: str = "projection.prj"
     dtm_name: str = "terrain.tif"
     original_dtm_name: Any = None
@@ -211,6 +212,8 @@ class RasMapperConfig:
 
     @property
     def terrain_dir(self) -> Path:
+        if self.terrain_root is not None:
+            return Path(self.terrain_root).resolve()
         return self.project_root / "Terrain"
 
     @property
@@ -601,6 +604,7 @@ def load_study_area_overrides(config_json: Path) -> Dict[str, Any]:
         "files_root",
         "working_root",
         "results_root",
+        "terrain_root",
         "ras_exe",
         "gdal_grid_exe",
         "existing_landcover_tif_name",
@@ -6776,6 +6780,7 @@ class RasMapper2D:
             files_root=Path(self.project_config.PROJECT_FOLDER),
             working_root=Path(self.project_config.HEC_PATH),
             results_root=Path(self.project_config.get_output_project_path(project_name)) / "2D",
+            terrain_root=Path(self.project_config.DTM_OUTPUT_PATH) / model_project_name / "Terrain",
             project_name=ras_project_name,
             ras_exe=self.ras_exe_path,
             gdal_grid_exe=self.gdal_grid_exe,
@@ -8043,6 +8048,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
         "files_root": DEFAULT_FILES_ROOT.resolve(),
         "working_root": DEFAULT_WORKING_ROOT.resolve(),
         "results_root": DEFAULT_RESULTS_ROOT.resolve(),
+        "terrain_root": None,
         "project_name": DEFAULT_PROJECT_NAME,
         "ras_exe": DEFAULT_RAS_EXE.resolve(),
         "gdal_grid_exe": DEFAULT_GDAL_GRID.resolve(),
@@ -8059,6 +8065,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
         "files_root": args.files_root.resolve(),
         "working_root": args.working_root.resolve(),
         "results_root": args.results_root.resolve(),
+        "terrain_root": None,
         "project_name": args.project_name,
         "ras_exe": args.ras_exe.resolve(),
         "gdal_grid_exe": args.gdal_grid_exe.resolve(),
@@ -8074,6 +8081,7 @@ def build_config(args: argparse.Namespace) -> RasMapperConfig:
         "files_root": DEFAULT_FILES_ROOT.resolve(),
         "working_root": DEFAULT_WORKING_ROOT.resolve(),
         "results_root": DEFAULT_RESULTS_ROOT.resolve(),
+        "terrain_root": None,
         "project_name": DEFAULT_PROJECT_NAME,
         "ras_exe": DEFAULT_RAS_EXE.resolve(),
         "gdal_grid_exe": DEFAULT_GDAL_GRID.resolve(),
