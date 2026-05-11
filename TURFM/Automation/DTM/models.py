@@ -14,6 +14,7 @@ class TerrainHdfResult:
     hdf_path: Path
     created: bool
     message: str
+    exact_bank_tif_path: Path | None = None
 
 
 @dataclass(frozen=True)

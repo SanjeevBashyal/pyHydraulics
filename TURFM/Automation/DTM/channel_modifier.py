@@ -13,18 +13,21 @@ from . import core as _core
 from . import exports as _exports
 from . import geometry as _geometry
 from . import interpolation as _interpolation
+from . import junction as _junction
 from . import network as _network
 from .bank_vectors import BankVectorMixin
 from .core import CoreMixin
 from .exports import ExportMixin
 from .geometry import GeometryMixin
 from .interpolation import InterpolationMixin
+from .junction import JunctionInterpolationMixin
 from .network import NetworkMixin
 
 
 class DTMChannelModifier(
     CoreMixin,
     GeometryMixin,
+    JunctionInterpolationMixin,
     InterpolationMixin,
     NetworkMixin,
     ExportMixin,
@@ -38,7 +41,7 @@ class DTMChannelModifier(
     """
 
 
-for _module in (_core, _geometry, _interpolation, _network, _exports, _bank_vectors):
+for _module in (_core, _geometry, _junction, _interpolation, _network, _exports, _bank_vectors):
     _module.DTMChannelModifier = DTMChannelModifier
 
 

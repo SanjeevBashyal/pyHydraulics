@@ -10,3 +10,4 @@ pywin32
 comtypes
 h5py
 pyshp
+ras_commander

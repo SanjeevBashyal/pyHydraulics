@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+from collections.abc import Iterable
 
 import numpy as np
 import rasterio
@@ -107,18 +108,22 @@ def prepare_component_terrain_hdf(
     dtm_root: str | Path,
     component_name: str,
     projection_prj_path: str | Path,
+    exact_bank_polygon_path: str | Path | Iterable[str | Path] | None = None,
     units: str = "Meters",
     hecras_version: str = "7.0",
-    resampling: str = "nearest",
+    resampling: str = "bilinear",
+    exact_bank_buffer_m: float = 2.0,
 ) -> TerrainHdfResult:
     """Merge the channel terrain with the original DTM and create a HEC-RAS HDF.
 
     The interpolated raster is usually a cropped window around the channel.  To
-    create a complete terrain for HEC-RAS, we copy the original DTM, overlay
-    valid interpolated channel cells onto that copy, and pass the merged GeoTIFF
-    to `ras_commander.RasTerrain.create_terrain_hdf`. The HEC-RAS terrain HDF is
-    created from the high-resolution channel raster first and the source DTM
-    second so RAS Mapper keeps the 0.1 m channel grid in the overlap.
+    create a complete terrain for HEC-RAS, we copy the original DTM and overlay
+    valid interpolated channel cells using the requested resampling method.
+    When a bank polygon is provided, a second high-resolution raster is also
+    prepared from the interpolated channel, masked only to the bank polygon.
+    The HDF then uses that exact in-bank raster above the bilinear merged
+    terrain, preserving the CSV-based channel shape throughout the banks while
+    keeping the outside terrain smooth.
     """
 
     original_dtm_path = Path(original_dtm_path)
@@ -126,6 +131,7 @@ def prepare_component_terrain_hdf(
     projection_prj_path = Path(projection_prj_path)
     dtm_root = Path(dtm_root)
     safe_component = _safe_name(component_name)
+    exact_bank_polygon_paths = _normalize_polygon_paths(exact_bank_polygon_path)
 
     if not projection_prj_path.exists():
         raise FileNotFoundError(
@@ -136,17 +142,29 @@ def prepare_component_terrain_hdf(
     component_root = dtm_root / safe_component
     merged_dir = component_root / "merged_terrain"
     terrain_dir = component_root / "Terrain"
+    exact_dir = component_root / "exact_channel"
     merged_dir.mkdir(parents=True, exist_ok=True)
     terrain_dir.mkdir(parents=True, exist_ok=True)
+    exact_dir.mkdir(parents=True, exist_ok=True)
 
     merged_tif = merged_dir / f"{safe_component}_original_plus_channel.tif"
+    exact_bank_tif = exact_dir / f"{safe_component}_bank_exact_channel.tif"
     hdf_path = terrain_dir / f"{merged_tif.stem}.hdf"
 
     newest_source_mtime = max(
         original_dtm_path.stat().st_mtime,
         interpolated_tif_path.stat().st_mtime,
     )
-    if merged_tif.exists() and merged_tif.stat().st_mtime >= newest_source_mtime:
+    if (
+        merged_tif.exists()
+        and merged_tif.stat().st_mtime >= newest_source_mtime
+        and _merged_tif_matches_resampling(merged_tif, resampling)
+        and _merged_tif_matches_bank_polygons(
+            merged_tif,
+            exact_bank_polygon_paths,
+            buffer_m=exact_bank_buffer_m,
+        )
+    ):
         merged_created = False
     else:
         _merge_interpolated_tif_over_original(
@@ -154,13 +172,24 @@ def prepare_component_terrain_hdf(
             interpolated_tif_path=interpolated_tif_path,
             output_tif_path=merged_tif,
             resampling=resampling,
+            exact_bank_polygon_paths=exact_bank_polygon_paths,
+            exact_bank_buffer_m=exact_bank_buffer_m,
         )
         merged_created = True
 
+    exact_bank_tif_path = _prepare_exact_bank_channel_tif(
+        original_dtm_path=original_dtm_path,
+        interpolated_tif_path=interpolated_tif_path,
+        bank_polygon_paths=exact_bank_polygon_paths,
+        output_tif_path=exact_bank_tif,
+        buffer_m=exact_bank_buffer_m,
+    )
+    hdf_inputs = [exact_bank_tif_path, merged_tif] if exact_bank_tif_path else merged_tif
+
     hdf_dependency_mtime = max(
-        interpolated_tif_path.stat().st_mtime,
-        original_dtm_path.stat().st_mtime,
+        merged_tif.stat().st_mtime,
         projection_prj_path.stat().st_mtime,
+        exact_bank_tif_path.stat().st_mtime if exact_bank_tif_path else 0.0,
     )
     if hdf_path.exists() and hdf_path.stat().st_mtime >= hdf_dependency_mtime:
         return TerrainHdfResult(
@@ -168,10 +197,11 @@ def prepare_component_terrain_hdf(
             hdf_path=hdf_path,
             created=False,
             message="Existing HEC-RAS terrain HDF is current.",
+            exact_bank_tif_path=exact_bank_tif_path,
         )
 
     _create_hecras_terrain_hdf(
-        input_tif_path=[interpolated_tif_path, original_dtm_path],
+        input_tif_path=hdf_inputs,
         output_hdf_path=hdf_path,
         projection_prj_path=projection_prj_path,
         units=units,
@@ -186,6 +216,7 @@ def prepare_component_terrain_hdf(
             if merged_created
             else "Created HEC-RAS terrain HDF from existing merged GeoTIFF."
         ),
+        exact_bank_tif_path=exact_bank_tif_path,
     )
 
 
@@ -195,6 +226,8 @@ def _merge_interpolated_tif_over_original(
     interpolated_tif_path: Path,
     output_tif_path: Path,
     resampling: str,
+    exact_bank_polygon_paths: list[Path] | None = None,
+    exact_bank_buffer_m: float = 0.0,
 ) -> None:
     """Overlay valid interpolated channel cells on a copy of the original DTM."""
 
@@ -251,8 +284,279 @@ def _merge_interpolated_tif_over_original(
         if not np.any(valid):
             raise ValueError(f"Interpolated terrain has no valid cells: {interpolated_tif_path}")
 
+        if exact_bank_polygon_paths:
+            bank_mask = _rasterize_polygon_paths(
+                polygon_paths=exact_bank_polygon_paths,
+                crs=dst.crs,
+                out_shape=destination.shape,
+                transform=dst.window_transform(window),
+                all_touched=True,
+                buffer_m=exact_bank_buffer_m,
+            )
+            outside_bank = ~bank_mask
+            lower_outside_bank = (
+                valid
+                & outside_bank
+                & np.isfinite(destination)
+                & (reprojected < destination)
+            )
+            valid[lower_outside_bank] = False
+
         destination[valid] = reprojected[valid]
         dst.write(destination.astype(dst.dtypes[0]), 1, window=window)
+        dst.update_tags(
+            TURFM_RESAMPLING=str(resampling).lower(),
+            TURFM_BANK_POLYGONS=_polygon_path_signature(exact_bank_polygon_paths),
+            TURFM_BANK_BUFFER_M=str(float(exact_bank_buffer_m)),
+        )
+
+
+def _merged_tif_matches_resampling(path: Path, resampling: str) -> bool:
+    """Return True when a cached merged terrain was made with this resampling."""
+
+    try:
+        with rasterio.open(path) as dataset:
+            return dataset.tags().get("TURFM_RESAMPLING", "").lower() == str(resampling).lower()
+    except Exception:
+        return False
+
+
+def _merged_tif_matches_bank_polygons(
+    path: Path,
+    polygon_paths: list[Path],
+    buffer_m: float = 0.0,
+) -> bool:
+    """Return True when a cached merged terrain used this exact-bank mask."""
+
+    try:
+        with rasterio.open(path) as dataset:
+            tags = dataset.tags()
+            return (
+                tags.get("TURFM_BANK_POLYGONS", "") == _polygon_path_signature(polygon_paths)
+                and tags.get("TURFM_BANK_BUFFER_M", "0.0") == str(float(buffer_m))
+            )
+    except Exception:
+        return False
+
+
+def _prepare_exact_bank_channel_tif(
+    *,
+    original_dtm_path: Path,
+    interpolated_tif_path: Path,
+    bank_polygon_paths: list[Path],
+    output_tif_path: Path,
+    buffer_m: float = 0.0,
+) -> Path | None:
+    """Create a high-resolution channel raster masked to the bank polygon.
+
+    Bilinear resampling is useful outside the channel because it removes blocky
+    transitions on the original DTM grid. Inside the surveyed bank polygon,
+    however, resampling can soften vertical walls and miss exact CSV-derived bed
+    elevations. This raster preserves the interpolated channel grid only inside
+    the banks and leaves nodata elsewhere, so HEC-RAS can stitch it above the
+    smooth merged terrain.
+    """
+
+    bank_polygon_paths = [path for path in bank_polygon_paths if path.exists()]
+    if not bank_polygon_paths:
+        return None
+
+    output_tif_path.parent.mkdir(parents=True, exist_ok=True)
+    newest_source_mtime = max(
+        original_dtm_path.stat().st_mtime,
+        interpolated_tif_path.stat().st_mtime,
+        max(path.stat().st_mtime for path in bank_polygon_paths),
+    )
+    if (
+        output_tif_path.exists()
+        and output_tif_path.stat().st_mtime >= newest_source_mtime
+        and _exact_bank_tif_matches_source(
+            output_tif_path,
+            bank_polygon_paths,
+            buffer_m=buffer_m,
+            original_dtm_path=original_dtm_path,
+        )
+    ):
+        return output_tif_path
+
+    with rasterio.open(interpolated_tif_path) as src:
+        nodata = src.nodata if src.nodata is not None else -10000.0
+        data = src.read(1).astype("float32")
+        true_bank_mask = _rasterize_polygon_paths(
+            polygon_paths=bank_polygon_paths,
+            crs=src.crs,
+            out_shape=data.shape,
+            transform=src.transform,
+            all_touched=True,
+            buffer_m=0.0,
+        )
+        patch_mask = _rasterize_polygon_paths(
+            polygon_paths=bank_polygon_paths,
+            crs=src.crs,
+            out_shape=data.shape,
+            transform=src.transform,
+            all_touched=True,
+            buffer_m=buffer_m,
+        )
+
+        valid = patch_mask & np.isfinite(data)
+        if src.nodata is not None:
+            valid &= ~np.isclose(data, src.nodata)
+        if not np.any(valid):
+            return None
+
+        exact_values = data.copy()
+        original_grid = _read_original_on_grid(
+            original_dtm_path=original_dtm_path,
+            like_dataset=src,
+        )
+        outside_true_bank = valid & ~true_bank_mask & np.isfinite(original_grid)
+        if src.nodata is not None:
+            outside_true_bank &= ~np.isclose(original_grid, src.nodata)
+        preserve_higher_terrain = outside_true_bank & (original_grid > exact_values)
+        exact_values[preserve_higher_terrain] = original_grid[preserve_higher_terrain]
+
+        exact = np.full(data.shape, float(nodata), dtype="float32")
+        exact[valid] = exact_values[valid]
+        meta = src.meta.copy()
+        meta.update(
+            {
+                "driver": "GTiff",
+                "count": 1,
+                "dtype": "float32",
+                "nodata": float(nodata),
+            }
+        )
+
+        with rasterio.open(output_tif_path, "w", **meta) as dst:
+            dst.write(exact, 1)
+            dst.update_tags(
+                TURFM_EXACT_BANK_POLYGON=_polygon_path_signature(bank_polygon_paths),
+                TURFM_EXACT_BANK_BUFFER_M=str(float(buffer_m)),
+                TURFM_EXACT_ORIGINAL_DTM=str(original_dtm_path),
+                TURFM_ROLE="exact_in_bank_channel",
+            )
+
+    return output_tif_path
+
+
+def _exact_bank_tif_matches_source(
+    path: Path,
+    bank_polygon_paths: list[Path],
+    buffer_m: float = 0.0,
+    original_dtm_path: Path | None = None,
+) -> bool:
+    """Return True when the exact bank raster was created from this polygon."""
+
+    try:
+        with rasterio.open(path) as dataset:
+            tags = dataset.tags()
+            return (
+                tags.get("TURFM_EXACT_BANK_POLYGON", "") == _polygon_path_signature(bank_polygon_paths)
+                and tags.get("TURFM_EXACT_BANK_BUFFER_M", "0.0") == str(float(buffer_m))
+                and tags.get("TURFM_EXACT_ORIGINAL_DTM", "") == (str(original_dtm_path) if original_dtm_path else "")
+            )
+    except Exception:
+        return False
+
+
+def _read_original_on_grid(*, original_dtm_path: Path, like_dataset) -> np.ndarray:
+    """Read the original terrain reprojected to an interpolated/exact grid."""
+
+    original_grid = np.full(
+        (like_dataset.height, like_dataset.width),
+        np.nan,
+        dtype="float32",
+    )
+    with rasterio.open(original_dtm_path) as original:
+        reproject(
+            source=rasterio.band(original, 1),
+            destination=original_grid,
+            src_transform=original.transform,
+            src_crs=original.crs,
+            src_nodata=original.nodata,
+            dst_transform=like_dataset.transform,
+            dst_crs=like_dataset.crs,
+            dst_nodata=np.nan,
+            resampling=Resampling.bilinear,
+        )
+    return original_grid
+
+
+def _normalize_polygon_paths(value: str | Path | Iterable[str | Path] | None) -> list[Path]:
+    """Normalize optional polygon path input while preserving order."""
+
+    if value is None:
+        return []
+    if isinstance(value, (str, Path)):
+        values = [value]
+    else:
+        values = list(value)
+
+    paths = []
+    seen = set()
+    for item in values:
+        if not item:
+            continue
+        path = Path(item)
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def _polygon_path_signature(paths: list[Path] | None) -> str:
+    """Stable tag value for polygon-mask provenance."""
+
+    return "|".join(str(path) for path in paths or [])
+
+
+def _rasterize_polygon_paths(
+    *,
+    polygon_paths: list[Path],
+    crs,
+    out_shape,
+    transform,
+    all_touched=True,
+    buffer_m: float = 0.0,
+) -> np.ndarray:
+    """Rasterize all valid polygons from the supplied path list."""
+
+    geometries = []
+    for polygon_path in polygon_paths:
+        if polygon_path is None or not polygon_path.exists():
+            continue
+        gdf = gpd.read_file(polygon_path)
+        if gdf.empty:
+            continue
+        if crs is not None:
+            if gdf.crs is None:
+                gdf = gdf.set_crs(crs, allow_override=True)
+            elif gdf.crs != crs:
+                gdf = gdf.to_crs(crs)
+        for geometry in gdf.geometry:
+            if geometry is None or geometry.is_empty:
+                continue
+            if buffer_m and abs(float(buffer_m)) > 1e-9:
+                geometry = geometry.buffer(float(buffer_m))
+                if geometry is None or geometry.is_empty:
+                    continue
+            geometries.append(geometry)
+
+    if not geometries:
+        return np.zeros(out_shape, dtype=bool)
+
+    return rasterize(
+        geometries,
+        out_shape=out_shape,
+        transform=transform,
+        fill=0,
+        default_value=1,
+        dtype="uint8",
+        all_touched=all_touched,
+    ).astype(bool)
 
 
 def _apply_building_lift_to_raster(

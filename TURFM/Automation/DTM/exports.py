@@ -479,12 +479,39 @@ class ExportMixin:
                 clipped_path,
             )
 
+            junction_polygon_path = None
+            try:
+                junction_polygon = DTMChannelModifier._junction_bank_polygon_from_clipped_banks(
+                    clipped_banks,
+                    junction_point=junction_point,
+                )
+                if junction_polygon is not None and not junction_polygon.is_empty:
+                    polygon_gdf = gpd.GeoDataFrame(
+                        [
+                            {
+                                "main": str(main["name"])[:80],
+                                "tributary": str(tributary["name"])[:80],
+                                "geometry": junction_polygon,
+                            }
+                        ],
+                        geometry="geometry",
+                        crs=clipped_banks.crs,
+                    )
+                    junction_polygon_path = output_dir / f"{safe_pair_name}_SEV_USTU_junction_bank_polygon.shp"
+                    junction_polygon_path = DTMChannelModifier._write_gdf_with_locked_file_fallback(
+                        polygon_gdf,
+                        junction_polygon_path,
+                    )
+            except Exception as exc:
+                print(f"Warning: junction bank polygon export failed for {safe_pair_name}: {exc}")
+
             products.append(
                 {
                     "main": main["name"],
                     "tributary": tributary["name"],
                     "merged_banks_shp": str(merged_path),
                     "junction_clipped_banks_shp": str(clipped_path),
+                    "junction_bank_polygon_shp": str(junction_polygon_path) if junction_polygon_path else None,
                 }
             )
 

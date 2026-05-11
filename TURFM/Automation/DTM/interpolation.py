@@ -15,7 +15,7 @@ from rasterio.transform import Affine
 from rasterio.features import geometry_mask, rasterize
 from scipy.ndimage import distance_transform_edt
 from shapely.geometry import Polygon, LineString, Point, MultiLineString
-from shapely.ops import linemerge, nearest_points, split, unary_union
+from shapely.ops import linemerge, nearest_points, polygonize, split, unary_union
 
 # Bound by channel_modifier.py after the final DTMChannelModifier facade class is created.
 # The original implementation references DTMChannelModifier inside many static methods;
@@ -40,7 +40,7 @@ class InterpolationMixin:
         bounds=None,
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
     ):
@@ -157,6 +157,7 @@ class InterpolationMixin:
                 "skewness_angle_degrees": section_profile["skewness_angle_degrees"],
                 "skewness_cosine": section_profile["skewness_cosine"],
                 "distance_correction_cosine": section_profile["distance_correction_cosine"],
+                "corrected_total_length": section_profile["corrected_total_length"],
                 "positive_side_direction": positive_side_direction,
                 "z_func": section_profile["z_func"],
             })
@@ -443,6 +444,45 @@ class InterpolationMixin:
         return results, modifier
 
     @staticmethod
+    def _profile_lower_envelope_z(
+        z_func,
+        corrected_distance,
+        corrected_total_length,
+        search_radius,
+        sample_count=9,
+    ):
+        """Return the lowest surveyed profile elevation within one raster footprint.
+
+        Cross-section CSVs can contain near-vertical wall breaks. A raster cell
+        center that falls on the wall side can block the bed even when the cell
+        footprint overlaps the surveyed bed. Using the lower envelope only for
+        exact control-section cells keeps reach/junction connections hydraulic
+        while preserving the original profile interpolation everywhere else.
+        """
+        scalar_input = np.isscalar(corrected_distance)
+        distance_arr = np.asarray(corrected_distance, dtype=float)
+        radius = max(float(search_radius), 0.0)
+        total_length = max(float(corrected_total_length), 0.0)
+
+        if radius <= 0.0 or sample_count <= 1:
+            result = z_func(np.clip(distance_arr, 0.0, total_length))
+            return float(result) if scalar_input else result
+
+        offsets = np.linspace(-radius, radius, int(sample_count), dtype=float)
+        sample_distances = np.clip(
+            np.expand_dims(distance_arr, axis=-1) + offsets,
+            0.0,
+            total_length,
+        )
+        sample_z = np.asarray(z_func(sample_distances), dtype=float)
+        with np.errstate(all="ignore"):
+            result = np.nanmin(sample_z, axis=-1)
+
+        if scalar_input:
+            return float(np.asarray(result).reshape(-1)[0])
+        return result
+
+    @staticmethod
     def process_channel_network_dtm(
         dtm_path,
         channel_inputs,
@@ -452,7 +492,7 @@ class InterpolationMixin:
         blend_type="linear",
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         junction_tolerance=50.0,
         write_intermediate=True,
         centerline_output_path=None,
@@ -577,6 +617,16 @@ class InterpolationMixin:
                     centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
                 )
             )
+        final_data, outside_bank_preserved_count = (
+            DTMChannelModifier._preserve_higher_terrain_outside_network_footprint(
+                data=final_data,
+                original=original_dtm_data,
+                network=network,
+                transform=final_modifier.dtm_transform,
+                bank_offset_m=bank_offset_m,
+                nodata=final_modifier.dtm_meta.get("nodata") if final_modifier.dtm_meta else None,
+            )
+        )
         final_modifier.dtm_data = final_data
         building_lift_summary = DTMChannelModifier._apply_building_lift_to_modifier(
             modifier=final_modifier,
@@ -653,6 +703,7 @@ class InterpolationMixin:
             "transition_to_dtm_distance_m": float(transition_to_dtm_distance_m),
             "junction_half_section_interpolation": bool(junction_half_section_interpolation),
             "junction_bank_structure_protection_m": float(junction_bank_structure_protection_m),
+            "outside_bank_terrain_preserved_cells": int(outside_bank_preserved_count),
             "skewness_correction": bool(skewness_correction),
             "centerline_normal_sample_distance_m": float(centerline_normal_sample_distance_m),
             "building_lift": building_lift_summary,
@@ -688,9 +739,10 @@ class InterpolationMixin:
         network,
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         blend_type="cubic",
         bank_structure_protection_m=1.0,
+        junction_inner_bed_offset_m=0.2,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
     ):
@@ -735,6 +787,10 @@ class InterpolationMixin:
                 "half_profiles": len(profiles),
                 "bank_lines": len(bank_lines),
                 "cells_updated": 0,
+                "inner_bed_profiles": 0,
+                "inner_bed_offset_m": float(junction_inner_bed_offset_m),
+                "inner_bed_cells_updated": 0,
+                "bank_strip_cells_updated": 0,
             }
             if len(profiles) < 2 or not bank_lines:
                 summaries.append(summary)
@@ -744,31 +800,53 @@ class InterpolationMixin:
                 main.get("processing_centerline") or main["centerline"],
                 tributary.get("processing_centerline") or tributary["centerline"],
             ]
-            bank_lines = DTMChannelModifier._offset_junction_bank_lines_outward(
-                bank_lines,
-                centerlines=centerlines,
-                offset_m=bank_offset_m,
+            channel_footprint = DTMChannelModifier._junction_channel_footprint(
+                main=main,
+                tributary=tributary,
+                bank_offset_m=bank_offset_m,
             )
-            if not bank_lines:
-                summaries.append(summary)
-                continue
-            max_profile_width = max(
-                max(profile["bank_to_center_distance"], profile["corrected_half_length"])
-                for profile in profiles
-            )
-            max_influence = max_profile_width + hold_distance + transition_distance + float(bank_offset_m)
-            max_influence = max(max_influence, hold_distance + transition_distance, 1.0)
-            junction_zone = DTMChannelModifier._junction_interpolation_zone_geometry(
-                profiles=profiles,
+            junction_bank_polygon = DTMChannelModifier._junction_bank_polygon_from_clipped_banks(
+                clipped_banks,
                 bank_lines=bank_lines,
                 junction_point=junction_point,
-                pad_m=max(float(bank_offset_m), 0.25),
-                clip_geometry=DTMChannelModifier._junction_channel_footprint(
-                    main=main,
-                    tributary=tributary,
-                    bank_offset_m=bank_offset_m,
-                ),
             )
+            if junction_bank_polygon is None or junction_bank_polygon.is_empty:
+                summaries.append(summary)
+                continue
+            inner_bed_offset = max(float(junction_inner_bed_offset_m), 0.0)
+            inner_bed_polygon = DTMChannelModifier._junction_inner_bed_polygon(
+                junction_bank_polygon=junction_bank_polygon,
+                bank_lines=bank_lines,
+                offset_m=inner_bed_offset,
+            )
+            if inner_bed_polygon is not None and not inner_bed_polygon.is_empty:
+                inner_bed_polygon = inner_bed_polygon.intersection(junction_bank_polygon)
+                if not inner_bed_polygon.is_valid:
+                    inner_bed_polygon = inner_bed_polygon.buffer(0)
+                if inner_bed_polygon.is_empty:
+                    inner_bed_polygon = None
+
+            bed_profiles = DTMChannelModifier._junction_bed_cross_section_profiles(
+                profiles=profiles,
+                inner_offset_m=inner_bed_offset,
+            )
+            summary["inner_bed_profiles"] = len(bed_profiles)
+            outside_blend_extent = max(
+                hold_distance + transition_distance + float(bank_offset_m),
+                float(bank_offset_m),
+                0.25,
+            )
+            outside_transition_zone = DTMChannelModifier._junction_outside_transition_zone(
+                junction_bank_polygon=junction_bank_polygon,
+                bank_lines=bank_lines,
+                outside_blend_extent=outside_blend_extent,
+                exclude_geometry=channel_footprint,
+            )
+            junction_zone = junction_bank_polygon
+            if outside_transition_zone is not None and not outside_transition_zone.is_empty:
+                junction_zone = unary_union([junction_bank_polygon, outside_transition_zone])
+                if not junction_zone.is_valid:
+                    junction_zone = junction_zone.buffer(0)
             if junction_zone is None or junction_zone.is_empty:
                 summaries.append(summary)
                 continue
@@ -780,9 +858,10 @@ class InterpolationMixin:
                 fill=0,
                 default_value=1,
                 dtype="uint8",
-                all_touched=True,
+                all_touched=False,
             )
             rows, cols = np.where(influence_mask == 1)
+            cell_size = max(abs(transform.a), abs(transform.e), 1e-6)
             for row, col in zip(rows, cols):
                 terrain_z = float(original[row, col])
                 current_z = float(updated[row, col])
@@ -793,74 +872,80 @@ class InterpolationMixin:
 
                 x, y = transform * (col + 0.5, row + 0.5)
                 cell_point = Point(float(x), float(y))
-                bank_line = min(bank_lines, key=lambda line: cell_point.distance(line))
-                selected_profiles = DTMChannelModifier._profiles_for_junction_bank_line(
-                    profiles=profiles,
-                    bank_line=bank_line,
+                inside_junction_bank_polygon = bool(junction_bank_polygon.covers(cell_point))
+                inside_inner_bed_polygon = (
+                    inner_bed_polygon is not None
+                    and bool(inner_bed_polygon.covers(cell_point))
                 )
-                if len(selected_profiles) < 2:
-                    continue
 
-                bank_measure = bank_line.project(cell_point)
-                bank_point = bank_line.interpolate(bank_measure)
-                center_point, bank_to_center = DTMChannelModifier._nearest_centerline_point_and_distance(
-                    bank_point,
-                    centerlines,
-                )
-                if bank_to_center <= 1e-6:
-                    bank_to_center = max(
-                        profile["bank_to_center_distance"] for profile in selected_profiles
+                blended_z = None
+                if inside_inner_bed_polygon and bed_profiles:
+                    blended_z = DTMChannelModifier._junction_inner_bed_elevation(
+                        cell_point=cell_point,
+                        bed_profiles=bed_profiles,
+                        cell_size=cell_size,
                     )
-                if bank_to_center <= 1e-6:
-                    continue
+                    if blended_z is not None:
+                        summary["inner_bed_cells_updated"] += 1
 
-                vector_to_center = np.array(
-                    [center_point.x - bank_point.x, center_point.y - bank_point.y],
-                    dtype=float,
-                )
-                vector_to_cell = np.array(
-                    [cell_point.x - bank_point.x, cell_point.y - bank_point.y],
-                    dtype=float,
-                )
-                dist_from_bank = float(np.linalg.norm(vector_to_cell))
-                inside_channel_side = float(np.dot(vector_to_center, vector_to_cell)) >= -1e-9
-
-                if inside_channel_side:
-                    half_fraction = min(dist_from_bank / bank_to_center, 1.0)
-                    blend_distance = 0.0
-                else:
-                    half_fraction = None
-                    blend_distance = dist_from_bank
-
-                terrain_weight = DTMChannelModifier._terrain_transition_weight(
-                    distance_from_bank=blend_distance,
-                    hold_distance=hold_distance,
-                    transition_distance=transition_distance,
-                    blend_type=blend_type,
-                )
-                if terrain_weight >= 1.0:
-                    continue
-
-                weighted_z_sum = 0.0
-                weight_sum = 0.0
-                for profile in selected_profiles:
-                    if half_fraction is None:
-                        profile_z = profile["z_from_outside_bank_distance"](dist_from_bank)
-                    else:
-                        profile_z = profile["z_from_inside_bank_distance"](
-                            distance_from_bank=dist_from_bank,
-                            local_bank_to_center_distance=bank_to_center,
+                if blended_z is None:
+                    candidates = DTMChannelModifier._junction_cell_elevation_candidates(
+                        cell_point=cell_point,
+                        bank_lines=bank_lines,
+                        profiles=profiles,
+                        centerlines=centerlines,
+                        terrain_z=terrain_z,
+                        hold_distance=hold_distance,
+                        transition_distance=transition_distance,
+                        blend_type=blend_type,
+                        cell_size=cell_size,
+                        inner_bed_offset_m=inner_bed_offset,
+                        allow_inside=inside_junction_bank_polygon,
+                        allow_outside=not inside_junction_bank_polygon,
+                    )
+                    if inside_junction_bank_polygon and not candidates:
+                        # Concave junctions can make the bank-side test ambiguous near
+                        # the meeting point.  Retry with all candidates so the junction
+                        # center is filled instead of leaving a terrain island.
+                        candidates = DTMChannelModifier._junction_cell_elevation_candidates(
+                            cell_point=cell_point,
+                            bank_lines=bank_lines,
+                            profiles=profiles,
+                            centerlines=centerlines,
+                            terrain_z=terrain_z,
+                            hold_distance=hold_distance,
+                            transition_distance=transition_distance,
+                            blend_type=blend_type,
+                            cell_size=cell_size,
+                            inner_bed_offset_m=inner_bed_offset,
+                            allow_inside=True,
+                            allow_outside=True,
                         )
-                    profile_distance = max(cell_point.distance(profile["half_line"]), 1e-6)
-                    profile_weight = 1.0 / profile_distance
-                    weighted_z_sum += profile_weight * profile_z
-                    weight_sum += profile_weight
+                    if not candidates:
+                        continue
 
-                if weight_sum <= 0.0:
-                    continue
+                    inside_candidates = [candidate for candidate in candidates if candidate["inside"]]
+                    if inside_junction_bank_polygon:
+                        active_candidates = inside_candidates if inside_candidates else candidates
+                    else:
+                        active_candidates = [candidate for candidate in candidates if not candidate["inside"]]
+                    if not active_candidates:
+                        continue
+                    weight_sum = sum(candidate["weight"] for candidate in active_candidates)
+                    if weight_sum <= 0.0:
+                        continue
 
-                cross_section_z = weighted_z_sum / weight_sum
-                blended_z = terrain_weight * terrain_z + (1.0 - terrain_weight) * cross_section_z
+                    blended_z = sum(
+                        candidate["weight"] * candidate["z"]
+                        for candidate in active_candidates
+                    ) / weight_sum
+                    summary["bank_strip_cells_updated"] += 1
+
+                # Outside the clipped junction bank polygon, only blend the
+                # surveyed outside-bank half sections and preserve higher terrain.
+                if not inside_junction_bank_polygon and blended_z < terrain_z:
+                    blended_z = terrain_z
+
                 if not np.isfinite(blended_z):
                     continue
 
@@ -868,9 +953,608 @@ class InterpolationMixin:
                 if not np.isclose(current_z, blended_z):
                     summary["cells_updated"] += 1
 
+            control_sections = DTMChannelModifier._junction_cross_sections_for_interpolation(
+                tributary=tributary,
+                main=main,
+                junction=junction,
+                junction_point=junction_point,
+                bank_offset_m=bank_offset_m,
+                skewness_correction=skewness_correction,
+                centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
+            )
+            summary["control_sections"] = [
+                {
+                    "role": role,
+                    "channel": channel["name"],
+                    "station": section.get("station"),
+                }
+                for _, role, channel, section in control_sections
+            ]
+            updated, enforced_count = DTMChannelModifier._enforce_control_cross_sections_on_raster(
+                data=updated,
+                sections=control_sections,
+                transform=transform,
+                nodata=nodata,
+                cell_size=cell_size,
+            )
+            summary["control_section_cells_enforced"] = enforced_count
+
             summaries.append(summary)
 
         return updated, summaries
+
+    @staticmethod
+    def _enforce_control_cross_sections_on_raster(
+        data,
+        sections,
+        transform,
+        nodata=None,
+        cell_size=0.1,
+        enforcement_width_m=None,
+        use_lower_envelope=False,
+    ):
+        """Write CSV-derived cell-footprint elevations along control sections.
+
+        The reach interpolation already honors exact cross sections, but the
+        later junction overlay can repaint those same cells.  Re-applying the
+        controlling cross sections at the end keeps reach/junction connections
+        tied to the CSV survey values while avoiding sub-cell wall blockage.
+        """
+        if not sections:
+            return data, 0
+
+        updated = np.asarray(data).copy()
+        height, width = updated.shape
+        tolerance = (
+            max(float(enforcement_width_m), 1e-6)
+            if enforcement_width_m is not None
+            else max(float(cell_size) * 1.75, 0.15, 1e-6)
+        )
+        enforced = 0
+
+        for _, _, _, section in sections:
+            line = section.get("line")
+            profile = section.get("profile")
+            if line is None or line.is_empty or profile is None:
+                continue
+
+            left = float(profile["raw_left_bank_distance"])
+            right = float(profile["raw_right_bank_distance"])
+            if right < left:
+                left, right = right, left
+
+            minx, miny, maxx, maxy = line.bounds
+            window = from_bounds(
+                minx - tolerance,
+                miny - tolerance,
+                maxx + tolerance,
+                maxy + tolerance,
+                transform,
+            )
+            row_start = max(int(np.floor(window.row_off)), 0)
+            row_stop = min(int(np.ceil(window.row_off + window.height)), height)
+            col_start = max(int(np.floor(window.col_off)), 0)
+            col_stop = min(int(np.ceil(window.col_off + window.width)), width)
+            if row_start >= row_stop or col_start >= col_stop:
+                continue
+
+            for row in range(row_start, row_stop):
+                for col in range(col_start, col_stop):
+                    x, y = transform * (col + 0.5, row + 0.5)
+                    cell_point = Point(float(x), float(y))
+                    if cell_point.distance(line) > tolerance:
+                        continue
+
+                    raw_distance = float(line.project(cell_point))
+                    if raw_distance < left - tolerance or raw_distance > right + tolerance:
+                        continue
+
+                    raw_distance = float(np.clip(raw_distance, left, right))
+                    corrected_distance = raw_distance * float(profile["distance_correction_cosine"])
+                    if use_lower_envelope:
+                        exact_z = DTMChannelModifier._profile_lower_envelope_z(
+                            z_func=profile["z_func"],
+                            corrected_distance=corrected_distance,
+                            corrected_total_length=profile["corrected_total_length"],
+                            search_radius=tolerance * float(profile["distance_correction_cosine"]),
+                        )
+                    else:
+                        exact_z = profile["z_func"](corrected_distance)
+                    exact_z = float(np.asarray(exact_z).reshape(-1)[0])
+                    if not np.isfinite(exact_z):
+                        continue
+                    if nodata is not None and np.isclose(exact_z, nodata):
+                        continue
+
+                    if not np.isclose(updated[row, col], exact_z):
+                        enforced += 1
+                    updated[row, col] = exact_z
+
+        return updated, enforced
+
+    @staticmethod
+    def _junction_cell_elevation_candidates(
+        cell_point,
+        bank_lines,
+        profiles,
+        centerlines,
+        terrain_z,
+        hold_distance,
+        transition_distance,
+        blend_type="cubic",
+        cell_size=0.5,
+        inner_bed_offset_m=0.2,
+        allow_inside=True,
+        allow_outside=True,
+    ):
+        """Return smooth candidate elevations from clipped junction bank lines.
+
+        The old junction mapper hard-selected the nearest bank line, which could
+        create seams where bank/centerline direction changed.  This helper
+        computes candidates for all usable clipped-bank lines and lets the caller
+        smoothly blend the candidates.
+        """
+
+        candidates = []
+        for bank_line in bank_lines:
+            selected_profiles = DTMChannelModifier._profiles_for_junction_bank_line(
+                profiles=profiles,
+                bank_line=bank_line,
+            )
+            if len(selected_profiles) < 2:
+                continue
+
+            bank_measure = bank_line.project(cell_point)
+            bank_point = bank_line.interpolate(bank_measure)
+
+            profile_entries = []
+            for profile in selected_profiles:
+                # Use distance along the clipped bank line as the interpolation
+                # coordinate.  This keeps tributary-side cells tied to the
+                # tributary half-sections instead of accidentally pivoting to
+                # the nearest main-channel centerline.
+                profile_measure = bank_line.project(profile["bank_point"])
+                profile_distance = abs(float(bank_measure) - float(profile_measure))
+                profile_weight = 1.0 / max(profile_distance, float(cell_size), 1e-6)
+                profile_entries.append((profile, profile_weight))
+
+            profile_weight_sum = sum(weight for _, weight in profile_entries)
+            if profile_weight_sum <= 0.0:
+                continue
+
+            center_x = sum(
+                weight * profile["center_point"].x
+                for profile, weight in profile_entries
+            ) / profile_weight_sum
+            center_y = sum(
+                weight * profile["center_point"].y
+                for profile, weight in profile_entries
+            ) / profile_weight_sum
+            center_point = Point(float(center_x), float(center_y))
+            bank_to_center = bank_point.distance(center_point)
+
+            if bank_to_center <= 1e-6:
+                center_point, bank_to_center = DTMChannelModifier._nearest_centerline_point_and_distance(
+                    bank_point,
+                    centerlines,
+                )
+                if bank_to_center <= 1e-6:
+                    bank_to_center = sum(
+                        weight * profile["bank_to_center_distance"]
+                        for profile, weight in profile_entries
+                    ) / profile_weight_sum
+            if bank_to_center <= 1e-6:
+                continue
+
+            vector_to_center = np.array(
+                [center_point.x - bank_point.x, center_point.y - bank_point.y],
+                dtype=float,
+            )
+            vector_to_cell = np.array(
+                [cell_point.x - bank_point.x, cell_point.y - bank_point.y],
+                dtype=float,
+            )
+            dist_from_bank = float(np.linalg.norm(vector_to_cell))
+            inside_channel_side = float(np.dot(vector_to_center, vector_to_cell)) >= -1e-9
+            if inside_channel_side and not allow_inside:
+                continue
+            if not inside_channel_side and not allow_outside:
+                continue
+
+            if inside_channel_side:
+                half_fraction = min(dist_from_bank / bank_to_center, 1.0)
+                blend_distance = 0.0
+                if dist_from_bank > max(float(inner_bed_offset_m), 0.0):
+                    continue
+            else:
+                half_fraction = None
+                blend_distance = dist_from_bank
+
+            terrain_weight = DTMChannelModifier._terrain_transition_weight(
+                distance_from_bank=blend_distance,
+                hold_distance=hold_distance,
+                transition_distance=transition_distance,
+                blend_type=blend_type,
+            )
+            if terrain_weight >= 1.0:
+                continue
+
+            weighted_z_sum = 0.0
+            profile_weight_sum = 0.0
+            for profile, profile_weight in profile_entries:
+                if half_fraction is None:
+                    profile_z = profile["z_from_outside_bank_distance"](dist_from_bank)
+                else:
+                    profile_z = profile["z_from_inside_bank_distance"](
+                        distance_from_bank=dist_from_bank,
+                        local_bank_to_center_distance=bank_to_center,
+                    )
+                weighted_z_sum += profile_weight * profile_z
+                profile_weight_sum += profile_weight
+
+            if profile_weight_sum <= 0.0:
+                continue
+
+            cross_section_z = weighted_z_sum / profile_weight_sum
+            blended_z = terrain_weight * terrain_z + (1.0 - terrain_weight) * cross_section_z
+            if not inside_channel_side and blended_z < terrain_z:
+                blended_z = terrain_z
+            if not np.isfinite(blended_z):
+                continue
+
+            bank_distance = max(cell_point.distance(bank_line), float(cell_size))
+            candidates.append(
+                {
+                    "z": float(blended_z),
+                    "weight": 1.0 / (bank_distance * bank_distance),
+                    "inside": bool(inside_channel_side),
+                }
+            )
+
+        return candidates
+
+    @staticmethod
+    def _offset_junction_bank_lines_inward(bank_lines, profiles, offset_m=0.2):
+        """Offset clipped junction bank lines toward their paired half-section centers."""
+
+        offset = max(float(offset_m), 0.0)
+        if offset <= 1e-9:
+            return bank_lines
+
+        inward_lines = []
+        for bank_line in bank_lines:
+            if bank_line is None or bank_line.is_empty:
+                continue
+
+            selected_profiles = DTMChannelModifier._profiles_for_junction_bank_line(
+                profiles=profiles,
+                bank_line=bank_line,
+            )
+            target_points = [
+                profile["center_point"]
+                for profile in selected_profiles
+                if profile.get("center_point") is not None
+            ]
+            if not target_points:
+                inward_lines.append(bank_line)
+                continue
+
+            candidates = DTMChannelModifier._line_offset_candidates(bank_line, offset)
+            if not candidates:
+                inward_lines.append(bank_line)
+                continue
+
+            def mean_distance_to_targets(candidate_line):
+                samples = [
+                    candidate_line.interpolate(frac, normalized=True)
+                    for frac in np.linspace(0.0, 1.0, 9)
+                ]
+                distances = [
+                    min(sample.distance(target) for target in target_points)
+                    for sample in samples
+                ]
+                return float(np.mean(distances))
+
+            inward_lines.append(min(candidates, key=mean_distance_to_targets))
+
+        return inward_lines if inward_lines else bank_lines
+
+    @staticmethod
+    def _line_offset_candidates(line, offset_m):
+        """Return usable left/right offset line candidates for a LineString."""
+
+        try:
+            raw_candidates = [line.offset_curve(float(offset_m)), line.offset_curve(-float(offset_m))]
+        except AttributeError:
+            raw_candidates = [
+                line.parallel_offset(float(offset_m), "left"),
+                line.parallel_offset(float(offset_m), "right"),
+            ]
+
+        candidates = []
+        for candidate in raw_candidates:
+            candidates.extend(
+                item
+                for item in DTMChannelModifier._line_strings(candidate)
+                if item is not None and not item.is_empty and item.length > 1e-9
+            )
+        return candidates
+
+    @staticmethod
+    def _junction_bed_cross_section_profiles(profiles, inner_offset_m=0.2):
+        """Build inner-bed cross sections from points just inside each bank."""
+
+        grouped = {}
+        for profile in profiles:
+            grouped.setdefault(profile.get("section_key"), {})[profile.get("side")] = profile
+
+        bed_profiles = []
+        for section_key, side_profiles in grouped.items():
+            left = side_profiles.get("left")
+            right = side_profiles.get("right")
+            if left is None or right is None:
+                continue
+
+            left_distance = min(
+                max(float(inner_offset_m), 0.0),
+                max(float(left["bank_to_center_distance"]) * 0.95, 1e-6),
+            )
+            right_distance = min(
+                max(float(inner_offset_m), 0.0),
+                max(float(right["bank_to_center_distance"]) * 0.95, 1e-6),
+            )
+            left_point = left["point_from_inside_distance"](left_distance)
+            right_point = right["point_from_inside_distance"](right_distance)
+            if left_point.distance(right_point) <= 1e-6:
+                continue
+
+            left_offset = left["corrected_offset_from_inside_distance"](left_distance)
+            right_offset = right["corrected_offset_from_inside_distance"](right_distance)
+            bed_line = LineString(
+                [
+                    (left_point.x, left_point.y),
+                    (right_point.x, right_point.y),
+                ]
+            )
+            section_z_func = left["section_z_func"]
+
+            def z_from_fraction(
+                fraction,
+                z_func=section_z_func,
+                start_offset=left_offset,
+                end_offset=right_offset,
+            ):
+                fraction = float(np.clip(fraction, 0.0, 1.0))
+                value = z_func(start_offset + fraction * (end_offset - start_offset))
+                return float(np.asarray(value).reshape(-1)[0])
+
+            bed_profiles.append(
+                {
+                    "section_key": section_key,
+                    "channel": left.get("channel"),
+                    "station": left.get("station"),
+                    "line": bed_line,
+                    "z_from_fraction": z_from_fraction,
+                }
+            )
+
+        return bed_profiles
+
+    @staticmethod
+    def _junction_inner_bed_polygon(junction_bank_polygon, bank_lines, offset_m=0.2):
+        """Return the central junction bed area inside the inward bank offsets.
+
+        The clipped junction polygon is the full hydraulic junction footprint.
+        The inner bed is that footprint after removing only the narrow strips
+        within `offset_m` of the clipped bank lines.  This follows the requested
+        "0.2 m inward offset from each bank line" logic while keeping all three
+        branch beds connected through one continuous central zone.
+        """
+
+        if junction_bank_polygon is None or junction_bank_polygon.is_empty:
+            return None
+        offset = max(float(offset_m), 0.0)
+        if offset <= 1e-9 or not bank_lines:
+            return junction_bank_polygon
+
+        bank_strips = [
+            line.buffer(offset, cap_style=2, join_style=2)
+            for line in bank_lines
+            if line is not None and not line.is_empty
+        ]
+        if not bank_strips:
+            return junction_bank_polygon
+
+        inner_polygon = junction_bank_polygon.difference(unary_union(bank_strips))
+        if inner_polygon is None or inner_polygon.is_empty:
+            inner_polygon = junction_bank_polygon.buffer(-offset, join_style=2)
+        if inner_polygon is None or inner_polygon.is_empty:
+            return None
+        if not inner_polygon.is_valid:
+            inner_polygon = inner_polygon.buffer(0)
+        return inner_polygon if inner_polygon is not None and not inner_polygon.is_empty else None
+
+    @staticmethod
+    def _junction_inner_bed_elevation(cell_point, bed_profiles, cell_size=0.1):
+        """Mutually interpolate the inner junction bed from all bed cross sections."""
+
+        weighted_z = 0.0
+        weight_sum = 0.0
+        for profile in bed_profiles:
+            line = profile["line"]
+            if line is None or line.is_empty or line.length <= 1e-9:
+                continue
+            measure = line.project(cell_point)
+            fraction = measure / line.length
+            z_value = profile["z_from_fraction"](fraction)
+            distance = max(cell_point.distance(line), float(cell_size), 1e-6)
+            weight = 1.0 / (distance * distance)
+            weighted_z += weight * z_value
+            weight_sum += weight
+
+        if weight_sum <= 0.0:
+            return None
+        return float(weighted_z / weight_sum)
+
+    @staticmethod
+    def _junction_bank_polygon_from_clipped_banks(
+        clipped_banks,
+        bank_lines=None,
+        junction_point=None,
+    ):
+        """Create the bounded junction bed polygon from clipped bank lines.
+
+        The clipped junction bank shapefile contains the bank segments between
+        the controlling cross sections.  We close only the clipped line
+        endpoints, then polygonize that closed bank network.  This keeps the
+        junction bed boundary governed by the smooth clipped banklines rather
+        than by cross-section or reach-footprint fallback geometry.
+        """
+        lines = list(bank_lines or DTMChannelModifier._line_strings(clipped_banks))
+        if not lines:
+            return None
+
+        boundary_lines = [line for line in lines if line is not None and not line.is_empty]
+        boundary_lines.extend(
+            DTMChannelModifier._junction_clipped_bank_endpoint_connectors(boundary_lines)
+        )
+
+        polygons = []
+        if boundary_lines:
+            try:
+                snapped = DTMChannelModifier._snap_line_endpoints(boundary_lines, tolerance=1.0)
+                polygons = list(polygonize(unary_union(snapped)))
+            except Exception:
+                polygons = []
+
+        valid_polygons = [item for item in polygons if item.area > 1e-9]
+        if valid_polygons:
+            polygon = unary_union(valid_polygons)
+        else:
+            polygon = DTMChannelModifier._fallback_junction_bank_polygon(lines)
+
+        if polygon is None or polygon.is_empty:
+            return None
+        polygon = DTMChannelModifier._fill_polygon_holes(polygon)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        return polygon if polygon is not None and not polygon.is_empty else None
+
+    @staticmethod
+    def _junction_clipped_bank_endpoint_connectors(lines):
+        endpoints = []
+        for line_index, line in enumerate(lines or []):
+            if line is None or line.is_empty:
+                continue
+            coords = list(line.coords)
+            if len(coords) < 2:
+                continue
+            endpoints.append((line_index, 0, Point(coords[0][:2]), coords[0]))
+            endpoints.append((line_index, -1, Point(coords[-1][:2]), coords[-1]))
+
+        connectors = []
+        used = set()
+        while len(used) < len(endpoints):
+            best = None
+            for first_index, first in enumerate(endpoints):
+                if first_index in used:
+                    continue
+                for second_index in range(first_index + 1, len(endpoints)):
+                    if second_index in used:
+                        continue
+                    second = endpoints[second_index]
+                    if first[0] == second[0]:
+                        continue
+                    distance = first[2].distance(second[2])
+                    if best is None or distance < best[0]:
+                        best = (distance, first_index, second_index, first, second)
+            if best is None:
+                break
+
+            _, first_index, second_index, first, second = best
+            used.update([first_index, second_index])
+            if first[2].distance(second[2]) <= 1e-6:
+                continue
+            connectors.append(
+                LineString(
+                    [
+                        DTMChannelModifier._coord_like_point(first[2], first[3]),
+                        DTMChannelModifier._coord_like_point(second[2], second[3]),
+                    ]
+                )
+            )
+        return connectors
+
+    @staticmethod
+    def _fallback_junction_bank_polygon(lines):
+        if len(lines) < 2:
+            return unary_union(lines).convex_hull.buffer(0.25)
+
+        line1, line2 = sorted(lines, key=lambda line: line.length, reverse=True)[:2]
+        coords1 = [(float(x), float(y)) for x, y, *_ in line1.coords]
+        coords2 = [(float(x), float(y)) for x, y, *_ in line2.coords]
+        if len(coords1) < 2 or len(coords2) < 2:
+            return None
+
+        same_orientation = (
+            Point(coords1[0]).distance(Point(coords2[0]))
+            + Point(coords1[-1]).distance(Point(coords2[-1]))
+        )
+        opposite_orientation = (
+            Point(coords1[0]).distance(Point(coords2[-1]))
+            + Point(coords1[-1]).distance(Point(coords2[0]))
+        )
+        if same_orientation > opposite_orientation:
+            coords2 = coords2[::-1]
+
+        polygon = Polygon(coords1 + coords2[::-1] + [coords1[0]])
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        return polygon
+
+    @staticmethod
+    def _fill_polygon_holes(geometry):
+        if geometry is None or geometry.is_empty:
+            return geometry
+        if geometry.geom_type == "Polygon":
+            return Polygon(geometry.exterior)
+        if geometry.geom_type == "MultiPolygon":
+            return unary_union([Polygon(part.exterior) for part in geometry.geoms])
+        return geometry
+
+    @staticmethod
+    def _junction_outside_transition_zone(
+        junction_bank_polygon,
+        bank_lines,
+        outside_blend_extent,
+        exclude_geometry=None,
+    ):
+        if junction_bank_polygon is None or junction_bank_polygon.is_empty:
+            return None
+        extent = max(float(outside_blend_extent), 0.0)
+        if extent <= 0.0 or not bank_lines:
+            return None
+
+        strip_geometries = [
+            line.buffer(extent, cap_style=2, join_style=2)
+            for line in bank_lines
+            if line is not None and not line.is_empty
+        ]
+        if not strip_geometries:
+            return None
+
+        outside_zone = unary_union(strip_geometries)
+        if not outside_zone.is_valid:
+            outside_zone = outside_zone.buffer(0)
+        outside_zone = outside_zone.difference(junction_bank_polygon)
+        if exclude_geometry is not None and not exclude_geometry.is_empty:
+            outside_zone = outside_zone.difference(exclude_geometry)
+        # Keep the transition tied to the clipped junction polygon.  Flat line
+        # caps prevent rounded bed-elevation buffers at reach connection ends.
+        outside_zone = outside_zone.intersection(junction_bank_polygon.buffer(extent, cap_style=2, join_style=2))
+        if not outside_zone.is_valid:
+            outside_zone = outside_zone.buffer(0)
+        return outside_zone if not outside_zone.is_empty else None
 
     @staticmethod
     def _junction_interpolation_zone_geometry(
@@ -955,6 +1639,106 @@ class InterpolationMixin:
         return footprint
 
     @staticmethod
+    def _network_channel_footprint(network, bank_offset_m=0.2):
+        """Build the true in-bank footprint for all reaches and junctions."""
+
+        polygons = []
+        for channel in network.get("channels", []):
+            banks_gdf = channel.get("processing_banks_gdf")
+            if banks_gdf is None:
+                banks_gdf = channel.get("banks_gdf")
+            if banks_gdf is None or banks_gdf.empty:
+                continue
+            try:
+                polygon_gdf = DTMChannelModifier.create_polygon_mask_from_banks(
+                    banks_gdf,
+                    offset_m=bank_offset_m,
+                )
+            except Exception:
+                polygon_gdf = DTMChannelModifier.create_polygon_mask_from_banks(
+                    banks_gdf,
+                    offset_m=0.0,
+                )
+            polygons.extend(
+                geom
+                for geom in polygon_gdf.geometry
+                if geom is not None and not geom.is_empty
+            )
+
+        for junction in network.get("junctions", []):
+            main = network["channels"][junction["main_index"]]
+            tributary = network["channels"][junction["tributary_index"]]
+            junction_point = Point(float(junction["x"]), float(junction["y"]))
+            clipped_banks = DTMChannelModifier._junction_bank_lines_between_cross_sections(
+                tributary=tributary,
+                main=main,
+                junction=junction,
+                junction_point=junction_point,
+            )
+            clipped_banks = DTMChannelModifier._join_gdf_line_features_by_proximity(
+                clipped_banks,
+                tolerance=1.0,
+            )
+            bank_lines = DTMChannelModifier._line_strings(clipped_banks)
+            junction_polygon = DTMChannelModifier._junction_bank_polygon_from_clipped_banks(
+                clipped_banks,
+                bank_lines=bank_lines,
+                junction_point=junction_point,
+            )
+            if junction_polygon is not None and not junction_polygon.is_empty:
+                polygons.append(junction_polygon)
+
+        if not polygons:
+            return None
+        footprint = unary_union(polygons)
+        if not footprint.is_valid:
+            footprint = footprint.buffer(0)
+        return footprint if footprint is not None and not footprint.is_empty else None
+
+    @staticmethod
+    def _preserve_higher_terrain_outside_network_footprint(
+        data,
+        original,
+        network,
+        transform,
+        bank_offset_m=0.2,
+        nodata=None,
+    ):
+        """Prevent any channel/junction interpolation from lowering outside banks."""
+
+        footprint = DTMChannelModifier._network_channel_footprint(
+            network,
+            bank_offset_m=bank_offset_m,
+        )
+        if footprint is None or footprint.is_empty:
+            return data, 0
+
+        updated = np.asarray(data).copy()
+        original_arr = np.asarray(original)
+        in_bank_mask = rasterize(
+            [footprint],
+            out_shape=updated.shape,
+            transform=transform,
+            fill=0,
+            default_value=1,
+            dtype="uint8",
+            all_touched=True,
+        ).astype(bool)
+        preserve_mask = (
+            ~in_bank_mask
+            & np.isfinite(updated)
+            & np.isfinite(original_arr)
+            & (original_arr > updated)
+        )
+        if nodata is not None:
+            preserve_mask &= ~np.isclose(updated, nodata)
+            preserve_mask &= ~np.isclose(original_arr, nodata)
+        count = int(np.count_nonzero(preserve_mask))
+        if count:
+            updated[preserve_mask] = original_arr[preserve_mask]
+        return updated, count
+
+    @staticmethod
     def _overlay_channel_rasters(modifiers, base_data, exclusion_mask=None):
         if not modifiers:
             raise ValueError("No channel rasters were produced.")
@@ -981,7 +1765,7 @@ class InterpolationMixin:
         network,
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         bank_structure_protection_m=1.0,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
@@ -1022,38 +1806,42 @@ class InterpolationMixin:
                 main.get("processing_centerline") or main["centerline"],
                 tributary.get("processing_centerline") or tributary["centerline"],
             ]
-            bank_lines = DTMChannelModifier._offset_junction_bank_lines_outward(
-                bank_lines,
-                centerlines=centerlines,
-                offset_m=bank_offset_m,
-            )
-            if not bank_lines:
-                continue
-
-            max_profile_width = max(
-                max(profile["bank_to_center_distance"], profile["corrected_half_length"])
-                for profile in profiles
-            )
-            max_influence = max_profile_width + hold_distance + transition_distance + float(bank_offset_m)
-            max_influence = max(max_influence, hold_distance + transition_distance, 1.0)
-            junction_zone = DTMChannelModifier._junction_interpolation_zone_geometry(
-                profiles=profiles,
-                bank_lines=bank_lines,
-                junction_point=junction_point,
-                pad_m=max(float(bank_offset_m), 0.25),
-            )
-            if junction_zone is None or junction_zone.is_empty:
-                continue
-            influence_geometry = unary_union(
-                [line.buffer(max_influence) for line in bank_lines]
-            ).intersection(junction_zone)
             channel_footprint = DTMChannelModifier._junction_channel_footprint(
                 main=main,
                 tributary=tributary,
                 bank_offset_m=bank_offset_m,
             )
-            if channel_footprint is not None and not channel_footprint.is_empty:
-                influence_geometry = influence_geometry.difference(channel_footprint)
+            junction_bank_polygon = DTMChannelModifier._junction_bank_polygon_from_clipped_banks(
+                clipped_banks,
+                bank_lines=bank_lines,
+                junction_point=junction_point,
+            )
+            if junction_bank_polygon is None or junction_bank_polygon.is_empty:
+                continue
+
+            outside_blend_extent = max(
+                hold_distance + transition_distance + float(bank_offset_m),
+                float(bank_offset_m),
+                0.25,
+            )
+            outside_transition_zone = DTMChannelModifier._junction_outside_transition_zone(
+                junction_bank_polygon=junction_bank_polygon,
+                bank_lines=bank_lines,
+                outside_blend_extent=outside_blend_extent,
+                exclude_geometry=channel_footprint,
+            )
+            junction_zone = junction_bank_polygon
+            if outside_transition_zone is not None and not outside_transition_zone.is_empty:
+                junction_zone = unary_union([junction_bank_polygon, outside_transition_zone])
+                if not junction_zone.is_valid:
+                    junction_zone = junction_zone.buffer(0)
+            if junction_zone is None or junction_zone.is_empty:
+                continue
+            # Exclude reach rasters only where the junction pass is allowed to
+            # paint: inside the clipped bank polygon plus the flat-ended outside
+            # transition strips. This avoids removing reach interpolation in a
+            # broad convex buffer around the tie-in.
+            influence_geometry = junction_zone
             if influence_geometry.is_empty:
                 continue
             mask |= rasterize(
@@ -1063,7 +1851,7 @@ class InterpolationMixin:
                 fill=0,
                 default_value=1,
                 dtype="uint8",
-                all_touched=True,
+                all_touched=False,
             ).astype(bool)
 
         return mask
@@ -1128,26 +1916,31 @@ class InterpolationMixin:
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
     ):
+        main_centerline = main.get("processing_centerline") or main["centerline"]
+        tributary_centerline = tributary.get("processing_centerline") or tributary["centerline"]
+        main_banks = main.get("processing_banks_gdf", main["banks_gdf"])
+        tributary_banks = tributary.get("processing_banks_gdf", tributary["banks_gdf"])
+
         main_bank_lines = DTMChannelModifier._offset_bank_lines_outward(
-            DTMChannelModifier._line_strings(main["banks_gdf"]),
-            centerline=main["centerline"],
+            DTMChannelModifier._line_strings(main_banks),
+            centerline=main_centerline,
             offset_m=bank_offset_m,
         )
         tributary_bank_lines = DTMChannelModifier._offset_bank_lines_outward(
-            DTMChannelModifier._line_strings(tributary["banks_gdf"]),
-            centerline=tributary["centerline"],
+            DTMChannelModifier._line_strings(tributary_banks),
+            centerline=tributary_centerline,
             offset_m=bank_offset_m,
         )
         main_sections = DTMChannelModifier._cross_sections_by_centerline_measure(
             cross_section_csv=main["cross_section_csv"],
-            centerline=main["centerline"],
+            centerline=main_centerline,
             bank_lines=main_bank_lines,
             skewness_correction=skewness_correction,
             centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
         )
         tributary_sections = DTMChannelModifier._cross_sections_by_centerline_measure(
             cross_section_csv=tributary["cross_section_csv"],
-            centerline=tributary["centerline"],
+            centerline=tributary_centerline,
             bank_lines=tributary_bank_lines,
             skewness_correction=skewness_correction,
             centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
@@ -1155,7 +1948,7 @@ class InterpolationMixin:
         if len(main_sections) < 2 or not tributary_sections:
             return []
 
-        junction_measure = main["centerline"].project(junction_point)
+        junction_measure = main_centerline.project(junction_point)
         upstream = [
             section for section in main_sections
             if section["centerline_measure"] <= junction_measure
@@ -1177,10 +1970,10 @@ class InterpolationMixin:
             nearest.sort(key=lambda section: section["centerline_measure"])
             main_up, main_down = nearest[0], nearest[1]
 
-        endpoint_measure = 0.0 if junction["tributary_endpoint"] == "start" else tributary["centerline"].length
-        tributary_first = min(
+        tributary_first = DTMChannelModifier._select_tributary_junction_section(
             tributary_sections,
-            key=lambda section: abs(section["centerline_measure"] - endpoint_measure),
+            centerline=tributary_centerline,
+            endpoint_name=junction["tributary_endpoint"],
         )
 
         return [
@@ -1188,6 +1981,23 @@ class InterpolationMixin:
             ("main_downstream", "main_downstream", main, main_down),
             ("tributary_downstream", "tributary", tributary, tributary_first),
         ]
+
+    @staticmethod
+    def _select_tributary_junction_section(sections, centerline, endpoint_name):
+        """Pick the tributary cross section at the downstream junction end.
+
+        The tributary junction reference must be directional.  If the tributary
+        connects at its end point, the downstream control section is the greatest
+        centerline measure; if it connects at its start point, it is the
+        smallest.  This avoids selecting an upstream near-duplicate when several
+        survey sections lie close to the junction.
+        """
+
+        if not sections:
+            return None
+        if endpoint_name == "start":
+            return min(sections, key=lambda section: section["centerline_measure"])
+        return max(sections, key=lambda section: section["centerline_measure"])
 
     @staticmethod
     def _offset_bank_lines_outward(bank_lines, centerline, offset_m=0.2):
@@ -1291,10 +2101,16 @@ class InterpolationMixin:
         left_half_width = max(center_corrected - left_bank_corrected, 1e-6)
         right_half_width = max(right_bank_corrected - center_corrected, 1e-6)
         protected_width = max(float(bank_structure_protection_m), 0.0)
+        # Junction half-sections preserve the near-bank/embankment shape and
+        # only scale the inner bed portion toward the centerline.  This avoids
+        # stretching the bank feature when local junction width differs from
+        # the surveyed bank-to-center distance.
         halves = [
             {
                 "side": "left",
                 "bank_point": left_bank,
+                "corrected_bank_distance": left_bank_corrected,
+                "inside_direction": 1.0,
                 "corrected_half_length": left_half_width,
                 "offset_from_fraction": lambda fraction, bank=left_bank_corrected: (
                     bank + float(np.clip(fraction, 0.0, 1.0)) * left_half_width
@@ -1314,6 +2130,8 @@ class InterpolationMixin:
             {
                 "side": "right",
                 "bank_point": right_bank,
+                "corrected_bank_distance": right_bank_corrected,
+                "inside_direction": -1.0,
                 "corrected_half_length": right_half_width,
                 "offset_from_fraction": lambda fraction, bank=right_bank_corrected: (
                     bank - float(np.clip(fraction, 0.0, 1.0)) * right_half_width
@@ -1367,6 +2185,30 @@ class InterpolationMixin:
                 )
                 return float(np.asarray(value).reshape(-1)[0])
 
+            def point_from_inside_distance(
+                distance,
+                bank_point=half["bank_point"],
+                center_point=center_point_on_section,
+            ):
+                width = bank_point.distance(center_point)
+                if width <= 1e-9:
+                    return bank_point
+                use_distance = float(np.clip(distance, 0.0, width * 0.95))
+                fraction = use_distance / width
+                return Point(
+                    float(bank_point.x + (center_point.x - bank_point.x) * fraction),
+                    float(bank_point.y + (center_point.y - bank_point.y) * fraction),
+                )
+
+            def corrected_offset_from_inside_distance(
+                distance,
+                bank=half["corrected_bank_distance"],
+                direction=half["inside_direction"],
+                half_width=half["corrected_half_length"],
+            ):
+                use_distance = float(np.clip(distance, 0.0, half_width * 0.95))
+                return bank + direction * use_distance
+
             profiles.append(
                 {
                     "section_key": section_key,
@@ -1388,12 +2230,33 @@ class InterpolationMixin:
                     "z_from_inside_bank_distance": z_from_inside_bank_distance,
                     "z_from_outside_bank_distance": z_from_outside_bank_distance,
                     "bank_structure_protection_m": protected_width,
+                    "section_z_func": profile["z_func"],
+                    "point_from_inside_distance": point_from_inside_distance,
+                    "corrected_offset_from_inside_distance": corrected_offset_from_inside_distance,
                 }
             )
         return profiles
 
     @staticmethod
     def _profiles_for_junction_bank_line(profiles, bank_line):
+        distance_cutoff = max(3.5, 0.15 * float(bank_line.length))
+        near_by_section = {}
+        for profile in profiles:
+            if profile.get("bank_point") is None:
+                continue
+            distance = profile["bank_point"].distance(bank_line)
+            if distance > distance_cutoff:
+                continue
+            section_key = profile.get("section_key")
+            current = near_by_section.get(section_key)
+            if current is None or distance < current[0]:
+                near_by_section[section_key] = (distance, profile)
+        if len(near_by_section) >= 2:
+            return [
+                item[1]
+                for item in sorted(near_by_section.values(), key=lambda value: value[0])
+            ]
+
         best_by_section = {}
         for profile in profiles:
             distance = profile["bank_point"].distance(bank_line)

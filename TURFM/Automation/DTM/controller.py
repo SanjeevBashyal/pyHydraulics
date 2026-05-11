@@ -185,7 +185,7 @@ class DTM:
         blend_type=None,
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         junction_tolerance=50.0,
         perimeter_offset_m=500.0,
         write_intermediate=True,
@@ -329,16 +329,32 @@ class DTM:
             # raster is prepared.  The interpolated GeoTIFF remains in 2 GIS,
             # while the merge base is the building-raised source DTM and the
             # final GeoTIFF/HDF products live in 3 DTM.
+            exact_bank_polygon_paths = [
+                path
+                for path in [result.get("bank_polygon_shp")]
+                if path
+            ]
+            for product in result.get("connected_bank_products", []) or []:
+                junction_polygon_path = product.get("junction_bank_polygon_shp")
+                if junction_polygon_path:
+                    exact_bank_polygon_paths.append(junction_polygon_path)
+
             terrain_result = prepare_component_terrain_hdf(
                 original_dtm_path=processing_dtm_path,
                 interpolated_tif_path=result["output_tif"],
                 dtm_root=Path(self.config.DTM_OUTPUT_PATH),
                 component_name=output_context["stem"],
                 projection_prj_path=self.get_projection_prj_path(),
+                exact_bank_polygon_path=exact_bank_polygon_paths,
                 units="Meters",
                 hecras_version=self.config.HECRAS_VERSION,
             )
             result["merged_terrain_tif"] = str(terrain_result.merged_tif_path)
+            result["exact_bank_channel_tif"] = (
+                str(terrain_result.exact_bank_tif_path)
+                if terrain_result.exact_bank_tif_path
+                else None
+            )
             result["terrain_hdf"] = str(terrain_result.hdf_path)
             result["terrain_hdf_created"] = terrain_result.created
             result["terrain_hdf_message"] = terrain_result.message
@@ -404,7 +420,7 @@ class DTM:
         blend_type=None,
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         junction_tolerance=50.0,
         perimeter_offset_m=500.0,
         write_intermediate=True,
@@ -483,7 +499,7 @@ class DTM:
         blend_type=None,
         bank_offset_m=0.2,
         full_cross_section_weight_distance_m=1.5,
-        transition_to_dtm_distance_m=5.0,
+        transition_to_dtm_distance_m=3.5,
         skewness_correction=True,
         centerline_normal_sample_distance_m=3.0,
     ):
