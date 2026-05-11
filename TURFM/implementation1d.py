@@ -37,7 +37,7 @@ MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 # None means "run every project listed in the active structure source".
 # PROJECTS_TO_RUN: list[str] | None = None
 # PROJECTS_TO_RUN = ["ARDICLI","CIGRI","CUKUROREN","CUKUROREN-T"]
-PROJECTS_TO_RUN = ["KILCAN"]
+PROJECTS_TO_RUN = ["ARDICLI"]
 
 # Optional manual pairing. If omitted, network.csv is used when available.
 # Each pair is (main reach, tributary reach).

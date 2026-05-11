@@ -199,6 +199,9 @@ class DTM:
         centerline_normal_sample_distance_m=3.0,
         buildings_shp_path=None,
         building_lift_m=0.0,
+        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=2.0,
+        hdf_bank_polygon_merge_type="bilinear",
+        hdf_bilinear_bank_resolution_m=0.1,
         split_disconnected_components=True,
     ):
         """Run interpolation and terrain-HDF preparation for one project."""
@@ -346,6 +349,9 @@ class DTM:
                 component_name=output_context["stem"],
                 projection_prj_path=self.get_projection_prj_path(),
                 exact_bank_polygon_path=exact_bank_polygon_paths,
+                resampling=hdf_bank_polygon_merge_type,
+                exact_bank_buffer_m=hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m,
+                bilinear_bank_resolution_m=hdf_bilinear_bank_resolution_m,
                 units="Meters",
                 hecras_version=self.config.HECRAS_VERSION,
             )
@@ -355,9 +361,20 @@ class DTM:
                 if terrain_result.exact_bank_tif_path
                 else None
             )
+            result["hdf_bank_channel_tif"] = (
+                str(terrain_result.bank_channel_tif_path)
+                if terrain_result.bank_channel_tif_path
+                else None
+            )
+            result["hdf_bank_channel_mode"] = terrain_result.bank_channel_mode
             result["terrain_hdf"] = str(terrain_result.hdf_path)
             result["terrain_hdf_created"] = terrain_result.created
             result["terrain_hdf_message"] = terrain_result.message
+            result["hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m"] = (
+                float(hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m)
+            )
+            result["hdf_bank_polygon_merge_type"] = hdf_bank_polygon_merge_type
+            result["hdf_bilinear_bank_resolution_m"] = float(hdf_bilinear_bank_resolution_m)
             results.append(result)
 
         if len(results) == 1:
@@ -434,6 +451,9 @@ class DTM:
         centerline_normal_sample_distance_m=3.0,
         buildings_shp_path=None,
         building_lift_m=0.0,
+        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=2.0,
+        hdf_bank_polygon_merge_type="bilinear",
+        hdf_bilinear_bank_resolution_m=0.1,
         split_disconnected_components=True,
     ):
         """Run DTM processing for all selected projects in the folder structure."""
@@ -482,6 +502,11 @@ class DTM:
                     centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
                     buildings_shp_path=buildings_shp_path,
                     building_lift_m=building_lift_m,
+                    hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=(
+                        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m
+                    ),
+                    hdf_bank_polygon_merge_type=hdf_bank_polygon_merge_type,
+                    hdf_bilinear_bank_resolution_m=hdf_bilinear_bank_resolution_m,
                     split_disconnected_components=split_disconnected_components,
                 )
             )

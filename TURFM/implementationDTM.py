@@ -11,9 +11,9 @@ MASTER_PROJECT_PATH = r"C:\Users\Ripple\Downloads\Turkey Flood\Group-4-Model"
 
 # PROJECTS_TO_RUN: list[str] | None = None
 # PROJECTS_TO_RUN = ["BUYUKGOKCELI"]
-PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
+# PROJECTS_TO_RUN = ["ARDICLI", "CIGRI", "CUKUROREN", "CUKUROREN-T"]
 # PROJECTS_TO_RUN = ["ECE2", "EVCILER1", "KILCAN"]
-# PROJECTS_TO_RUN = ["KILCAN"]
+PROJECTS_TO_RUN = ["KILCAN"]
 
 TARGET_RES = 0.1
 BUFFER_M = 20
@@ -22,6 +22,9 @@ BANK_OFFSET_M = 0.2
 SKEWNESS_CORRECTION = False
 CENTERLINE_NORMAL_SAMPLE_DISTANCE_M = 3.0
 BUILDING_LIFT_M = 12.0
+HDF_NEAREST_NEIGHBOUR_BUFFER_DISTANCE_OUT_OF_BANK_POLYGON_M = 1.0
+HDF_BANK_POLYGON_MERGE_TYPE = "bilinear"  # "bilinear" or "nearest"
+HDF_BILINEAR_BANK_RESOLUTION_M = 0.1
 FULL_CROSS_SECTION_WEIGHT_DISTANCE_M = 1.5
 TRANSITION_TO_DTM_DISTANCE_M = 3.5
 JUNCTION_TOLERANCE = 50.0
@@ -76,6 +79,11 @@ if __name__ == "__main__":
         skewness_correction=SKEWNESS_CORRECTION,
         centerline_normal_sample_distance_m=CENTERLINE_NORMAL_SAMPLE_DISTANCE_M,
         building_lift_m=BUILDING_LIFT_M,
+        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=(
+            HDF_NEAREST_NEIGHBOUR_BUFFER_DISTANCE_OUT_OF_BANK_POLYGON_M
+        ),
+        hdf_bank_polygon_merge_type=HDF_BANK_POLYGON_MERGE_TYPE,
+        hdf_bilinear_bank_resolution_m=HDF_BILINEAR_BANK_RESOLUTION_M,
         full_cross_section_weight_distance_m=FULL_CROSS_SECTION_WEIGHT_DISTANCE_M,
         transition_to_dtm_distance_m=TRANSITION_TO_DTM_DISTANCE_M,
         junction_tolerance=JUNCTION_TOLERANCE,

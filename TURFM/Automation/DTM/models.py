@@ -15,6 +15,8 @@ class TerrainHdfResult:
     created: bool
     message: str
     exact_bank_tif_path: Path | None = None
+    bank_channel_tif_path: Path | None = None
+    bank_channel_mode: str | None = None
 
 
 @dataclass(frozen=True)
