@@ -43,8 +43,27 @@ class ExportMixin:
                 "transform": modifier.dtm_transform,
             }
         )
+        data = ExportMixin._sanitize_geotiff_data(modifier)
         with rasterio.open(output_path, "w", **meta) as dest:
-            dest.write(modifier.dtm_data.astype("float32"), 1)
+            dest.write(data, 1)
+
+    @staticmethod
+    def _sanitize_geotiff_data(modifier):
+        data = np.asarray(modifier.dtm_data, dtype="float32").copy()
+        nodata = modifier.dtm_meta.get("nodata") if modifier.dtm_meta else None
+        if nodata is None:
+            data[~np.isfinite(data)] = np.nan
+            return data
+
+        invalid = ~np.isfinite(data) | np.isclose(data, nodata)
+        original = getattr(modifier, "original_dtm_data", None)
+        if original is not None:
+            original_arr = np.asarray(original)
+            invalid |= ~np.isfinite(original_arr) | np.isclose(original_arr, nodata)
+
+        if np.any(invalid):
+            data[invalid] = float(nodata)
+        return data
 
     @staticmethod
     def _apply_building_lift_to_modifier(modifier, buildings_shp_path=None, lift_m=0.0):

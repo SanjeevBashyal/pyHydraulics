@@ -4,8 +4,8 @@ Public imports:
 - `DTM` orchestrates project/sub-project DTM processing.
 - `DTMChannelModifier` contains the interpolation engine assembled from
   focused mixin modules.
-- `prepare_component_terrain_hdf` merges the interpolated raster with the
-  original DTM and writes a HEC-RAS terrain HDF under `3 DTM`.
+- `prepare_component_terrain_hdf` writes a HEC-RAS terrain HDF under
+  `3 DTM` from the interpolated terrain GeoTIFF over the base DTM.
 """
 
 from .channel_modifier import DTMChannelModifier

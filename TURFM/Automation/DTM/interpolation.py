@@ -1744,6 +1744,11 @@ class InterpolationMixin:
             raise ValueError("No channel rasters were produced.")
 
         final = np.array(base_data, copy=True).astype("float32")
+        nodata = modifiers[0].dtm_meta.get("nodata") if modifiers[0].dtm_meta else None
+        base_valid = np.isfinite(final)
+        if nodata is not None:
+            base_valid &= ~np.isclose(final, nodata)
+
         for modifier in modifiers:
             mask = getattr(modifier, "interpolation_mask", None)
             if mask is None:
@@ -1753,6 +1758,11 @@ class InterpolationMixin:
 
             if exclusion_mask is not None:
                 mask &= ~exclusion_mask
+            mask &= base_valid
+            modifier_valid = np.isfinite(modifier.dtm_data)
+            if nodata is not None:
+                modifier_valid &= ~np.isclose(modifier.dtm_data, nodata)
+            mask &= modifier_valid
             if not np.any(mask):
                 continue
             final[mask] = modifier.dtm_data[mask].astype("float32")

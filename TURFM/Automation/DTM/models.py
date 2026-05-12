@@ -10,13 +10,14 @@ from pathlib import Path
 class TerrainHdfResult:
     """Result returned after preparing a HEC-RAS terrain HDF."""
 
-    merged_tif_path: Path
+    merged_tif_path: Path | None
     hdf_path: Path
     created: bool
     message: str
     exact_bank_tif_path: Path | None = None
     bank_channel_tif_path: Path | None = None
     bank_channel_mode: str | None = None
+    base_terrain_tif_path: Path | None = None
 
 
 @dataclass(frozen=True)

@@ -199,9 +199,6 @@ class DTM:
         centerline_normal_sample_distance_m=3.0,
         buildings_shp_path=None,
         building_lift_m=0.0,
-        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=2.0,
-        hdf_bank_polygon_merge_type="bilinear",
-        hdf_bilinear_bank_resolution_m=0.1,
         split_disconnected_components=True,
     ):
         """Run interpolation and terrain-HDF preparation for one project."""
@@ -329,33 +326,27 @@ class DTM:
             }
 
             # Build the HEC-RAS terrain package immediately after the channel
-            # raster is prepared.  The interpolated GeoTIFF remains in 2 GIS,
-            # while the merge base is the building-raised source DTM and the
-            # final GeoTIFF/HDF products live in 3 DTM.
-            exact_bank_polygon_paths = [
-                path
-                for path in [result.get("bank_polygon_shp")]
-                if path
-            ]
-            for product in result.get("connected_bank_products", []) or []:
-                junction_polygon_path = product.get("junction_bank_polygon_shp")
-                if junction_polygon_path:
-                    exact_bank_polygon_paths.append(junction_polygon_path)
-
+            # raster is prepared. HEC-RAS stitches the interpolated GeoTIFF
+            # above the building-raised source DTM.
             terrain_result = prepare_component_terrain_hdf(
                 original_dtm_path=processing_dtm_path,
                 interpolated_tif_path=result["output_tif"],
                 dtm_root=Path(self.config.DTM_OUTPUT_PATH),
                 component_name=output_context["stem"],
                 projection_prj_path=self.get_projection_prj_path(),
-                exact_bank_polygon_path=exact_bank_polygon_paths,
-                resampling=hdf_bank_polygon_merge_type,
-                exact_bank_buffer_m=hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m,
-                bilinear_bank_resolution_m=hdf_bilinear_bank_resolution_m,
                 units="Meters",
                 hecras_version=self.config.HECRAS_VERSION,
             )
-            result["merged_terrain_tif"] = str(terrain_result.merged_tif_path)
+            result["merged_terrain_tif"] = (
+                str(terrain_result.merged_tif_path)
+                if terrain_result.merged_tif_path
+                else None
+            )
+            result["hdf_base_terrain_tif"] = (
+                str(terrain_result.base_terrain_tif_path)
+                if terrain_result.base_terrain_tif_path
+                else None
+            )
             result["exact_bank_channel_tif"] = (
                 str(terrain_result.exact_bank_tif_path)
                 if terrain_result.exact_bank_tif_path
@@ -366,15 +357,15 @@ class DTM:
                 if terrain_result.bank_channel_tif_path
                 else None
             )
+            result["hdf_interpolated_terrain_tif"] = (
+                str(terrain_result.bank_channel_tif_path)
+                if terrain_result.bank_channel_tif_path
+                else None
+            )
             result["hdf_bank_channel_mode"] = terrain_result.bank_channel_mode
             result["terrain_hdf"] = str(terrain_result.hdf_path)
             result["terrain_hdf_created"] = terrain_result.created
             result["terrain_hdf_message"] = terrain_result.message
-            result["hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m"] = (
-                float(hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m)
-            )
-            result["hdf_bank_polygon_merge_type"] = hdf_bank_polygon_merge_type
-            result["hdf_bilinear_bank_resolution_m"] = float(hdf_bilinear_bank_resolution_m)
             results.append(result)
 
         if len(results) == 1:
@@ -451,9 +442,6 @@ class DTM:
         centerline_normal_sample_distance_m=3.0,
         buildings_shp_path=None,
         building_lift_m=0.0,
-        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=2.0,
-        hdf_bank_polygon_merge_type="bilinear",
-        hdf_bilinear_bank_resolution_m=0.1,
         split_disconnected_components=True,
     ):
         """Run DTM processing for all selected projects in the folder structure."""
@@ -502,11 +490,6 @@ class DTM:
                     centerline_normal_sample_distance_m=centerline_normal_sample_distance_m,
                     buildings_shp_path=buildings_shp_path,
                     building_lift_m=building_lift_m,
-                    hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m=(
-                        hdf_nearest_neighbour_buffer_distance_out_of_bank_polygon_m
-                    ),
-                    hdf_bank_polygon_merge_type=hdf_bank_polygon_merge_type,
-                    hdf_bilinear_bank_resolution_m=hdf_bilinear_bank_resolution_m,
                     split_disconnected_components=split_disconnected_components,
                 )
             )
