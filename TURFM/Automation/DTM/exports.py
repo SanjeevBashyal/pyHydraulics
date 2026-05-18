@@ -499,6 +499,7 @@ class ExportMixin:
             )
 
             junction_polygon_path = None
+            junction_inner_polygon_path = None
             try:
                 junction_polygon = DTMChannelModifier._junction_bank_polygon_from_clipped_banks(
                     clipped_banks,
@@ -521,6 +522,29 @@ class ExportMixin:
                         polygon_gdf,
                         junction_polygon_path,
                     )
+                    inner_polygon = DTMChannelModifier._fresh_junction_inner_bed_polygon(
+                        junction_bank_polygon=junction_polygon,
+                        bank_lines=DTMChannelModifier._line_strings(clipped_banks),
+                        offset_m=0.3,
+                    )
+                    if inner_polygon is not None and not inner_polygon.is_empty:
+                        inner_polygon_gdf = gpd.GeoDataFrame(
+                            [
+                                {
+                                    "main": str(main["name"])[:80],
+                                    "tributary": str(tributary["name"])[:80],
+                                    "offset_m": 0.3,
+                                    "geometry": inner_polygon,
+                                }
+                            ],
+                            geometry="geometry",
+                            crs=clipped_banks.crs,
+                        )
+                        junction_inner_polygon_path = output_dir / f"{safe_pair_name}_SEV_USTU_junction_inner_0p3m_polygon.shp"
+                        junction_inner_polygon_path = DTMChannelModifier._write_gdf_with_locked_file_fallback(
+                            inner_polygon_gdf,
+                            junction_inner_polygon_path,
+                        )
             except Exception as exc:
                 print(f"Warning: junction bank polygon export failed for {safe_pair_name}: {exc}")
 
@@ -531,6 +555,7 @@ class ExportMixin:
                     "merged_banks_shp": str(merged_path),
                     "junction_clipped_banks_shp": str(clipped_path),
                     "junction_bank_polygon_shp": str(junction_polygon_path) if junction_polygon_path else None,
+                    "junction_inner_bed_polygon_shp": str(junction_inner_polygon_path) if junction_inner_polygon_path else None,
                 }
             )
 

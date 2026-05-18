@@ -97,6 +97,7 @@ class JunctionInterpolationMixin:
                         cell_point=cell_point,
                         bed_profiles=context["bed_profiles"],
                         cell_size=cell_size,
+                        junction_blend=context["junction_elevation_blend"],
                     )
                     if blended_z is not None:
                         summary["inner_bed_cells_updated"] += 1
@@ -173,13 +174,18 @@ class JunctionInterpolationMixin:
                         cell_point=cell_point,
                         bed_profiles=context["bed_profiles"],
                         cell_size=cell_size,
+                        junction_blend=context["junction_elevation_blend"],
                     )
                     if blended_z is not None:
                         summary["inner_bed_fallback_cells_updated"] += 1
 
                 if blended_z is None or not np.isfinite(blended_z):
                     continue
-                if inside_bank_polygon and context["tributary_bed_ramp"] is not None:
+                if (
+                    inside_bank_polygon
+                    and not inside_inner_bed
+                    and context["tributary_bed_ramp"] is not None
+                ):
                     ramped_z, ramp_weight = DTMChannelModifier._fresh_apply_tributary_bed_ramp(
                         z_value=blended_z,
                         cell_point=cell_point,
@@ -315,6 +321,13 @@ class JunctionInterpolationMixin:
             "raw_clipped_bank_features": int(len(raw_clipped_banks)) if raw_clipped_banks is not None else 0,
             "cells_updated": 0,
             "inner_bed_profiles": 0,
+            "inner_bed_weighting": "reach_cross_section_proximity_idw",
+            "junction_elevation": None,
+            "junction_elevation_blend_mode": None,
+            "junction_elevation_blend_radius_m": None,
+            "junction_elevation_min_weight": None,
+            "junction_elevation_section_count": 0,
+            "inner_bed_polygon_area_m2": None,
             "inner_bed_offset_m": float(inner_offset_m),
             "inner_bed_cells_updated": 0,
             "inner_bed_fallback_cells_updated": 0,
@@ -342,6 +355,7 @@ class JunctionInterpolationMixin:
             "inner_bed_polygon": None,
             "junction_zone": None,
             "tributary_bed_ramp": None,
+            "junction_elevation_blend": None,
         }
         if len(profiles) < 2 or not bank_lines:
             return context
@@ -359,10 +373,40 @@ class JunctionInterpolationMixin:
             bank_lines=bank_lines,
             offset_m=inner_offset_m,
         )
+        if inner_bed_polygon is not None and not inner_bed_polygon.is_empty:
+            summary["inner_bed_polygon_area_m2"] = round(
+                float(inner_bed_polygon.area),
+                4,
+            )
         bed_profiles = DTMChannelModifier._fresh_junction_bed_cross_section_profiles(
             profiles=profiles,
             inner_offset_m=inner_offset_m,
         )
+        junction_elevation_blend = DTMChannelModifier._fresh_junction_elevation_blend(
+            junction=junction,
+            junction_point=junction_point,
+            control_sections=control_sections,
+            bed_profiles=bed_profiles,
+            inner_bed_polygon=inner_bed_polygon,
+            cell_size=0.1,
+        )
+        if junction_elevation_blend is not None:
+            summary["junction_elevation"] = round(
+                float(junction_elevation_blend["elevation"]),
+                4,
+            )
+            summary["junction_elevation_blend_mode"] = junction_elevation_blend["mode"]
+            summary["junction_elevation_blend_radius_m"] = round(
+                float(junction_elevation_blend["blend_radius"]),
+                4,
+            )
+            summary["junction_elevation_min_weight"] = round(
+                float(junction_elevation_blend["min_weight"]),
+                4,
+            )
+            summary["junction_elevation_section_count"] = len(
+                junction_elevation_blend["sections"]
+            )
         summary["inner_bed_profiles"] = len(bed_profiles)
         tributary_bed_ramp = DTMChannelModifier._fresh_junction_tributary_bed_ramp(
             junction=junction,
@@ -423,6 +467,7 @@ class JunctionInterpolationMixin:
                 "inner_bed_polygon": inner_bed_polygon,
                 "junction_zone": junction_zone,
                 "tributary_bed_ramp": tributary_bed_ramp,
+                "junction_elevation_blend": junction_elevation_blend,
             }
         )
         return context
@@ -684,6 +729,7 @@ class JunctionInterpolationMixin:
             bed_profiles.append(
                 {
                     "section_key": section_key,
+                    "role": left.get("role"),
                     "channel": left.get("channel"),
                     "station": left.get("station"),
                     "line": LineString(
@@ -698,6 +744,162 @@ class JunctionInterpolationMixin:
                 }
             )
         return bed_profiles
+
+    @staticmethod
+    def _fresh_junction_elevation_blend(
+        junction,
+        junction_point,
+        control_sections,
+        bed_profiles,
+        inner_bed_polygon=None,
+        cell_size=0.1,
+        sample_count=81,
+    ):
+        section_lookup = {
+            section_key: (role, channel, section)
+            for section_key, role, channel, section in control_sections
+        }
+        entries = []
+        tolerance = max(float(cell_size), 1e-6)
+
+        for profile in bed_profiles:
+            section_key = profile.get("section_key")
+            if section_key not in section_lookup:
+                continue
+            line = profile.get("line")
+            if line is None or line.is_empty or line.length <= 1e-9:
+                continue
+
+            fractions = np.linspace(0.0, 1.0, max(int(sample_count), 3))
+            elevations = np.asarray(
+                [profile["z_from_fraction"](fraction) for fraction in fractions],
+                dtype=float,
+            )
+            elevations = elevations[np.isfinite(elevations)]
+            if elevations.size == 0:
+                continue
+
+            role, channel, section = section_lookup[section_key]
+            distance = DTMChannelModifier._fresh_control_section_distance_to_junction(
+                junction=junction,
+                junction_point=junction_point,
+                role=role,
+                channel=channel,
+                section=section,
+            )
+            if distance is None or not np.isfinite(distance):
+                distance = float(line.distance(junction_point))
+
+            weight_distance = max(float(distance), tolerance)
+            weight = 1.0 / (weight_distance * weight_distance)
+            entries.append(
+                {
+                    "section_key": section_key,
+                    "role": role,
+                    "channel": channel.get("name"),
+                    "distance": float(distance),
+                    "min_z": float(np.nanmin(elevations)),
+                    "weight": float(weight),
+                }
+            )
+
+        weight_sum = sum(entry["weight"] for entry in entries)
+        if weight_sum <= 0.0:
+            return None
+
+        junction_elevation = sum(
+            entry["weight"] * entry["min_z"] for entry in entries
+        ) / weight_sum
+        blend_radius = DTMChannelModifier._fresh_polygon_blend_radius(
+            point=junction_point,
+            polygon=inner_bed_polygon,
+            padding=tolerance,
+        )
+        mode = "inner_bed_polygon_extent"
+        if blend_radius is None or not np.isfinite(blend_radius):
+            positive_distances = [
+                entry["distance"]
+                for entry in entries
+                if np.isfinite(entry["distance"]) and entry["distance"] > tolerance
+            ]
+            if positive_distances:
+                blend_radius = max(positive_distances)
+            else:
+                blend_radius = max(
+                    [entry["distance"] for entry in entries if np.isfinite(entry["distance"])]
+                    or [tolerance]
+                )
+            mode = "control_section_extent_fallback"
+        blend_radius = max(float(blend_radius), tolerance)
+        min_weight = 0.05
+
+        return {
+            "point": junction_point,
+            "elevation": float(junction_elevation),
+            "blend_radius": float(blend_radius),
+            "min_weight": float(min_weight),
+            "mode": mode,
+            "sections": entries,
+        }
+
+    @staticmethod
+    def _fresh_polygon_blend_radius(point, polygon, padding=0.1):
+        if point is None or polygon is None or polygon.is_empty:
+            return None
+        geometries = getattr(polygon, "geoms", [polygon])
+        max_distance = 0.0
+        found_coordinate = False
+
+        for geometry in geometries:
+            exterior = getattr(geometry, "exterior", None)
+            if exterior is not None:
+                for x, y in exterior.coords:
+                    max_distance = max(max_distance, point.distance(Point(float(x), float(y))))
+                    found_coordinate = True
+            for interior in getattr(geometry, "interiors", []):
+                for x, y in interior.coords:
+                    max_distance = max(max_distance, point.distance(Point(float(x), float(y))))
+                    found_coordinate = True
+
+        if not found_coordinate:
+            try:
+                minx, miny, maxx, maxy = polygon.bounds
+                for x, y in ((minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)):
+                    max_distance = max(max_distance, point.distance(Point(float(x), float(y))))
+                    found_coordinate = True
+            except Exception:
+                return None
+
+        if not found_coordinate or max_distance <= 0.0:
+            return None
+        return float(max_distance + max(float(padding), 0.0))
+
+    @staticmethod
+    def _fresh_control_section_distance_to_junction(
+        junction,
+        junction_point,
+        role,
+        channel,
+        section,
+    ):
+        centerline = channel.get("processing_centerline") or channel["centerline"]
+        section_measure = section.get("centerline_measure")
+        if section_measure is None or not np.isfinite(section_measure):
+            section_measure = centerline.project(section["line"].centroid)
+        section_measure = float(section_measure)
+
+        if role == "tributary":
+            endpoint = junction.get("tributary_endpoint")
+            if endpoint == "start":
+                junction_measure = 0.0
+            elif endpoint == "end":
+                junction_measure = float(centerline.length)
+            else:
+                junction_measure = float(centerline.project(junction_point))
+        else:
+            junction_measure = float(centerline.project(junction_point))
+
+        return abs(section_measure - junction_measure)
 
     @staticmethod
     def _fresh_junction_inner_bed_polygon(junction_bank_polygon, bank_lines, offset_m=0.3):
@@ -725,24 +927,99 @@ class JunctionInterpolationMixin:
         return inner_polygon if inner_polygon is not None and not inner_polygon.is_empty else None
 
     @staticmethod
-    def _fresh_junction_inner_bed_elevation(cell_point, bed_profiles, cell_size=0.1):
-        weighted_z = 0.0
-        weight_sum = 0.0
+    def _fresh_junction_inner_bed_elevation(
+        cell_point,
+        bed_profiles,
+        cell_size=0.1,
+        junction_blend=None,
+    ):
+        candidates = DTMChannelModifier._fresh_junction_inner_bed_candidates(
+            cell_point=cell_point,
+            bed_profiles=bed_profiles,
+            cell_size=cell_size,
+        )
+        if not candidates:
+            return None
+
+        weight_sum = sum(candidate["weight"] for candidate in candidates)
+        if weight_sum <= 0.0:
+            return None
+        blended_z = float(
+            sum(candidate["weight"] * candidate["z"] for candidate in candidates)
+            / weight_sum
+        )
+        if junction_blend is None:
+            return blended_z
+        return DTMChannelModifier._fresh_apply_junction_elevation_blend(
+            z_value=blended_z,
+            cell_point=cell_point,
+            junction_blend=junction_blend,
+        )
+
+    @staticmethod
+    def _fresh_apply_junction_elevation_blend(z_value, cell_point, junction_blend):
+        junction_z = float(junction_blend["elevation"])
+        if not np.isfinite(junction_z):
+            return float(z_value)
+
+        blend_radius = max(float(junction_blend["blend_radius"]), 1e-6)
+        distance = float(cell_point.distance(junction_blend["point"]))
+        if distance >= blend_radius:
+            return float(z_value)
+
+        junction_weight = 1.0 - DTMChannelModifier._smoothstep(
+            np.clip(distance / blend_radius, 0.0, 1.0)
+        )
+        min_weight = float(np.clip(junction_blend.get("min_weight", 0.0), 0.0, 1.0))
+        junction_weight = max(junction_weight, min_weight)
+        junction_weight = float(np.clip(junction_weight, 0.0, 1.0))
+        if junction_weight <= 0.0:
+            return float(z_value)
+        return float(
+            (1.0 - junction_weight) * float(z_value)
+            + junction_weight * junction_z
+        )
+
+    @staticmethod
+    def _fresh_junction_inner_bed_candidates(cell_point, bed_profiles, cell_size=0.1):
+        candidates = []
+        tolerance = max(float(cell_size), 1e-6)
         for profile in bed_profiles:
             line = profile["line"]
             if line is None or line.is_empty or line.length <= 1e-9:
                 continue
-            measure = line.project(cell_point)
-            fraction = measure / line.length
-            z_value = profile["z_from_fraction"](fraction)
-            distance = max(cell_point.distance(line), float(cell_size), 1e-6)
-            weight = 1.0 / (distance * distance)
-            weighted_z += weight * z_value
-            weight_sum += weight
 
-        if weight_sum <= 0.0:
-            return None
-        return float(weighted_z / weight_sum)
+            start = Point(line.coords[0])
+            end = Point(line.coords[-1])
+            dx = float(end.x - start.x)
+            dy = float(end.y - start.y)
+            length = float(line.length)
+            if length <= 1e-9:
+                continue
+
+            raw_measure = (
+                (float(cell_point.x) - float(start.x)) * dx
+                + (float(cell_point.y) - float(start.y)) * dy
+            ) / length
+            fraction = float(np.clip(raw_measure / length, 0.0, 1.0))
+            z_value = float(profile["z_from_fraction"](fraction))
+            if not np.isfinite(z_value):
+                continue
+
+            distance = max(float(cell_point.distance(line)), tolerance)
+            weight = 1.0 / (distance * distance)
+            candidates.append(
+                {
+                    "profile": profile,
+                    "section_key": profile.get("section_key"),
+                    "channel": profile.get("channel"),
+                    "fraction": fraction,
+                    "z": z_value,
+                    "distance": distance,
+                    "weight": float(weight),
+                }
+            )
+        return candidates
 
     @staticmethod
     def _fresh_junction_tributary_bed_ramp(
